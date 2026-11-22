@@ -49,6 +49,10 @@ type Plugin interface {
 
 	// ConfigProvider exposes stowed harness MCP/config paths.
 	ConfigProvider() ConfigProvider
+
+	// DaemonWatcher returns an optional agent-native daemon/SSE event watcher.
+	// Returning nil indicates this agent does not support daemon event streaming.
+	DaemonWatcher() DaemonWatcher
 }
 
 // Spec declares the static metadata and naming rules for an agent plugin.
@@ -340,4 +344,79 @@ type MCPConfigTarget struct {
 // ConfigProvider exposes agent-specific configuration file locations.
 type ConfigProvider interface {
 	MCPConfigTargets() []MCPConfigTarget
+}
+
+// DaemonWatchTarget identifies a live tmux pane and optional explicit endpoint
+// for an agent-native daemon event watcher.
+type DaemonWatchTarget struct {
+	Session  string
+	PaneID   string
+	PanePID  int
+	CWD      string
+	Profile  string
+	Endpoint string
+}
+
+// DaemonUsage carries normalized token and cost accounting extracted from an
+// agent-native daemon event stream.
+type DaemonUsage struct {
+	InputTokens      int64   `json:"input_tokens,omitempty"`
+	OutputTokens     int64   `json:"output_tokens,omitempty"`
+	ReasoningTokens  int64   `json:"reasoning_tokens,omitempty"`
+	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
+	CostUSD          float64 `json:"cost_usd,omitempty"`
+}
+
+// DaemonChildEvent represents a subagent or child-session lifecycle update
+// emitted by an agent-native daemon stream.
+type DaemonChildEvent struct {
+	ID      string
+	Type    string
+	State   string
+	Outcome string
+	Text    string
+	SinceMs int64
+	TsMs    int64
+	EndedMs int64
+}
+
+// DaemonEvent is the normalized, provider-agnostic event emitted by a
+// DaemonWatcher into spacecore.
+type DaemonEvent struct {
+	Agent      string
+	App        string
+	Source     string
+	Event      string
+	RawEvent   string
+	State      string
+	Kind       string
+	Text       string
+	Title      string
+	Prompt     string
+	Tool       string
+	ToolInput  string
+	ToolOutput string
+	Reply      string
+	Model      string
+	SessionID  string
+	CWD        string
+	Profile    string
+	TsMs       int64
+	Usage      *DaemonUsage
+	Child      *DaemonChildEvent
+}
+
+// DaemonEventSink receives normalized events emitted by a DaemonWatcher.
+type DaemonEventSink func(DaemonEvent)
+
+// DaemonWatcher is an optional plugin capability for agents that expose a local
+// daemon/server event stream (such as OpenCode's HTTP SSE server).
+type DaemonWatcher interface {
+	// DiscoverEndpoint resolves the local daemon endpoint URL for target.
+	DiscoverEndpoint(ctx context.Context, target DaemonWatchTarget) (string, bool)
+
+	// Watch subscribes to the daemon event stream for target and emits
+	// normalized events until ctx is cancelled or the target process exits.
+	Watch(ctx context.Context, target DaemonWatchTarget, emit DaemonEventSink) error
 }

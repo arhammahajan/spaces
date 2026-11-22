@@ -34,6 +34,7 @@ func NewOpenCode() agent.Plugin {
 			{HarnessLabel: "opencode", RelPath: ".config/opencode/opencode.json"},
 		},
 		CustomTitleExtractor: agent.TitleExtractorFunc(extractOpencodeTitle),
+		CustomDaemonWatcher:  NewOpenCodeDaemonWatcher(),
 	}
 }
 

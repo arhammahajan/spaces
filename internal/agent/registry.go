@@ -433,6 +433,16 @@ func (r *Registry) AllMCPConfigTargets() []MCPConfigTarget {
 	return out
 }
 
+// DaemonWatcher returns the resolved runtime plugin's DaemonWatcher capability,
+// or nil when the agent is unknown or does not support daemon event streaming.
+func (r *Registry) DaemonWatcher(name string) DaemonWatcher {
+	p, ok := r.ResolveRuntime(name)
+	if !ok {
+		return nil
+	}
+	return p.DaemonWatcher()
+}
+
 // DetectProcess inspects proc against all registered runtime plugins and
 // returns the matching plugin's canonical ID (or "" if none matches).
 func (r *Registry) DetectProcess(proc ProcessInfo) string {
