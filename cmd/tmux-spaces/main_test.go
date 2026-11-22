@@ -3,9 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -138,7 +138,8 @@ func TestTUIBackendLoadSpacesAndLaunchAgent(t *testing.T) {
 		t.Fatalf("raw launch args = %v", launched[0])
 	}
 	if !strings.Contains(strings.Join(launched[1], " "), "__shim --profile codex-work codex") ||
-		!strings.Contains(strings.Join(launched[1], " "), "__shim-profile codex/codex-work") {
+		!strings.Contains(strings.Join(launched[1], " "), "codex profile codex-work") ||
+		strings.Contains(strings.Join(launched[1], " "), "__shim-profile") {
 		t.Fatalf("profile launch args = %v", launched[1])
 	}
 }
@@ -221,10 +222,49 @@ func TestCLIThreeLayerStatusAndHarnessResolution(t *testing.T) {
 	}
 }
 
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "tmux-spaces-cmd-test-*")
+	if err == nil {
+		defer os.RemoveAll(tmp)
+		model.ConversationHomeDirFn = func() string { return tmp }
+		model.ConversationOverlayPathFn = func() string { return filepath.Join(tmp, "conversations-overlay.json") }
+		model.ConversationCachePathFn = func() string { return filepath.Join(tmp, "conversations-cache.json") }
+		model.ResetConversationStoreCache()
+	}
+	os.Exit(m.Run())
+}
+
 func TestMultipleAntigravityPanesResolveDistinctTitles(t *testing.T) {
+	tmpHome := t.TempDir()
+	agyDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(agyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agyDir, "conv-alpha.json"), []byte(
+		`{"id":"conv-alpha","title":"Alpha Conversation","cwd":"/repo","updated_at":"2026-11-22T10:00:00Z","messages":[{"role":"user","content":"alpha"}]}`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agyDir, "conv-beta.json"), []byte(
+		`{"id":"conv-beta","title":"Beta Conversation","cwd":"/repo","updated_at":"2026-11-22T11:00:00Z","messages":[{"role":"user","content":"beta"}]}`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origHome := model.ConversationHomeDirFn
+	origOverlay := model.ConversationOverlayPathFn
+	origCache := model.ConversationCachePathFn
 	origExec := model.ExecFn
 	origProcAgy := resurrect.ProcAntigravitySessionFunc
+	model.ConversationHomeDirFn = func() string { return tmpHome }
+	model.ConversationOverlayPathFn = func() string { return filepath.Join(tmpHome, "overlay.json") }
+	model.ConversationCachePathFn = func() string { return filepath.Join(tmpHome, "cache.json") }
+	model.ResetConversationStoreCache()
 	defer func() {
+		model.ConversationHomeDirFn = origHome
+		model.ConversationOverlayPathFn = origOverlay
+		model.ConversationCachePathFn = origCache
+		model.ResetConversationStoreCache()
 		model.ExecFn = origExec
 		resurrect.ProcAntigravitySessionFunc = origProcAgy
 	}()
@@ -240,25 +280,7 @@ func TestMultipleAntigravityPanesResolveDistinctTitles(t *testing.T) {
 		}
 	}
 
-	var gotQueries []model.TitleQuery
 	model.ExecFn = func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if len(args) >= 2 && args[0] == "__space-hooks" && args[1] == "--titles" {
-			if err := json.Unmarshal([]byte(args[2]), &gotQueries); err != nil {
-				return nil, err
-			}
-			titles := map[string]string{}
-			for _, q := range gotQueries {
-				switch q.SessionID {
-				case "conv-alpha":
-					titles[q.Key] = "Alpha Conversation"
-				case "conv-beta":
-					titles[q.Key] = "Beta Conversation"
-				case "":
-					titles[q.Key] = "Fallback Newest"
-				}
-			}
-			return json.Marshal(map[string]any{"ok": true, "titles": titles})
-		}
 		return []byte(`{"ok":true,"version":1,"now_ms":0,"panes":{}}`), nil
 	}
 
@@ -306,9 +328,6 @@ func TestMultipleAntigravityPanesResolveDistinctTitles(t *testing.T) {
 	}
 	if got := spaces[0].Panes[2].ConversationTitle; got != "" {
 		t.Errorf("pane %%3 ConversationTitle = %q, want empty (no shared fallback when multiple agy panes in same CWD)", got)
-	}
-	if len(gotQueries) != 2 {
-		t.Fatalf("expected 2 title queries (skipping unresolved %%3), got %d: %+v", len(gotQueries), gotQueries)
 	}
 
 	// Switching conversation in pane %1 within screenCaptureInterval must invalidate cache.
@@ -394,7 +413,7 @@ func TestTUIBackendLoadOutcomesAndOpenOutcomeInNewTab(t *testing.T) {
 	}
 
 	// Open outcome whose space ("beta") is running -> opens new window in beta
-	// running `spaces __resume-wrap <b64(harness claude profile work)> sess-42`
+	// running `tmux-spaces __shim --profile work claude-code /usr/local/bin/harness claude profile work --resume sess-42`
 	// and switches client to beta.
 	if err := b.OpenOutcome(context.Background(), outcomes[0]); err != nil {
 		t.Fatalf("OpenOutcome error: %v", err)
@@ -403,11 +422,14 @@ func TestTUIBackendLoadOutcomesAndOpenOutcomeInNewTab(t *testing.T) {
 		t.Fatalf("expected 1 new-window call, got %d", len(newWindows))
 	}
 	joined := strings.Join(newWindows[0], " ")
-	wantB64 := base64.StdEncoding.EncodeToString([]byte("/usr/local/bin/harness claude profile work"))
-	for _, want := range []string{"-t beta:", "-c /repo/beta", "-n work", "/bin/sh -c", "__resume-wrap", wantB64, "sess-42", "status clear", `exec "${SHELL:-/bin/sh}"`} {
+	wantCmd := "/usr/local/bin/tmux-spaces __shim --profile work claude-code /usr/local/bin/harness claude profile work --resume sess-42"
+	for _, want := range []string{"-t beta:", "-c /repo/beta", "-n work", "/bin/sh -c", wantCmd, "status clear", `exec "${SHELL:-/bin/sh}"`} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("new-window args missing %q: %v", want, newWindows[0])
 		}
+	}
+	if strings.Contains(joined, "__resume-wrap") {
+		t.Errorf("new-window args should not use __resume-wrap: %v", newWindows[0])
 	}
 	if len(switchedTo) != 1 || switchedTo[0] != "beta" {
 		t.Errorf("switchedTo = %v, want [beta]", switchedTo)
@@ -436,8 +458,8 @@ func TestTUIBackendLoadOutcomesAndOpenOutcomeInNewTab(t *testing.T) {
 		t.Fatalf("expected 2 new-window calls, got %d", len(newWindows))
 	}
 	joined2 := strings.Join(newWindows[1], " ")
-	wantB64Default := base64.StdEncoding.EncodeToString([]byte("/usr/local/bin/harness codex profile default"))
-	if !strings.Contains(joined2, "-t alpha:") || !strings.Contains(joined2, "-n codex") || !strings.Contains(joined2, wantB64Default) || !strings.Contains(joined2, "sess-99") || !strings.Contains(joined2, "SPACES_PRIOR_OUTCOME=failed") {
+	wantCmdDefault := "/usr/local/bin/tmux-spaces __shim codex /usr/local/bin/harness codex profile default resume sess-99"
+	if !strings.Contains(joined2, "-t alpha:") || !strings.Contains(joined2, "-n codex") || !strings.Contains(joined2, wantCmdDefault) || !strings.Contains(joined2, "SPACES_PRIOR_OUTCOME=failed") || strings.Contains(joined2, "__resume-wrap") {
 		t.Errorf("fallback new-window args = %v", newWindows[1])
 	}
 	if strings.Contains(joined, "SPACES_PRIOR_OUTCOME=failed") {

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/arhammahajan/spaces/internal/agent/plugins"
 	"github.com/arhammahajan/spaces/internal/tmux"
 )
 
@@ -700,7 +701,7 @@ func TestAntigravityClearsStaleWorkingHooksWhenVisiblyIdle(t *testing.T) {
 	// viewport is visibly idle -> transitions to Done instead of staying Working for 2m.
 	arb3 := NewArbitrator()
 	hooksMissedStop := &HookSnapshot{
-		OK: true, Version: 1, NowMs: t0 + antigravityHookIdleGraceMs + 1_000,
+		OK: true, Version: 1, NowMs: t0 + plugins.AntigravityHookIdleGraceMs + 1_000,
 		Panes: map[string]map[string]HookSummary{
 			"dots": {
 				"1": {
@@ -716,7 +717,7 @@ func TestAntigravityClearsStaleWorkingHooksWhenVisiblyIdle(t *testing.T) {
 	}
 	sp3 := arbSpace("dots", "antigravity", StatusWorking, false)
 	sp3.Panes[0].Source = "osc7501"
-	got3 := applyOne(t, arb3, sp3, hooksMissedStop, idleReading, t0+antigravityHookIdleGraceMs+1_000)
+	got3 := applyOne(t, arb3, sp3, hooksMissedStop, idleReading, t0+plugins.AntigravityHookIdleGraceMs+1_000)
 	if got3.Panes[0].Status != StatusDone {
 		t.Fatalf("antigravity missed Stop hook with visibly idle viewport: got %v, want StatusDone", got3.Panes[0].Status)
 	}

@@ -1,10 +1,52 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/arhammahajan/spaces/internal/agent"
+	"github.com/arhammahajan/spaces/internal/osc"
 )
+
+// StripResumeArgs returns a copy of cmd with any prior resume flags or
+// subcommands for app stripped (preserving cmd[0]).
+func StripResumeArgs(app string, cmd []string) []string {
+	if len(cmd) == 0 {
+		return nil
+	}
+	var resumeFlag, resumeSubcmd string
+	if p, ok := agent.DefaultRegistry().ResolveRuntime(app); ok {
+		spec := p.Spec()
+		resumeFlag = strings.TrimSpace(spec.ResumeFlag)
+		resumeSubcmd = strings.TrimSpace(spec.ResumeSubcommand)
+	}
+	out := make([]string, 0, len(cmd))
+	out = append(out, cmd[0])
+	for i := 1; i < len(cmd); i++ {
+		arg := cmd[i]
+		if resumeFlag != "" {
+			if arg == resumeFlag {
+				if i+1 < len(cmd) && !strings.HasPrefix(cmd[i+1], "-") {
+					i++
+				}
+				continue
+			}
+			if strings.HasPrefix(arg, resumeFlag+"=") {
+				continue
+			}
+		}
+		if resumeSubcmd != "" && arg == resumeSubcmd {
+			if i+1 < len(cmd) && !strings.HasPrefix(cmd[i+1], "-") {
+				i++
+			}
+			continue
+		}
+		out = append(out, arg)
+	}
+	return out
+}
 
 // cmdShim is the pane-side agent wrapper: it primes @spaces_state through
 // working/idle on start, runs the child, then records done or failed on
@@ -53,9 +95,22 @@ func cmdShim(args []string, env Env) int {
 		env.errf("usage: tmux-spaces __shim [--hold] [--profile P] <app> <bin> [args...]\n")
 		return ExitUsage
 	}
-	app := canonicalApp(pos[0])
+	app := agent.DefaultRegistry().CLIDisplayApp(pos[0])
 	bin := pos[1]
 	childArgs := pos[2:]
+
+	oscEnabled := func() bool {
+		inZellij := env.Getenv("ZELLIJ_SESSION_NAME") != ""
+		inTmux := env.Getenv("TMUX") != "" && env.Getenv("TMUX_PANE") != ""
+		if !inZellij && !inTmux {
+			return false
+		}
+		switch env.Getenv("HARNESS_ATTN") {
+		case "0", "false":
+			return false
+		}
+		return osc.TtyWritable()
+	}()
 
 	setProfile := func(val string) {
 		pane := env.Getenv("TMUX_PANE")
@@ -86,11 +141,22 @@ func cmdShim(args []string, env Env) int {
 	}
 
 	// Prime the pane so it stays visible while idle, then run the child.
+	if pane := env.Getenv("TMUX_PANE"); pane != "" && env.Client != nil {
+		baseCmd := StripResumeArgs(app, append([]string{bin}, childArgs...))
+		if len(baseCmd) > 0 {
+			if raw, err := json.Marshal(baseCmd); err == nil {
+				_ = env.Client.SetPaneOption(pane, "@spaces_launch_cmd", string(raw))
+			}
+		}
+	}
 	if profile != "" {
 		setProfile(profile)
 	}
 	setState("working", "")
 	setState("idle", "")
+	if oscEnabled {
+		osc.BeginWithProfile(app, profile)
+	}
 	code := env.RunChild(bin, childArgs)
 	outcome := "done"
 	msg := "finished"
@@ -100,6 +166,9 @@ func cmdShim(args []string, env Env) int {
 		outcome = "failed"
 		msg = fmt.Sprintf("exited with status %d", code)
 		setState("failed", msg)
+	}
+	if oscEnabled {
+		osc.FinishWithProfile(app, profile, code)
 	}
 	if env.RecordOutcome != nil {
 		cwd := env.Getenv("PWD")

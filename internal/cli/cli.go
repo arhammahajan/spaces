@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arhammahajan/spaces/internal/agent"
+	_ "github.com/arhammahajan/spaces/internal/agent/plugins"
 	"github.com/arhammahajan/spaces/internal/tmux"
 )
 
@@ -265,20 +267,7 @@ func bucketPriority(bucket string) int {
 
 // canonicalApp mirrors the harness canonical app labels.
 func canonicalApp(app string) string {
-	switch app {
-	case "claude":
-		return "claude-code"
-	case "kimi-cli":
-		return "kimi"
-	case "dsh", "dsh-tui":
-		return "deepseek"
-	case "cursor":
-		return "cursor-agent"
-	case "agy":
-		return "antigravity"
-	default:
-		return app
-	}
+	return agent.DefaultRegistry().CLIDisplayApp(app)
 }
 
 // errHelp is returned by parseFlags when -h/--help is present.
@@ -392,6 +381,8 @@ func Run(args []string, env Env) int {
 		return cmdOSCWatch(rest, env)
 	case "doctor":
 		return cmdDoctor(rest, env)
+	case "shell-init":
+		return cmdShellInit(rest, env)
 	case "popup":
 		return cmdPopup(rest, env)
 	case "agents":
@@ -440,6 +431,7 @@ usage: tmux-spaces <command> [args]
   agent NAME [flags] [-- args...]  open an agent in a new window
   __shim [--hold] APP BIN [args]   pane-side agent wrapper
   doctor [--json]                  check tmux/server/hooks health
+  shell-init <zsh|bash|fish>       print shell exit-status hook script
   popup [--new]                    open the Navigator TUI
   tabs|tab [--new] [--session S]   inspect & switch tabs in current workspace
   worktrees|wt [list|new|remove|prune]
@@ -481,6 +473,8 @@ func cmdHelp(args []string, env Env) int {
 		env.outf("usage: tmux-spaces __shim [--hold] <app> <bin> [args...]\n")
 	case "doctor":
 		env.outf("usage: tmux-spaces doctor [--json]\n")
+	case "shell-init":
+		env.outf("usage: tmux-spaces shell-init <zsh|bash|fish>\n")
 	case "popup":
 		env.outf("usage: tmux-spaces popup [--new] [--new-tab] [--rename-window] [--rename-space] [--query Q] [--target SPACE]\n")
 	case "worktrees", "worktree", "wt":

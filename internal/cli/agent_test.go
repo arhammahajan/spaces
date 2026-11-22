@@ -80,7 +80,7 @@ func TestAgentProfile(t *testing.T) {
 	if w.Session != "s2" || w.Label != "codex_router" {
 		t.Errorf("window = %+v", w)
 	}
-	want := "tmux-spaces __shim --profile codex_router codex harness spaces __shim-profile codex/codex_router --extra 1"
+	want := "tmux-spaces __shim --profile codex_router codex harness codex profile codex_router --extra 1"
 	if strings.Join(w.Cmd, " ") != want {
 		t.Errorf("cmd = %q want %q", strings.Join(w.Cmd, " "), want)
 	}

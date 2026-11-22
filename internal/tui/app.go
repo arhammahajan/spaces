@@ -181,9 +181,14 @@ type Model struct {
 	convIncludeArchived bool
 	convSearchSeq       int
 	convSearchInFlight  bool
-	convSearchHits      map[string]model.ConversationSearchHit
-	convSearchHitOrder  []model.ConversationSearchHit
-	convLastSearchQuery string
+	convSearchHits           map[string]model.ConversationSearchHit
+	convSearchHitOrder       []model.ConversationSearchHit
+	convLastSearchQuery      string
+	convPickPending          *model.ConversationEntry
+	convPickForceNewTab      bool
+	convPickProfiles         []model.HarnessProfile
+	convPickCursor           int
+	convPickWaitingHarnesses bool
 
 	sharedSnap         model.SharedSnapshot
 	sharedLoading      bool
@@ -254,6 +259,7 @@ func New(backend Backend, opts Options) Model {
 	if m.mode == ModeConversations {
 		m.convLoading = true
 		m.convRefreshing = true
+		m.agentsLoading = true
 		if _, tokens := model.ParseConversationQuery(opts.InitialQuery); len(tokens) > 0 {
 			m.convSearchSeq = 1
 		}
@@ -282,6 +288,7 @@ func (m Model) Init() tea.Cmd {
 			m.loadConversationsCmd(false, m.convIncludeArchived),
 			m.loadConversationsCmd(true, m.convIncludeArchived),
 			m.loadSpacesCmd(),
+			m.loadHarnessesCmd(),
 		}
 		if m.convSearchSeq > 0 {
 			cmds = append(cmds, convDebounceCmd(m.convSearchSeq))
@@ -588,16 +595,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case harnessesMsg:
 		m.agentsLoading = false
 		if msg.err != "" {
-			m.toast = "Could not list harnesses: " + msg.err
+			if m.mode != ModeConversations {
+				m.toast = "Could not list harnesses: " + msg.err
+			}
 			m.harnesses = nil
 		} else {
 			m.harnesses = msg.entries
-			if len(m.harnesses) == 0 {
+			if len(m.harnesses) == 0 && m.mode != ModeConversations {
 				m.toast = "No working harnesses found."
 			}
 		}
 		m.harnessCursor = 0
 		m.profileOf = nil
+		if m.mode == ModeConversations && m.convPickWaitingHarnesses {
+			return m.finishConvPickAfterHarnesses()
+		}
 		return m, nil
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
@@ -1431,8 +1443,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.loadHarnessesCmd()
 		}
 		if m.mode == ModeConversations {
+			if m.convPickPending != nil {
+				return m, nil
+			}
 			m.convRefreshing = true
-			return m, tea.Batch(m.loadConversationsCmd(true, m.convIncludeArchived), m.nextLoadSpacesCmd())
+			return m, tea.Batch(m.loadConversationsCmd(true, m.convIncludeArchived), m.nextLoadSpacesCmd(), m.loadHarnessesCmd())
 		}
 		if m.mode == ModeShared {
 			m.sharedLoading = true
@@ -2293,6 +2308,10 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.mode == ModeConversations {
+			if m.convPickPending != nil {
+				m.moveConvPickCursor(-1)
+				return m, nil
+			}
 			m.moveConvSelection(-1)
 			return m, nil
 		}
@@ -2333,6 +2352,10 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if m.mode == ModeConversations {
+			if m.convPickPending != nil {
+				m.moveConvPickCursor(1)
+				return m, nil
+			}
 			m.moveConvSelection(1)
 			return m, nil
 		}

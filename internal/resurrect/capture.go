@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arhammahajan/spaces/internal/agent"
+	"github.com/arhammahajan/spaces/internal/agent/plugins"
 	"github.com/arhammahajan/spaces/internal/model"
 	"github.com/arhammahajan/spaces/internal/tmux"
 )
@@ -19,51 +21,41 @@ var ProcCommandFunc = readChildCmdline
 
 // ProcAntigravitySessionFunc inspects open file descriptors of a pane's
 // descendant processes to find an active Antigravity conversation ID.
-// Tests may stub it; production reads /proc/<pid>/fd on Linux.
-var ProcAntigravitySessionFunc = readChildAntigravitySession
+// Tests may stub it; production delegates to the Antigravity plugin's
+// SessionResolver.
+var ProcAntigravitySessionFunc = defaultProcAntigravitySession
 
-// knownAgents is the canonical set of AI coding harnesses eligible for
-// conversation resurrection via spaceresume.
-var knownAgents = map[string]string{
-	"claude":       "claude",
-	"claude-code":  "claude",
-	"codex":        "codex",
-	"opencode":     "opencode",
-	"pi":           "pi",
-	"qwen":         "qwen",
-	"copilot":      "copilot",
-	"kimi":         "kimi",
-	"kimi-cli":     "kimi",
-	"kimi-code":    "kimi",
-	"mcode":        "mcode",
-	"muse":         "muse",
-	"vibe":         "vibe",
-	"vibe-acp":     "vibe",
-	"gemini":       "gemini",
-	"cline":        "cline",
-	"cursor":       "cursor-agent",
-	"cursor-agent": "cursor-agent",
-	"grok":         "grok",
-	"crush":        "crush",
-	"omp":          "omp",
-	"kilo":         "kilo",
-	"antigravity":  "antigravity",
-	"agy":          "antigravity",
-	"deepseek":     "deepseek",
-	"dsh":          "deepseek",
-	"dsh-tui":      "deepseek",
-	"fx":           "fx",
-	"fx-router":    "fx",
+func defaultProcAntigravitySession(pid int) string {
+	if p, ok := agent.DefaultRegistry().ResolveRuntime("antigravity"); ok {
+		return p.SessionResolver().DiscoverLiveSessionID(pid)
+	}
+	if plugins.AntigravityProcSessionFunc != nil {
+		return plugins.AntigravityProcSessionFunc(pid)
+	}
+	return ""
+}
+
+// DiscoverLiveSessionID inspects a live process to discover the active
+// conversation/session ID for agentName via its plugin's SessionResolver,
+// while honoring ProcAntigravitySessionFunc when stubbed in tests.
+func DiscoverLiveSessionID(agentName string, pid int) string {
+	if agentName == "" || pid <= 0 {
+		return ""
+	}
+	plugin, ok := agent.DefaultRegistry().ResolveRuntime(agentName)
+	if !ok {
+		return ""
+	}
+	if plugin.Spec().ID == "antigravity" && ProcAntigravitySessionFunc != nil {
+		return strings.TrimSpace(ProcAntigravitySessionFunc(pid))
+	}
+	return strings.TrimSpace(plugin.SessionResolver().DiscoverLiveSessionID(pid))
 }
 
 // CanonicalAgent returns the canonical AI agent id if name identifies a known
 // coding harness, or "" otherwise.
 func CanonicalAgent(name string) string {
-	n := strings.ToLower(strings.TrimSpace(filepath.Base(name)))
-	if canon, ok := knownAgents[n]; ok {
-		return canon
-	}
-	return ""
+	return agent.DefaultRegistry().CanonicalID(name)
 }
 
 // CaptureSpaces converts a live tmux ServerSnapshot plus optional hook store
@@ -241,15 +233,15 @@ func capturePane(p tmux.Pane, hook *model.HookSummary) PaneSnapshot {
 	}
 
 	// Capture conversation session ID from @spaces_resume_session, hook store,
-	// explicit CLI resume flags, or (for Antigravity) open process FDs.
+	// explicit CLI resume flags, or live process discovery via the agent plugin.
 	if p.ResumeSession != "" {
 		ps.SessionID = p.ResumeSession
 	} else if hook != nil && hook.SessionID != "" {
 		ps.SessionID = hook.SessionID
 	} else if sid := extractSessionIDFromCommand(ps.Agent, ps.FullCommand); sid != "" {
 		ps.SessionID = sid
-	} else if ps.Agent == "antigravity" && ProcAntigravitySessionFunc != nil && p.PID > 0 {
-		ps.SessionID = ProcAntigravitySessionFunc(p.PID)
+	} else if sid := DiscoverLiveSessionID(ps.Agent, p.PID); sid != "" {
+		ps.SessionID = sid
 	}
 
 	if ps.App == "" && ps.Agent != "" {
@@ -258,131 +250,14 @@ func capturePane(p tmux.Pane, hook *model.HookSummary) PaneSnapshot {
 	return ps
 }
 
-func extractSessionIDFromCommand(agent string, argv []string) string {
-	if agent == "" || len(argv) == 0 {
+func extractSessionIDFromCommand(agentName string, argv []string) string {
+	if agentName == "" || len(argv) == 0 {
 		return ""
 	}
-	valueFlags := []string{"--conversation", "--resume", "--session", "--id"}
-	for i := 0; i < len(argv); i++ {
-		tok := argv[i]
-		for _, flag := range valueFlags {
-			if tok == flag && i+1 < len(argv) {
-				v := strings.TrimSpace(argv[i+1])
-				if v != "" && !strings.HasPrefix(v, "-") && v != "latest" {
-					return v
-				}
-			}
-			if strings.HasPrefix(tok, flag+"=") {
-				v := strings.TrimSpace(strings.TrimPrefix(tok, flag+"="))
-				if v != "" && v != "latest" {
-					return v
-				}
-			}
-		}
-		if (agent == "codex" || agent == "muse") && tok == "resume" && i+1 < len(argv) {
-			v := strings.TrimSpace(argv[i+1])
-			if v != "" && !strings.HasPrefix(v, "-") && v != "--last" {
-				return v
-			}
-		}
+	if p, ok := agent.DefaultRegistry().ResolveRuntime(agentName); ok {
+		return p.SessionResolver().ExtractSessionIDFromArgs(argv)
 	}
-	return ""
-}
-
-// readChildAntigravitySession walks the pane's descendant processes on Linux
-// and inspects /proc/<pid>/fd/* for open Antigravity conversation DB or
-// presence lock files (`.../antigravity-cli/conversations/<id>.db` or
-// `.../antigravity-cli/presence/<id>.lock`).
-func readChildAntigravitySession(pid int) string {
-	if pid <= 1 {
-		return ""
-	}
-	visited := map[int]bool{pid: true}
-	frontier := []int{pid}
-	var lockFallback string
-	for depth := 0; depth < 6 && len(frontier) > 0; depth++ {
-		var next []int
-		for _, cur := range frontier {
-			if id, isConv := antigravitySessionFromFDs(cur); id != "" {
-				if isConv {
-					return id
-				}
-				if lockFallback == "" {
-					lockFallback = id
-				}
-			}
-			for _, child := range allChildPIDs(cur) {
-				if !visited[child] {
-					visited[child] = true
-					next = append(next, child)
-				}
-			}
-		}
-		frontier = next
-	}
-	return lockFallback
-}
-
-func antigravitySessionFromFDs(pid int) (string, bool) {
-	fdDir := fmt.Sprintf("/proc/%d/fd", pid)
-	entries, err := os.ReadDir(fdDir)
-	if err != nil {
-		return "", false
-	}
-	var lockID string
-	for _, e := range entries {
-		target, err := os.Readlink(filepath.Join(fdDir, e.Name()))
-		if err != nil || target == "" {
-			continue
-		}
-		if idx := strings.Index(target, "/antigravity-cli/conversations/"); idx >= 0 {
-			rest := target[idx+len("/antigravity-cli/conversations/"):]
-			for _, suf := range []string{".db-wal", ".db-shm", ".db"} {
-				if strings.HasSuffix(rest, suf) {
-					id := strings.TrimSuffix(rest, suf)
-					if id != "" && !strings.Contains(id, "/") {
-						return id, true
-					}
-				}
-			}
-		}
-		if lockID == "" {
-			if idx := strings.Index(target, "/antigravity-cli/presence/"); idx >= 0 {
-				rest := target[idx+len("/antigravity-cli/presence/"):]
-				if strings.HasSuffix(rest, ".lock") {
-					id := strings.TrimSuffix(rest, ".lock")
-					if id != "" && !strings.Contains(id, "/") {
-						lockID = id
-					}
-				}
-			}
-		}
-	}
-	if lockID != "" {
-		return lockID, false
-	}
-	return "", false
-}
-
-func allChildPIDs(pid int) []int {
-	pattern := fmt.Sprintf("/proc/%d/task/*/children", pid)
-	matches, err := filepath.Glob(pattern)
-	if err != nil {
-		return nil
-	}
-	var out []int
-	for _, path := range matches {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		for _, f := range strings.Fields(string(data)) {
-			if n, err := strconv.Atoi(f); err == nil && n > 1 {
-				out = append(out, n)
-			}
-		}
-	}
-	return out
+	return agent.ExtractSessionIDFromArgs(argv, false)
 }
 
 // readChildCmdline walks /proc/<pid>/task/*/children to find the deepest

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/arhammahajan/spaces/internal/agent"
 )
 
 // procIsLive reports whether /proc appears mounted and rootPID is an existing
@@ -75,7 +77,7 @@ func procChildren(pid int) []int {
 func agentFromProc(pid int) string {
 	base := filepath.Join("/proc", strconv.Itoa(pid))
 	if comm, err := os.ReadFile(filepath.Join(base, "comm")); err == nil {
-		if n := NormalizeAgentCommand(strings.TrimSpace(string(comm))); knownAgents[n] {
+		if n := NormalizeAgentCommand(strings.TrimSpace(string(comm))); IsKnownAgent(n) {
 			return n
 		}
 	}
@@ -92,7 +94,7 @@ func agentFromProc(pid int) string {
 		if arg == "" || strings.HasPrefix(arg, "-") {
 			continue
 		}
-		if n := NormalizeAgentCommand(arg); knownAgents[n] {
+		if n := NormalizeAgentCommand(arg); IsKnownAgent(n) {
 			return n
 		}
 		// Also check parent directory segments for versioned binaries like
@@ -102,7 +104,7 @@ func agentFromProc(pid int) string {
 				if seg == "" {
 					continue
 				}
-				if n := NormalizeAgentCommand(seg); knownAgents[n] {
+				if n := NormalizeAgentCommand(seg); IsKnownAgent(n) {
 					return n
 				}
 			}
@@ -110,6 +112,81 @@ func agentFromProc(pid int) string {
 		checked++
 		if checked >= 4 {
 			break
+		}
+	}
+	return ""
+}
+
+// detectDescendantProfile inspects rootPID and its descendant processes (up to
+// 4 levels deep) via /proc/<pid>/cmdline and /proc/<pid>/environ to recover
+// the active harness profile name when @spaces_profile is unset.
+func detectDescendantProfile(rootPID int) string {
+	if rootPID <= 1 {
+		return ""
+	}
+	if prof := profileFromProc(rootPID); prof != "" {
+		return prof
+	}
+	visited := map[int]bool{rootPID: true}
+	frontier := []int{rootPID}
+	const maxNodes = 64
+	seen := 1
+	for depth := 0; depth < 4 && len(frontier) > 0 && seen < maxNodes; depth++ {
+		var next []int
+		for _, pid := range frontier {
+			for _, child := range procChildren(pid) {
+				if child <= 1 || visited[child] {
+					continue
+				}
+				visited[child] = true
+				seen++
+				if prof := profileFromProc(child); prof != "" {
+					return prof
+				}
+				if seen >= maxNodes {
+					break
+				}
+				next = append(next, child)
+			}
+			if seen >= maxNodes {
+				break
+			}
+		}
+		frontier = next
+	}
+	return ""
+}
+
+func profileFromProc(pid int) string {
+	base := filepath.Join("/proc", strconv.Itoa(pid))
+	cmdline, _ := os.ReadFile(filepath.Join(base, "cmdline"))
+	environ, _ := os.ReadFile(filepath.Join(base, "environ"))
+	return extractProfileFromProcData(cmdline, environ)
+}
+
+// extractProfileFromProcData parses a NUL-delimited /proc/<pid>/cmdline and
+// /proc/<pid>/environ pair, returning a harness profile from argv first, then
+// HARNESS_PROFILE from the environment.
+func extractProfileFromProcData(cmdline, environ []byte) string {
+	if len(cmdline) > 0 {
+		rawParts := bytes.Split(cmdline, []byte{0})
+		argv := make([]string, 0, len(rawParts))
+		for _, p := range rawParts {
+			if s := strings.TrimSpace(string(p)); s != "" {
+				argv = append(argv, s)
+			}
+		}
+		if prof := strings.TrimSpace(agent.HarnessProfileFromArgv(argv)); prof != "" {
+			return prof
+		}
+	}
+	if len(environ) > 0 {
+		for _, entry := range bytes.Split(environ, []byte{0}) {
+			if bytes.HasPrefix(entry, []byte("HARNESS_PROFILE=")) {
+				if prof := strings.TrimSpace(string(entry[len("HARNESS_PROFILE="):])); prof != "" {
+					return prof
+				}
+			}
 		}
 	}
 	return ""

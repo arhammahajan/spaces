@@ -7,6 +7,11 @@ import (
 
 // ExtractTitle parses a captured pane viewport for agent-specific header,
 // tab-bar, status-line, or prompt lines showing the conversation/session title.
+//
+// This function is the low-level fallback used when calling screen.Detect
+// directly. Callers with access to internal/agent should prefer
+// Registry.ExtractTitle / plugin TitleExtractor, which is the source of truth
+// for per-agent title extraction.
 func ExtractTitle(app, viewport string) string {
 	if strings.TrimSpace(viewport) == "" {
 		return ""
@@ -35,6 +40,57 @@ func ExtractTitle(app, viewport string) string {
 		}
 	}
 	return extractGenericTitle(viewport)
+}
+
+// CleanViewportTitle normalizes a candidate title extracted from a viewport,
+// filtering out generic placeholders and bare slash commands.
+func CleanViewportTitle(s string) string {
+	return cleanViewportTitle(s)
+}
+
+// IsPathSegment reports whether s looks like a filesystem path segment.
+func IsPathSegment(s string) bool {
+	return isPathSegment(s)
+}
+
+// IsEffortSegment reports whether s is a reasoning-effort token in status footers.
+func IsEffortSegment(s string) bool {
+	return isEffortSegment(s)
+}
+
+// BottomNonEmptyLines returns the last n non-empty lines of viewport joined by "\n".
+func BottomNonEmptyLines(viewport string, n int) string {
+	return bottomNonEmptyLines(viewport, n)
+}
+
+// TopNonEmptyLines returns the first n non-empty lines of viewport joined by "\n".
+func TopNonEmptyLines(viewport string, n int) string {
+	return topNonEmptyLines(viewport, n)
+}
+
+// SplitLines splits s into individual lines (preserving leading whitespace).
+func SplitLines(s string) []string {
+	tls := splitTextLines(s)
+	out := make([]string, len(tls))
+	for i, tl := range tls {
+		out[i] = tl.text
+	}
+	return out
+}
+
+// ExtractGenericTitle tries common prompt markers (❯, ›, >) to extract a title.
+func ExtractGenericTitle(viewport string) string {
+	return extractGenericTitle(viewport)
+}
+
+// ExtractPromptMarkerLine extracts the latest non-composer prompt line starting with marker.
+func ExtractPromptMarkerLine(viewport, marker string) string {
+	return extractPromptMarkerLine(viewport, marker)
+}
+
+// ExtractMultilinePrompt extracts a prompt starting with marker and up to 3 indented continuation lines.
+func ExtractMultilinePrompt(viewport, marker string) string {
+	return extractMultilinePrompt(viewport, marker)
 }
 
 func cleanViewportTitle(s string) string {

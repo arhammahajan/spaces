@@ -83,7 +83,7 @@ func TestStatusClear(t *testing.T) {
 	if len(fc.SetCalls) != 0 {
 		t.Errorf("clear should not set: %v", fc.SetCalls)
 	}
-	if len(fc.UnsetCalls) != 11 {
+	if len(fc.UnsetCalls) != 12 {
 		t.Errorf("clear unsets = %v", fc.UnsetCalls)
 	}
 }

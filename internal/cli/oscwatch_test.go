@@ -66,8 +66,8 @@ func TestOSCWatchProjectsAndClears(t *testing.T) {
 	if len(fc.SetCalls) != 0 {
 		t.Fatalf("clear should not set options, got %+v", fc.SetCalls)
 	}
-	if len(fc.UnsetCalls) != 11 {
-		t.Fatalf("clear should unset 11 options, got %d: %+v", len(fc.UnsetCalls), fc.UnsetCalls)
+	if len(fc.UnsetCalls) != 12 {
+		t.Fatalf("clear should unset 12 options, got %d: %+v", len(fc.UnsetCalls), fc.UnsetCalls)
 	}
 }
 

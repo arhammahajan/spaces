@@ -48,6 +48,7 @@ func cmdStatus(args []string, env Env) int {
 			"@spaces_state", "@spaces_app", "@spaces_profile", "@spaces_kind",
 			"@spaces_msg", "@spaces_ts", "@spaces_source", "@spaces_title",
 			"@spaces_resume_session", "@spaces_resume_agent", "@spaces_prior_outcome",
+			"@spaces_launch_cmd",
 		} {
 			if uerr := client.UnsetPaneOption(pane, opt); uerr != nil {
 				env.errf("tmux-spaces status: %s\n", uerr)

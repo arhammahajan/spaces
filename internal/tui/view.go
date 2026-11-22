@@ -9,6 +9,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/arhammahajan/spaces/internal/agent"
+	_ "github.com/arhammahajan/spaces/internal/agent/plugins"
 	"github.com/arhammahajan/spaces/internal/model"
 )
 
@@ -1419,7 +1421,7 @@ func stripTitleDecorations(raw string) string {
 		}
 		t = trimmed
 	}
-	for _, prefix := range []string{"OC | ", "Claude Code - ", "Claude Code: "} {
+	for _, prefix := range agent.DefaultRegistry().AllTitlePrefixes() {
 		if len(t) > len(prefix) && strings.EqualFold(t[:len(prefix)], prefix) {
 			t = strings.TrimSpace(t[len(prefix):])
 		}
@@ -1477,11 +1479,7 @@ func isVersionBanner(s, app, cmd string) bool {
 	if strings.EqualFold(first, app) || strings.EqualFold(first, cmd) {
 		return true
 	}
-	switch first {
-	case "fx", "claude", "codex", "opencode", "gemini", "kilo", "muse", "mcode", "antigravity", "agy", "crush", "pi", "omp", "qwen", "copilot", "grok", "cline", "vibe", "kimi", "cursor", "droid":
-		return true
-	}
-	return false
+	return agent.DefaultRegistry().IsVersionBannerName(first)
 }
 
 func isGenericShellName(s string) bool {

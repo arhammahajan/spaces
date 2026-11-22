@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	"github.com/arhammahajan/spaces/internal/tmux"
 )
 
@@ -80,6 +81,11 @@ func BuildSpaces(snap tmux.ServerSnapshot, nowMs int64) []Space {
 // or versioned binaries (e.g. "2.1.76"). Overridden in tests.
 var DetectDescendantAgentFn = detectDescendantAgent
 
+// DetectDescendantProfileFn inspects a pane's PID and descendant processes
+// (cmdline argv and HARNESS_PROFILE env) to recover the harness profile when
+// @spaces_profile is unset. Overridden in tests.
+var DetectDescendantProfileFn = detectDescendantProfile
+
 // InspectPaneProcessFn inspects live descendant processes of a pane's PID to
 // capture a readable foreground command line and descendant process count.
 // Overridden in tests.
@@ -140,6 +146,10 @@ func buildPane(p tmux.Pane, nowMs int64) Pane {
 	if !p.Dead && p.PID > 0 && InspectPaneProcessFn != nil {
 		fgCmd, childProcs = InspectPaneProcessFn(p.PID)
 	}
+	app := resolveApp(p, returned, descAgent)
+	if !p.Dead && !returned && !staleOtherAgentMeta && profile == "" && p.PID > 0 && IsKnownAgent(app) && DetectDescendantProfileFn != nil {
+		profile = strings.TrimSpace(DetectDescendantProfileFn(p.PID))
+	}
 	pane := Pane{
 		ID:                p.ID,
 		NumericID:         p.NumericID,
@@ -156,7 +166,7 @@ func buildPane(p tmux.Pane, nowMs int64) Pane {
 		StartCommand:      p.StartCommand,
 		ForegroundCmd:     fgCmd,
 		ChildProcessCount: childProcs,
-		App:               resolveApp(p, returned, descAgent),
+		App:               app,
 		Status:            status,
 		BaseStatus:        status,
 		Text:              text,
@@ -258,10 +268,7 @@ func isRuntimeOrVersionCommand(cmd string) bool {
 		"npx", "pnpm", "yarn", "harness", "spaces", "tmux-spaces":
 		return true
 	}
-	if len(c) > 0 && c[0] >= '0' && c[0] <= '9' && strings.Contains(c, ".") {
-		return true
-	}
-	return false
+	return agent.DefaultRegistry().MatchesBareVersionCommand(c)
 }
 
 // mapSpacesState maps a `@spaces_state` value to a Status.
@@ -326,7 +333,7 @@ func resolveApp(p tmux.Pane, shellReturned bool, descAgent string) string {
 			if IsShell(app) {
 				return "shell"
 			}
-			if norm := NormalizeAgentCommand(app); knownAgents[norm] {
+			if norm := NormalizeAgentCommand(app); IsKnownAgent(norm) {
 				// Preserve canonical labels like "claude-code", but collapse
 				// versioned binary names like "muse-bin-1.4.24-R9131.1" -> "muse".
 				if strings.EqualFold(app, norm) {
@@ -341,7 +348,7 @@ func resolveApp(p tmux.Pane, shellReturned bool, descAgent string) string {
 		if IsShell(cmd) {
 			return "shell"
 		}
-		if norm := NormalizeAgentCommand(cmd); knownAgents[norm] {
+		if norm := NormalizeAgentCommand(cmd); IsKnownAgent(norm) {
 			return displayAgentApp(norm)
 		}
 		if descAgent != "" {
@@ -352,19 +359,8 @@ func resolveApp(p tmux.Pane, shellReturned bool, descAgent string) string {
 	return "terminal"
 }
 
-func displayAgentApp(agent string) string {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "agy":
-		return "antigravity"
-	case "dsh", "dsh-tui":
-		return "deepseek"
-	case "kimi-cli", "kimi-code":
-		return "kimi"
-	case "cursor":
-		return "cursor-agent"
-	default:
-		return agent
-	}
+func displayAgentApp(app string) string {
+	return agent.DefaultRegistry().DisplayApp(app)
 }
 
 // spaceCWD prefers the active pane's CWD, then the first pane with one.

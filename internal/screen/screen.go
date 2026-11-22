@@ -1,3 +1,12 @@
+// Package screen provides the low-level manifest evaluation engine and
+// viewport-parsing helpers used to infer agent states and titles from captured
+// terminal viewports.
+//
+// Architectural boundary: internal/screen is intentionally a leaf helper layer
+// and must NOT import internal/agent (to avoid import cycles). The plugin
+// registry in internal/agent (and its providers in internal/agent/plugins) is
+// the source of truth for agent metadata, OSC authority, process matching, and
+// plugin-specific title extraction.
 package screen
 
 import (
@@ -67,6 +76,10 @@ func (d Detected) HasEvidence() bool {
 // oscAuthorityApps are apps whose OSC lifecycle is complete enough that a
 // live non-idle OSC state must win over a screen working/idle result.
 // Blockers still override (handled by the caller, as in app.rs).
+//
+// Note: internal/agent plugin Specs (HookPolicy.OSCAuthority) are the source of
+// truth; this list is kept in sync for low-level callers that cannot import
+// internal/agent.
 var oscAuthorityApps = []string{
 	"claude",
 	"codex",
@@ -145,6 +158,21 @@ func OSCAuthority(app string) bool {
 	// Aliases that do not have a manifest still appear as raw labels.
 	_, ok := set[normalizeApp(app)]
 	return ok
+}
+
+// HasManifest reports whether a bundled manifest exists for id (or alias).
+func HasManifest(id string) bool {
+	return engine().manifest(normalizeApp(id)) != nil
+}
+
+// DetectManifest evaluates only the manifest rules for manifestID (without
+// running ExtractTitle). Used by agent plugins that pair manifest screen
+// detection with their own TitleExtractor.
+func DetectManifest(manifestID, viewport, oscTitle string) Detected {
+	if strings.TrimSpace(viewport) == "" {
+		return unknownDetected("")
+	}
+	return engine().detect(normalizeApp(manifestID), viewport, oscTitle, "")
 }
 
 // Detect evaluates the viewport for an app. oscTitle is the pane title (the

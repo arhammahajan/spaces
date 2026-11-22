@@ -8,6 +8,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/arhammahajan/spaces/internal/agent"
 )
 
 // SharedKind filters items in the Shared MCP & Skills popup.
@@ -523,48 +525,18 @@ func loadSharedMCPs(root, homeDir string) []SharedMCP {
 	return nil
 }
 
-type homeMCPTarget struct {
-	harness string
-	relPath string
-}
-
-var homeMCPTargets = []homeMCPTarget{
-	{harness: "antigravity", relPath: filepath.Join(".gemini", "config", "mcp_config.json")},
-	{harness: "antigravity", relPath: filepath.Join(".gemini", "antigravity-cli", "settings.json")},
-	{harness: "claude", relPath: ".claude.json"},
-	{harness: "claude", relPath: filepath.Join(".claude", "mcp.json")},
-	{harness: "claude", relPath: filepath.Join(".claude", "settings.json")},
-	{harness: "cline", relPath: filepath.Join(".cline", "cline_mcp_settings.json")},
-	{harness: "codex", relPath: filepath.Join(".codex", "config.toml")},
-	{harness: "copilot", relPath: filepath.Join(".copilot", "mcp-config.json")},
-	{harness: "fx", relPath: filepath.Join(".fx", "mcp.json")},
-	{harness: "gemini", relPath: filepath.Join(".gemini", "settings.json")},
-	{harness: "grok", relPath: filepath.Join(".grok", "config.toml")},
-	{harness: "kilo", relPath: filepath.Join(".config", "kilo", "kilo.json")},
-	{harness: "kimi-cli", relPath: filepath.Join(".kimi", "mcp.json")},
-	{harness: "kimi-cli", relPath: filepath.Join(".kimi", "config.toml")},
-	{harness: "kimi-code", relPath: filepath.Join(".kimi-code", "mcp.json")},
-	{harness: "kimi-code", relPath: filepath.Join(".kimi-code", "config.toml")},
-	{harness: "mcode", relPath: filepath.Join(".minimax", "mcp.json")},
-	{harness: "muse", relPath: filepath.Join(".config", "muse", "settings.json")},
-	{harness: "opencode", relPath: filepath.Join(".config", "opencode", "opencode.json")},
-	{harness: "pi", relPath: filepath.Join(".pi", "agent", "mcp.json")},
-	{harness: "qwen", relPath: filepath.Join(".qwen", "settings.json")},
-	{harness: "vibe", relPath: filepath.Join(".vibe", "config.toml")},
-}
-
 func loadHomeHarnessMCPs(homeRoot string) []SharedMCP {
 	if !isDir(homeRoot) {
 		return nil
 	}
 	byName := make(map[string]*SharedMCP)
-	for _, target := range homeMCPTargets {
-		p := filepath.Join(homeRoot, target.relPath)
+	for _, target := range agent.DefaultRegistry().AllMCPConfigTargets() {
+		p := filepath.Join(homeRoot, filepath.FromSlash(target.RelPath))
 		fi, err := os.Stat(p)
 		if err != nil || fi.IsDir() {
 			continue
 		}
-		parsed := parseMCPFile(p, "harnesses", target.harness)
+		parsed := parseMCPFile(p, "harnesses", target.HarnessLabel)
 		for _, item := range parsed {
 			mergeMCP(byName, item)
 		}

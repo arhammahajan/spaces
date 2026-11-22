@@ -3,10 +3,12 @@ package cli
 import (
 	"os"
 	"strings"
+
+	"github.com/arhammahajan/spaces/internal/agent"
 )
 
 // cmdAgent opens an agent in a new tmux window under `__shim`. With
-// --profile the pane-side `harness spaces __shim-profile` resolution is wrapped
+// --profile the pane-side `harness <name> profile <profile>` launch is wrapped
 // by __shim so tmux status reporting behaves identically.
 func cmdAgent(args []string, env Env) int {
 	// Split extra agent args at "--" before flag parsing so values with
@@ -76,12 +78,9 @@ func cmdAgent(args []string, env Env) int {
 		if profile != "default" {
 			label = profile
 		}
-		cmd = append([]string{env.Self, "__shim", "--profile", profile, canonicalApp(name), "harness", "spaces", "__shim-profile", name + "/" + profile}, extra...)
+		cmd = append([]string{env.Self, "__shim", "--profile", profile, canonicalApp(name), "harness", name, "profile", profile}, extra...)
 	} else {
-		bin := name
-		if name == "cursor" {
-			bin = "cursor-agent"
-		}
+		bin := agent.DefaultRegistry().BinaryName(name)
 		if _, lerr := env.LookPath(bin); lerr != nil {
 			env.errf("tmux-spaces agent: agent %q not found on PATH\n", bin)
 			return ExitError
