@@ -223,7 +223,7 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 	if err := json.Unmarshal([]byte(gotLaunchJSON), &gotLaunchCmd); err != nil {
 		t.Fatalf("unmarshal launch_cmd_json %q: %v", gotLaunchJSON, err)
 	}
-	wantLaunchCmd := []string{"/usr/local/bin/harness", "claude", "profile", "work"}
+	wantLaunchCmd := []string{"/usr/local/bin/tmux-spaces", "claude", "profile", "work"}
 	if !reflect.DeepEqual(gotLaunchCmd, wantLaunchCmd) {
 		t.Errorf("recorded launch_cmd = %v, want %v", gotLaunchCmd, wantLaunchCmd)
 	}
@@ -244,7 +244,7 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 		t.Fatalf("expected 2 new-window calls, got %d", len(newWindows))
 	}
 	joined2 := strings.Join(newWindows[1], " ")
-	wantDefaultCmd := "/usr/local/bin/tmux-spaces __shim codex /usr/local/bin/harness codex profile default resume conv-id-2"
+	wantDefaultCmd := "/usr/local/bin/tmux-spaces __shim codex /usr/local/bin/tmux-spaces codex profile default resume conv-id-2"
 	if !strings.Contains(joined2, "-t beta:") || !strings.Contains(joined2, "-n codex") || strings.Contains(joined2, "-c /missing/dir") || !strings.Contains(joined2, wantDefaultCmd) || strings.Contains(joined2, "__resume-wrap") {
 		t.Errorf("fallback new-window args = %v", newWindows[1])
 	}
@@ -268,7 +268,7 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 		t.Fatalf("expected 3 new-window calls, got %d", len(newWindows))
 	}
 	joined3 := strings.Join(newWindows[2], " ")
-	wantExplicitDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex /usr/local/bin/harness codex profile default resume conv-id-3"
+	wantExplicitDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex /usr/local/bin/tmux-spaces codex profile default resume conv-id-3"
 	if !strings.Contains(joined3, "-n codex") || strings.Contains(joined3, "-n default") || !strings.Contains(joined3, wantExplicitDefaultCmd) || strings.Contains(joined3, "__resume-wrap") {
 		t.Errorf("default profile new-window args = %v", newWindows[2])
 	}
@@ -323,7 +323,7 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConversation error: %v", err)
 	}
-	want1 := []string{"/usr/local/bin/harness", "claude", "profile", "work"}
+	want1 := []string{"/usr/local/bin/tmux-spaces", "claude", "profile", "work"}
 	if len(recorded) != 1 || !reflect.DeepEqual(recorded[0].LaunchCmd, want1) {
 		t.Fatalf("recorded[0].LaunchCmd = %v, want %v", recorded, want1)
 	}
@@ -337,7 +337,7 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConversation error: %v", err)
 	}
-	want2 := []string{"/usr/local/bin/harness", "codex", "profile", "default"}
+	want2 := []string{"/usr/local/bin/tmux-spaces", "codex", "profile", "default"}
 	if len(recorded) != 2 || !reflect.DeepEqual(recorded[1].LaunchCmd, want2) {
 		t.Fatalf("recorded[1].LaunchCmd = %v, want %v", recorded, want2)
 	}
@@ -373,12 +373,12 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConversation override error: %v", err)
 	}
-	want4 := []string{"/usr/local/bin/harness", "claude", "profile", "pratham"}
+	want4 := []string{"/usr/local/bin/tmux-spaces", "claude", "profile", "pratham"}
 	if len(recorded) != 4 || !reflect.DeepEqual(recorded[3].LaunchCmd, want4) {
 		t.Fatalf("recorded[3].LaunchCmd = %v, want %v", recorded[3].LaunchCmd, want4)
 	}
 	joined4 := strings.Join(newWindows[3], " ")
-	wantCmd4 := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code /usr/local/bin/harness claude profile pratham --resume conv-4"
+	wantCmd4 := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code /usr/local/bin/tmux-spaces claude profile pratham --resume conv-4"
 	if !strings.Contains(joined4, wantCmd4) || strings.Contains(joined4, "oldprof") {
 		t.Errorf("override new-window args = %v, want %q without oldprof", newWindows[3], wantCmd4)
 	}

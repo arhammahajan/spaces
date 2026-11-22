@@ -33,7 +33,13 @@ const (
 )
 
 func main() {
+	if code, handled := maybeRunHarnessEnvAgent(os.Args[1:]); handled {
+		os.Exit(code)
+	}
 	if code, handled := maybeRunHookCommand(os.Args[0], os.Args[1:]); handled {
+		os.Exit(code)
+	}
+	if code, handled := maybeRunHarnessCommand(os.Args[0], os.Args[1:]); handled {
 		os.Exit(code)
 	}
 	bindHookSeams()
@@ -1037,13 +1043,7 @@ func (b *tuiBackend) LaunchAgent(ctx context.Context, session, cwd, agentName, p
 		if profile != "default" {
 			label = profile
 		}
-		harnessBin := "harness"
-		if b.lookPath != nil {
-			if p, err := b.lookPath("harness"); err == nil && p != "" {
-				harnessBin = p
-			}
-		}
-		cmd = []string{b.selfPath, "__shim", "--profile", profile, agentName, harnessBin, agentName, "profile", profile}
+		cmd = []string{b.selfPath, "__shim", "--profile", profile, agentName, b.selfPath, agentName, "profile", profile}
 	} else {
 		bin := agent.DefaultRegistry().BinaryName(agentName)
 		cmd = []string{b.selfPath, "__shim", agentName, bin}
@@ -1123,13 +1123,7 @@ func (b *tuiBackend) OpenOutcome(ctx context.Context, outcome model.OutcomeEntry
 
 	profile := strings.TrimSpace(outcome.Profile)
 	sessionID := strings.TrimSpace(outcome.SessionID)
-	harnessPath := ""
-	if b.lookPath != nil {
-		if p, err := b.lookPath("harness"); err == nil && p != "" {
-			harnessPath = p
-		}
-	}
-	cmd := buildOutcomeOpenCommand(agent, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), nil, b.selfPath, harnessPath)
+	cmd := buildOutcomeOpenCommand(agent, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), nil, b.selfPath, b.selfPath)
 	if len(cmd) == 0 {
 		return fmt.Errorf("could not build resume command for %s", agent)
 	}
@@ -1237,28 +1231,23 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 
 	profile := strings.TrimSpace(conv.Profile)
 	sessionID := conv.ResumeSessionID()
-	harnessPath := ""
-	if b.lookPath != nil {
-		if p, err := b.lookPath("harness"); err == nil && p != "" {
-			harnessPath = p
-		}
-	}
+	launcherPath := b.selfPath
 
-	cmd := buildConversationOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(conv.Title), conv.LaunchCmd, b.selfPath, harnessPath)
+	cmd := buildConversationOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(conv.Title), conv.LaunchCmd, b.selfPath, launcherPath)
 	if len(cmd) == 0 {
 		return fmt.Errorf("could not build resume command for %s", agentName)
 	}
 
-	if harnessPath != "" && agent.DefaultRegistry().IsHarnessManaged(agentName) {
+	if launcherPath != "" && agent.DefaultRegistry().IsHarnessManaged(agentName) {
 		if len(conv.LaunchCmd) == 0 {
 			prof := profile
 			if prof == "" {
 				prof = "default"
 			}
-			conv.LaunchCmd = []string{harnessPath, agentName, "profile", prof}
+			conv.LaunchCmd = []string{launcherPath, agentName, "profile", prof}
 		} else if profile != "" {
 			if launchProf := extractProfileFromLaunchCmd(conv.LaunchCmd); launchProf != "" && launchProf != profile {
-				conv.LaunchCmd = []string{harnessPath, agentName, "profile", profile}
+				conv.LaunchCmd = []string{launcherPath, agentName, "profile", profile}
 			}
 		}
 	}

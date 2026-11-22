@@ -164,6 +164,18 @@ func DetectAgent(argv []string) string {
 				return InferAgent(argv[offset])
 			}
 		}
+		if len(argv) >= 3 && argv[1] == "profile" && !strings.HasPrefix(argv[2], "-") {
+			if a, _, ok := strings.Cut(argv[2], "/"); ok {
+				return Normalize(a)
+			}
+			return ProfileAgent(argv[2])
+		}
+		if len(argv) >= 3 && argv[1] == "launch" {
+			return Normalize(argv[2])
+		}
+		if len(argv) >= 2 {
+			return Normalize(argv[1])
+		}
 		return ""
 	}
 	if exe == "env" || exe == "command" || exe == "exec" || exe == "nohup" || exe == "time" || exe == "sudo" {
@@ -376,7 +388,14 @@ func DiscoverProfile(agentName, cwd, sessionID string) string {
 		if !e.IsDir() {
 			continue
 		}
-		brainDir := filepath.Join(profilesRoot, e.Name(), "home", ".gemini", "antigravity-cli", "brain", sessionID)
+		brainRoot := filepath.Join(profilesRoot, e.Name(), "home", ".gemini", "antigravity-cli", "brain")
+		// When brain/ is symlinked to the shared home across profiles, every
+		// profile sees the same conversation directories, so brain/ cannot
+		// distinguish which profile owns the conversation.
+		if lfi, err := os.Lstat(brainRoot); err != nil || lfi.Mode()&os.ModeSymlink != 0 {
+			continue
+		}
+		brainDir := filepath.Join(brainRoot, sessionID)
 		if fi, err := os.Stat(brainDir); err == nil && fi.IsDir() {
 			return e.Name()
 		}

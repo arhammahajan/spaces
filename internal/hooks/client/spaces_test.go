@@ -202,6 +202,27 @@ func TestDiscoverProfileAntigravity(t *testing.T) {
 	}
 }
 
+func TestDiscoverProfileAntigravitySkipsSymlinkedBrain(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	sharedBrain := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain")
+	if err := os.MkdirAll(filepath.Join(sharedBrain, "conv-shared"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, prof := range []string{"aaa-first", "zzz-second"} {
+		cliDir := filepath.Join(tmpHome, ".harness", "profiles", "antigravity", prof, "home", ".gemini", "antigravity-cli")
+		if err := os.MkdirAll(cliDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(sharedBrain, filepath.Join(cliDir, "brain")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := DiscoverProfile("antigravity", "/repo", "conv-shared"); got != "" {
+		t.Errorf("DiscoverProfile with symlinked brain = %q, want empty (must not guess first alphabetical profile)", got)
+	}
+}
+
 func TestNormalizeAndDisplayApp(t *testing.T) {
 	if got := Normalize("agy"); got != "antigravity" {
 		t.Errorf("Normalize(agy) = %q", got)

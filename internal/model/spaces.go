@@ -7,9 +7,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/arhammahajan/spaces/internal/harness/agents"
+	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
+	"github.com/arhammahajan/spaces/internal/harness/profiles"
 	hookcore "github.com/arhammahajan/spaces/internal/hooks/core"
 )
 
@@ -230,7 +235,8 @@ func FetchHookDetail(ctx context.Context, session string, paneNum int) (HookDeta
 }
 
 // HarnessesPath resolves the path to ~/.harness/harnesses.json.
-// If TMUX_SPACES_HARNESSES_FILE is set, it overrides the default location.
+// If TMUX_SPACES_HARNESSES_FILE or SPACES_HARNESSES_PATH is set, it overrides
+// the default location.
 // If HOME points into a shadow profile under ~/.harness/ and harnesses.json
 // does not exist there, it falls back to the real home prefix before /.harness/.
 func HarnessesPath(homeDir string) string {
@@ -241,7 +247,7 @@ func HarnessesPath(homeDir string) string {
 	if home == "" {
 		home, _ = os.UserHomeDir()
 	}
-	if override := strings.TrimSpace(os.Getenv("TMUX_SPACES_HARNESSES_FILE")); override != "" {
+	if override := harnessesPathOverride(); override != "" {
 		return expandHomePath(override, home)
 	}
 	candidate := filepath.Join(home, ".harness", "harnesses.json")
@@ -257,6 +263,13 @@ func HarnessesPath(homeDir string) string {
 		}
 	}
 	return candidate
+}
+
+func harnessesPathOverride() string {
+	if override := strings.TrimSpace(os.Getenv("TMUX_SPACES_HARNESSES_FILE")); override != "" {
+		return override
+	}
+	return strings.TrimSpace(os.Getenv("SPACES_HARNESSES_PATH"))
 }
 
 func isRegularFile(path string) bool {
@@ -288,9 +301,71 @@ func LoadHarnessesFile(path string) (HarnessFile, error) {
 	return file, nil
 }
 
-// FetchHarnesses reads ~/.harness/harnesses.json directly and parses the HarnessFile.
+// BuildHarnessesInProcess constructs the launchable HarnessFile inventory
+// directly from internal/harness/agents and internal/harness/profiles without
+// requiring an external `harness` binary or pre-generated cache file.
+func BuildHarnessesInProcess(paths harnessenv.Paths) (HarnessFile, error) {
+	marker := string(filepath.Separator) + ".harness" + string(filepath.Separator)
+	if idx := strings.Index(paths.Home, marker); idx > 0 {
+		paths.Home = paths.Home[:idx]
+	}
+	infos := agents.Infos(paths)
+	entries, err := profiles.ListAll(paths)
+	if err != nil {
+		return HarnessFile{}, fmt.Errorf("model: list profiles: %w", err)
+	}
+	byAgent := map[string][]HarnessProfile{}
+	for _, entry := range entries {
+		if entry.Source == profiles.SourceDefault {
+			continue
+		}
+		if _, err := profiles.ResolveForAgent(entry.Agent, entry.Name, paths); err != nil {
+			continue
+		}
+		byAgent[entry.Agent] = append(byAgent[entry.Agent], HarnessProfile{
+			Name:        entry.Name,
+			DisplayName: entry.DisplayName,
+			Source:      entry.Source,
+			Agent:       entry.Agent,
+		})
+	}
+	file := HarnessFile{
+		Version:     1,
+		GeneratedAt: time.Now().Unix(),
+		Agents:      make([]HarnessEntry, 0, len(infos)),
+	}
+	for _, info := range infos {
+		profs := byAgent[info.Name]
+		sort.Slice(profs, func(i, j int) bool { return profs[i].Name < profs[j].Name })
+		entry := HarnessEntry{
+			Name:        info.Name,
+			Binary:      info.Binary,
+			BinaryState: info.BinaryState,
+			Description: info.Note,
+			Profiles:    profs,
+		}
+		if entry.IsLaunchable() {
+			file.Agents = append(file.Agents, entry)
+		}
+	}
+	return file, nil
+}
+
+// FetchHarnesses returns the launchable agent/profile inventory. When
+// TMUX_SPACES_HARNESSES_FILE or SPACES_HARNESSES_PATH is set (or when
+// ~/.harness/harnesses.json exists on disk), it reads that file; otherwise it
+// builds the inventory directly in-process from internal/harness.
 func FetchHarnesses(_ context.Context) (HarnessFile, error) {
-	return LoadHarnessesFile(HarnessesPath(""))
+	if harnessesPathOverride() != "" {
+		return LoadHarnessesFile(HarnessesPath(""))
+	}
+	path := HarnessesPath("")
+	if isRegularFile(path) {
+		if file, err := LoadHarnessesFile(path); err == nil {
+			return file, nil
+		}
+	}
+	return BuildHarnessesInProcess(harnessenv.DefaultPaths())
 }
 
 // TitleQuery describes one pane's conversation title lookup in the local

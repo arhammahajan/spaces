@@ -413,7 +413,7 @@ func TestTUIBackendLoadOutcomesAndOpenOutcomeInNewTab(t *testing.T) {
 	}
 
 	// Open outcome whose space ("beta") is running -> opens new window in beta
-	// running `tmux-spaces __shim --profile work claude-code /usr/local/bin/harness claude profile work --resume sess-42`
+	// running `tmux-spaces __shim --profile work claude-code /usr/local/bin/tmux-spaces claude profile work --resume sess-42`
 	// and switches client to beta.
 	if err := b.OpenOutcome(context.Background(), outcomes[0]); err != nil {
 		t.Fatalf("OpenOutcome error: %v", err)
@@ -422,7 +422,7 @@ func TestTUIBackendLoadOutcomesAndOpenOutcomeInNewTab(t *testing.T) {
 		t.Fatalf("expected 1 new-window call, got %d", len(newWindows))
 	}
 	joined := strings.Join(newWindows[0], " ")
-	wantCmd := "/usr/local/bin/tmux-spaces __shim --profile work claude-code /usr/local/bin/harness claude profile work --resume sess-42"
+	wantCmd := "/usr/local/bin/tmux-spaces __shim --profile work claude-code /usr/local/bin/tmux-spaces claude profile work --resume sess-42"
 	for _, want := range []string{"-t beta:", "-c /repo/beta", "-n work", "/bin/sh -c", wantCmd, "status clear", `exec "${SHELL:-/bin/sh}"`} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("new-window args missing %q: %v", want, newWindows[0])
@@ -458,7 +458,7 @@ func TestTUIBackendLoadOutcomesAndOpenOutcomeInNewTab(t *testing.T) {
 		t.Fatalf("expected 2 new-window calls, got %d", len(newWindows))
 	}
 	joined2 := strings.Join(newWindows[1], " ")
-	wantCmdDefault := "/usr/local/bin/tmux-spaces __shim codex /usr/local/bin/harness codex profile default resume sess-99"
+	wantCmdDefault := "/usr/local/bin/tmux-spaces __shim codex /usr/local/bin/tmux-spaces codex profile default resume sess-99"
 	if !strings.Contains(joined2, "-t alpha:") || !strings.Contains(joined2, "-n codex") || !strings.Contains(joined2, wantCmdDefault) || !strings.Contains(joined2, "SPACES_PRIOR_OUTCOME=failed") || strings.Contains(joined2, "__resume-wrap") {
 		t.Errorf("fallback new-window args = %v", newWindows[1])
 	}

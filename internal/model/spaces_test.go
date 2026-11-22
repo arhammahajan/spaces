@@ -317,4 +317,24 @@ func TestFetchHarnesses(t *testing.T) {
 	if len(file.Agents) != 2 || file.Agents[0].Description != "Codex" || file.Agents[0].Profiles[0].DisplayName != "Router" {
 		t.Errorf("legacy = %+v", file.Agents)
 	}
+
+	// SPACES_HARNESSES_PATH also overrides the harnesses file path.
+	t.Setenv("TMUX_SPACES_HARNESSES_FILE", "")
+	t.Setenv("SPACES_HARNESSES_PATH", legacyPath)
+	file, err = FetchHarnesses(context.Background())
+	if err != nil || len(file.Agents) != 2 {
+		t.Fatalf("SPACES_HARNESSES_PATH = (%+v, %v)", file, err)
+	}
+
+	// When no harnesses.json exists on disk, FetchHarnesses builds directly in-process.
+	emptyHome := t.TempDir()
+	t.Setenv("SPACES_HARNESSES_PATH", "")
+	t.Setenv("HOME", emptyHome)
+	file, err = FetchHarnesses(context.Background())
+	if err != nil {
+		t.Fatalf("in-process FetchHarnesses error: %v", err)
+	}
+	if file.Version != 1 {
+		t.Errorf("in-process version = %d, want 1", file.Version)
+	}
 }
