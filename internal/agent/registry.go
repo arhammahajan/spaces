@@ -489,10 +489,8 @@ func (r *Registry) DiscoverProfileRoots(realHome string) []ProfileRoot {
 			homeDir := strings.TrimSpace(np.Profile.ShadowHome)
 			if homeDir == "" {
 				homeDir = filepath.Join(base, ".harness", "profiles", np.Profile.Agent, np.Name, "home")
-			} else if homeDir == "~" {
-				homeDir = base
-			} else if strings.HasPrefix(homeDir, "~/") {
-				homeDir = filepath.Join(base, strings.TrimPrefix(homeDir, "~/"))
+			} else {
+				homeDir = harnessenv.ExpandHome(homeDir, base)
 			}
 			if info, statErr := os.Stat(homeDir); statErr == nil && info.IsDir() {
 				out = append(out, ProfileRoot{

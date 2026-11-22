@@ -210,11 +210,35 @@ func NewRouterSession() string {
 	return "router-session-" + h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
+// ExpandHome expands leading "~" / "~/" and "${HOME}" / "$HOME" references
+// in value using home. When home is empty, value is returned unchanged.
+func ExpandHome(value, home string) string {
+	if value == "" || home == "" {
+		return value
+	}
+	if strings.Contains(value, "${HOME}") {
+		value = strings.ReplaceAll(value, "${HOME}", home)
+	}
+	if value == "$HOME" {
+		return home
+	}
+	if strings.HasPrefix(value, "$HOME/") || strings.HasPrefix(value, "$HOME"+string(filepath.Separator)) {
+		value = filepath.Join(home, value[len("$HOME")+1:])
+	}
+	if value == "~" {
+		return home
+	}
+	if strings.HasPrefix(value, "~/") {
+		return filepath.Join(home, strings.TrimPrefix(value, "~/"))
+	}
+	return value
+}
+
 // DotfilesRoot returns the dotfiles checkout used for profile seeding and
 // config wiring: $HARNESS_DOTFILES when set, otherwise <home>/dev/dots.
 // The bool reports whether the directory exists.
 func DotfilesRoot(paths Paths) (string, bool) {
-	if root := os.Getenv("HARNESS_DOTFILES"); root != "" {
+	if root := ExpandHome(os.Getenv("HARNESS_DOTFILES"), paths.Home); root != "" {
 		if st, err := os.Stat(root); err == nil && st.IsDir() {
 			return root, true
 		}

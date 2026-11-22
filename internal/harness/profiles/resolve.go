@@ -6,7 +6,6 @@ package profiles
 
 import (
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -199,15 +198,9 @@ func availableNames(store *Store) []string {
 	return names
 }
 
-// expandTildePath expands a leading "~" (alone or followed by a slash) to home.
+// expandTildePath expands leading "~" / "~/" and "${HOME}" / "$HOME" references to home.
 func expandTildePath(value, home string) string {
-	if value == "~" {
-		return home
-	}
-	if strings.HasPrefix(value, "~/") {
-		return filepath.Join(home, strings.TrimPrefix(value, "~/"))
-	}
-	return value
+	return harnessenv.ExpandHome(value, home)
 }
 
 func copyMap(m map[string]string) map[string]string {

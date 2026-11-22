@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/arhammahajan/spaces/internal/agent"
+	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 )
 
 // SharedKind filters items in the Shared MCP & Skills popup.
@@ -148,15 +149,7 @@ func expandHomePath(p, homeDir string) string {
 	if p == "" {
 		return ""
 	}
-	if homeDir != "" {
-		if p == "~" {
-			return filepath.Clean(homeDir)
-		}
-		if strings.HasPrefix(p, "~/") {
-			return filepath.Clean(filepath.Join(homeDir, p[2:]))
-		}
-	}
-	return filepath.Clean(p)
+	return filepath.Clean(harnessenv.ExpandHome(p, homeDir))
 }
 
 func isDir(p string) bool {

@@ -498,13 +498,14 @@ func (s *Store) Remove(name string, purge bool) error {
 		return fmt.Errorf("profiles: remove profile json: %w", err)
 	}
 	if purge && p.ShadowHome != "" {
-		if underDir(base, p.ShadowHome) {
-			if err := os.RemoveAll(p.ShadowHome); err != nil {
+		shadow := expandTildePath(p.ShadowHome, s.paths.Home)
+		if underDir(base, shadow) {
+			if err := os.RemoveAll(shadow); err != nil {
 				return fmt.Errorf("profiles: purge shadow home: %w", err)
 			}
 			// Clean empty ancestor directories up to (not including) base so
 			// purge leaves no empty husk under the profiles base.
-			for parent := filepath.Dir(p.ShadowHome); underDir(base, parent); parent = filepath.Dir(parent) {
+			for parent := filepath.Dir(shadow); underDir(base, parent); parent = filepath.Dir(parent) {
 				if err := os.Remove(parent); err != nil {
 					break
 				}
@@ -861,19 +862,20 @@ func (s *Store) Rename(oldName, newName string) error {
 	}
 	if p.ShadowHome != "" {
 		base := filepath.Join(harnessenv.HarnessDir(s.paths), "profiles")
-		if underDir(base, p.ShadowHome) {
+		shadow := expandTildePath(p.ShadowHome, s.paths.Home)
+		if underDir(base, shadow) {
 			newShadow := s.defaultShadowHome(p.Agent, newName)
-			if p.ShadowHome != newShadow {
+			if shadow != newShadow {
 				if _, err := os.Stat(newShadow); err == nil {
 					return fmt.Errorf("profiles: rename target shadow already exists: %s", newShadow)
 				}
 				if err := os.MkdirAll(filepath.Dir(newShadow), 0o755); err != nil {
 					return fmt.Errorf("profiles: rename shadow home: %w", err)
 				}
-				if err := os.Rename(p.ShadowHome, newShadow); err != nil {
+				if err := os.Rename(shadow, newShadow); err != nil {
 					return fmt.Errorf("profiles: rename shadow home: %w", err)
 				}
-				for parent := filepath.Dir(p.ShadowHome); underDir(base, parent); parent = filepath.Dir(parent) {
+				for parent := filepath.Dir(shadow); underDir(base, parent); parent = filepath.Dir(parent) {
 					if err := os.Remove(parent); err != nil {
 						break
 					}

@@ -152,7 +152,7 @@ func Resolve(spec harnessenv.LaunchSpec, paths harnessenv.Paths, router harnesse
 		if isExecutable(nodeBin) {
 			pathPrepend = append(pathPrepend, filepath.Dir(nodeBin))
 		}
-		repo := os.Getenv("GEMINI_CLI_REPO")
+		repo := harnessenv.ExpandHome(os.Getenv("GEMINI_CLI_REPO"), paths.Home)
 		if repo == "" {
 			repo = filepath.Join(paths.Home, "dev", "gemini-cli")
 		}

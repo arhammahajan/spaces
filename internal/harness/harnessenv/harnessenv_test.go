@@ -149,4 +149,42 @@ func TestDotfilesRootOverride(t *testing.T) {
 	if root != tmp || !ok {
 		t.Fatalf("root=%q ok=%v", root, ok)
 	}
+	home := t.TempDir()
+	dotsDir := filepath.Join(home, "custom-dots")
+	if err := os.MkdirAll(dotsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("HARNESS_DOTFILES", "${HOME}/custom-dots")
+	root, ok = DotfilesRoot(DefaultPaths())
+	if root != dotsDir || !ok {
+		t.Fatalf("root=%q ok=%v, want %q true", root, ok, dotsDir)
+	}
+}
+
+func TestExpandHome(t *testing.T) {
+	home := "/Users/tester"
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"", ""},
+		{"~", home},
+		{"~/dev/dots", filepath.Join(home, "dev", "dots")},
+		{"$HOME", home},
+		{"$HOME/dev/dots", filepath.Join(home, "dev", "dots")},
+		{"${HOME}", home},
+		{"${HOME}/.local/bin/harness", filepath.Join(home, ".local", "bin", "harness")},
+		{"${HOME}/a:${HOME}/b", home + "/a:" + home + "/b"},
+		{"/opt/bin/tool", "/opt/bin/tool"},
+		{"$HOME_OTHER/x", "$HOME_OTHER/x"},
+	}
+	for _, tc := range cases {
+		if got := ExpandHome(tc.in, home); got != tc.want {
+			t.Errorf("ExpandHome(%q, %q) = %q, want %q", tc.in, home, got, tc.want)
+		}
+	}
+	if got := ExpandHome("${HOME}/dev", ""); got != "${HOME}/dev" {
+		t.Errorf("ExpandHome with empty home = %q, want unchanged", got)
+	}
 }

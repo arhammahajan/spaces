@@ -781,8 +781,9 @@ func TestSpacesRuntimeDirResolution(t *testing.T) {
 	})
 	t.Run("tmp fallback", func(t *testing.T) {
 		t.Setenv("XDG_RUNTIME_DIR", "")
-		if got := (CheckOptions{}).spacesRuntimeDir(); got != "/tmp/spaces" {
-			t.Errorf("got %q", got)
+		want := filepath.Join(os.TempDir(), fmt.Sprintf("spaces-%d", os.Getuid()))
+		if got := (CheckOptions{}).spacesRuntimeDir(); got != want {
+			t.Errorf("got %q, want %q", got, want)
 		}
 	})
 }

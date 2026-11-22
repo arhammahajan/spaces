@@ -125,7 +125,7 @@ func Detect(paths harnessenv.Paths, router harnessenv.RouterSettings) Options {
 	} else {
 		opts.Systemctl = "systemctl"
 	}
-	if bin := os.Getenv("HARNESS_ROUTER_BIN"); bin != "" {
+	if bin := harnessenv.ExpandHome(os.Getenv("HARNESS_ROUTER_BIN"), paths.Home); bin != "" {
 		opts.RouterBin = bin
 	} else if newest, ok := newestLibexecBin(paths); ok {
 		opts.RouterBin = newest
@@ -136,7 +136,7 @@ func Detect(paths harnessenv.Paths, router harnessenv.RouterSettings) Options {
 	} else {
 		opts.RouterBin = "model-router-go"
 	}
-	if cfg := os.Getenv("HARNESS_ROUTER_CONFIG"); cfg != "" {
+	if cfg := harnessenv.ExpandHome(os.Getenv("HARNESS_ROUTER_CONFIG"), paths.Home); cfg != "" {
 		opts.RouterConfig = cfg
 	} else if cand := filepath.Join(paths.ConfigHome, "model-router", "router-go.toml"); fileExists(cand) {
 		opts.RouterConfig = cand

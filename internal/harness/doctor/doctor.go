@@ -80,7 +80,7 @@ func (o CheckOptions) routerConfigPath() string {
 	if o.RouterConfig != "" {
 		return o.RouterConfig
 	}
-	if cfg := os.Getenv("HARNESS_ROUTER_CONFIG"); cfg != "" {
+	if cfg := harnessenv.ExpandHome(os.Getenv("HARNESS_ROUTER_CONFIG"), o.Paths.Home); cfg != "" {
 		return cfg
 	}
 	cand := filepath.Join(o.Paths.ConfigHome, "model-router", "router-go.toml")
@@ -101,7 +101,7 @@ func (o CheckOptions) spacesRuntimeDir() string {
 	if xdg := os.Getenv("XDG_RUNTIME_DIR"); xdg != "" {
 		return filepath.Join(xdg, "spaces")
 	}
-	return "/tmp/spaces"
+	return filepath.Join(os.TempDir(), fmt.Sprintf("spaces-%d", os.Getuid()))
 }
 
 // killFn returns the signal seam, defaulting to syscall.Kill.
