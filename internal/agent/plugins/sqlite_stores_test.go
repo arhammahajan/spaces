@@ -120,8 +120,8 @@ func TestAntigravitySQLiteStore(t *testing.T) {
 	if list[1].CWD != "/home/dev/app" {
 		t.Errorf("list[1].CWD = %q, want /home/dev/app", list[1].CWD)
 	}
-	if list[1].SourcePath != dbPath {
-		t.Errorf("list[1].SourcePath = %q, want %q", list[1].SourcePath, dbPath)
+	if list[1].SourcePath != dbPath+"#conv-preview-only" {
+		t.Errorf("list[1].SourcePath = %q, want %q", list[1].SourcePath, dbPath+"#conv-preview-only")
 	}
 }
 
@@ -187,7 +187,7 @@ func TestOpenCodeSQLiteStore(t *testing.T) {
 		active[0].Model != "claude-sonnet-4-5" ||
 		active[0].CWD != "/work/spaces" ||
 		active[0].Archived ||
-		active[0].SourcePath != dbPath {
+		active[0].SourcePath != dbPath+"#oc-active-1" {
 		t.Errorf("unexpected opencode active record: %+v", active[0])
 	}
 
@@ -265,7 +265,7 @@ func TestKiloSQLiteStore(t *testing.T) {
 		active[0].Model != "claude-opus-4-5" ||
 		active[0].CWD != "/work/kilo-app" ||
 		active[0].Agent != "kilo" ||
-		active[0].SourcePath != dbPath {
+		active[0].SourcePath != dbPath+"#kilo-1" {
 		t.Errorf("unexpected kilo active record: %+v", active[0])
 	}
 
@@ -396,4 +396,109 @@ func TestLargeJSONLBoundedScanAndBoilerplateFiltering(t *testing.T) {
 			t.Errorf("UpdatedAtMs = %d, want %d", rec.UpdatedAtMs, wantUpdated)
 		}
 	})
+}
+
+func TestSQLiteFullMessageParseLogAndSearch(t *testing.T) {
+	ctx := context.Background()
+
+	// 1. Antigravity conversations_fts
+	agyHome := t.TempDir()
+	agyDir := filepath.Join(agyHome, ".gemini", "antigravity-cli")
+	if err := os.MkdirAll(agyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agyDBPath := filepath.Join(agyDir, "conversation_summaries.db")
+	db, err := sql.Open("sqlite", agyDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE conversation_summaries (
+			conversation_id TEXT, title TEXT, preview TEXT, step_count INTEGER,
+			last_modified_time TEXT, workspace_uris TEXT, parent_conversation_id TEXT
+		);
+		CREATE TABLE conversations_fts (
+			conversation_id TEXT, chunk_index INTEGER, last_modified_time INTEGER,
+			user_body TEXT, agent_body TEXT
+		);
+		INSERT INTO conversation_summaries VALUES ('agy-fts-1', 'SQLite Search', 'start', 4, '2026-11-22 10:00:00+00:00', '["file:///repo"]', '');
+		INSERT INTO conversations_fts VALUES ('agy-fts-1', 0, 1795255200000, 'Please optimize quantum_fluctuation_index', 'Fixed quantum_fluctuation_index in store');
+	`)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	agyStore := NewAntigravityConversationStore(agyHome)
+	hits, err := agyStore.Search(ctx, "quantum_fluctuation_index", agent.ConversationListOptions{})
+	if err != nil || len(hits) != 1 || hits[0].SessionID != "agy-fts-1" {
+		t.Fatalf("antigravity SQLite body search = (%+v, %v), want agy-fts-1", hits, err)
+	}
+
+	// 2. OpenCode session_message
+	ocHome := t.TempDir()
+	ocDir := filepath.Join(ocHome, ".local", "share", "opencode")
+	if err := os.MkdirAll(ocDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ocDBPath := filepath.Join(ocDir, "opencode.db")
+	db, err = sql.Open("sqlite", ocDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE session_v2 (
+			id TEXT, parent_id TEXT, directory TEXT, title TEXT, model TEXT,
+			time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+		);
+		CREATE TABLE session_message (
+			id TEXT, session_id TEXT, type TEXT, seq INTEGER, time_created INTEGER, data TEXT
+		);
+		INSERT INTO session_v2 VALUES ('ses-oc-1', '', '/repo', 'OpenCode Chat', '{"id":"claude"}', 1795255200000, 1795255205000, 0);
+		INSERT INTO session_message VALUES ('m1', 'ses-oc-1', 'user', 1, 1795255201000, '{"text":"Check opencode_deep_token_42"}');
+	`)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ocStore := NewOpenCodeConversationStore(ocHome)
+	hits, err = ocStore.Search(ctx, "opencode_deep_token_42", agent.ConversationListOptions{})
+	if err != nil || len(hits) != 1 || hits[0].SessionID != "ses-oc-1" {
+		t.Fatalf("opencode SQLite body search = (%+v, %v), want ses-oc-1", hits, err)
+	}
+
+	// 3. Kilo message + part
+	kiloHome := t.TempDir()
+	kiloDir := filepath.Join(kiloHome, ".local", "share", "kilo")
+	if err := os.MkdirAll(kiloDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	kiloDBPath := filepath.Join(kiloDir, "kilo.db")
+	db, err = sql.Open("sqlite", kiloDBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE session (
+			id TEXT, parent_id TEXT, directory TEXT, title TEXT, model TEXT,
+			time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+		);
+		CREATE TABLE message (
+			id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT
+		);
+		CREATE TABLE part (
+			id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT
+		);
+		INSERT INTO session VALUES ('ses-kilo-1', '', '/repo', 'Kilo Chat', 'deepseek', 1795255200000, 1795255205000, 0);
+		INSERT INTO message VALUES ('km1', 'ses-kilo-1', 1795255201000, 1795255201000, '{"role":"user","model":{"modelID":"deepseek"}}');
+		INSERT INTO part VALUES ('kp1', 'km1', 'ses-kilo-1', 1795255201000, 1795255201000, '{"type":"text","text":"Debug kilo_unique_needle_99"}');
+	`)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	kiloStore := NewKiloConversationStore(kiloHome)
+	hits, err = kiloStore.Search(ctx, "kilo_unique_needle_99", agent.ConversationListOptions{})
+	if err != nil || len(hits) != 1 || hits[0].SessionID != "ses-kilo-1" {
+		t.Fatalf("kilo SQLite body search = (%+v, %v), want ses-kilo-1", hits, err)
+	}
 }

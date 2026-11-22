@@ -88,7 +88,7 @@ func loadAntigravitySQLite(ctx context.Context, home string) []agent.Conversatio
 
 		sourcePath := filepath.Join(convDir, id+".db")
 		if _, err := os.Stat(sourcePath); err != nil {
-			sourcePath = dbPath
+			sourcePath = dbPath + "#" + id
 		}
 
 		msgCount := 0
@@ -221,7 +221,7 @@ func loadSessionTableSQLite(ctx context.Context, dbPath, agentID, appName string
 			CreatedAtMs: createdMs,
 			UpdatedAtMs: updatedMs,
 			Archived:    archivedMs > 0,
-			SourcePath:  dbPath,
+			SourcePath:  dbPath + "#" + id,
 		})
 	}
 	return records
@@ -231,6 +231,255 @@ func sqliteTableExists(ctx context.Context, db *sql.DB, tableName string) bool {
 	var name string
 	err := db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='table' AND name=?`, tableName).Scan(&name)
 	return err == nil && name != ""
+}
+
+// parseSQLiteLog extracts message-level LogEntries from SQLite-backed stores
+// for Antigravity (conversations_fts), OpenCode (session_message), and Kilo
+// (message + part / session_message).
+func parseSQLiteLog(ctx context.Context, provider, path string) ([]agent.LogEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	basePath, sessionID, _ := strings.Cut(path, "#")
+	if _, err := os.Stat(basePath); err != nil {
+		return nil, err
+	}
+
+	switch provider {
+	case "antigravity":
+		return parseAntigravitySQLiteLog(ctx, basePath, sessionID)
+	case "opencode":
+		return parseOpenCodeSQLiteLog(ctx, basePath, sessionID)
+	case "kilo":
+		return parseKiloSQLiteLog(ctx, basePath, sessionID)
+	default:
+		return nil, nil
+	}
+}
+
+func parseAntigravitySQLiteLog(ctx context.Context, basePath, sessionID string) ([]agent.LogEntry, error) {
+	summariesPath := basePath
+	if filepath.Base(basePath) != "conversation_summaries.db" {
+		if sessionID == "" {
+			sessionID = strings.TrimSuffix(filepath.Base(basePath), filepath.Ext(basePath))
+		}
+		summariesPath = filepath.Join(filepath.Dir(filepath.Dir(basePath)), "conversation_summaries.db")
+	}
+	if sessionID == "" {
+		return nil, nil
+	}
+	db, err := openReadOnlySQLite(summariesPath)
+	if err != nil {
+		return nil, nil
+	}
+	defer db.Close()
+
+	if !sqliteTableExists(ctx, db, "conversations_fts") {
+		return nil, nil
+	}
+
+	rows, err := db.QueryContext(ctx, `
+		SELECT user_body, agent_body, last_modified_time
+		FROM conversations_fts
+		WHERE conversation_id = ?
+		ORDER BY chunk_index ASC
+	`, sessionID)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+
+	var entries []agent.LogEntry
+	for rows.Next() {
+		if ctx.Err() != nil {
+			break
+		}
+		var (
+			userBody  sql.NullString
+			agentBody sql.NullString
+			lastMod   any
+		)
+		if err := rows.Scan(&userBody, &agentBody, &lastMod); err != nil {
+			continue
+		}
+		ts := parseSQLiteTimestampMs(lastMod)
+		if u := strings.TrimSpace(userBody.String); u != "" {
+			entries = append(entries, agent.LogEntry{
+				TimestampMs: ts,
+				Role:        "user",
+				Event:       "message",
+				Text:        u,
+				SessionID:   sessionID,
+			})
+		}
+		if a := strings.TrimSpace(agentBody.String); a != "" {
+			entries = append(entries, agent.LogEntry{
+				TimestampMs: ts,
+				Role:        "assistant",
+				Event:       "message",
+				Text:        a,
+				SessionID:   sessionID,
+			})
+		}
+	}
+	return entries, nil
+}
+
+func parseOpenCodeSQLiteLog(ctx context.Context, dbPath, sessionID string) ([]agent.LogEntry, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	db, err := openReadOnlySQLite(dbPath)
+	if err != nil {
+		return nil, nil
+	}
+	defer db.Close()
+	return querySessionMessageTable(ctx, db, sessionID)
+}
+
+func parseKiloSQLiteLog(ctx context.Context, dbPath, sessionID string) ([]agent.LogEntry, error) {
+	if sessionID == "" {
+		return nil, nil
+	}
+	db, err := openReadOnlySQLite(dbPath)
+	if err != nil {
+		return nil, nil
+	}
+	defer db.Close()
+
+	if sqliteTableExists(ctx, db, "message") && sqliteTableExists(ctx, db, "part") {
+		rows, err := db.QueryContext(ctx, `
+			SELECT m.time_created, m.data, p.data
+			FROM message m
+			LEFT JOIN part p ON p.message_id = m.id
+			WHERE m.session_id = ?
+			ORDER BY m.time_created ASC, p.time_created ASC
+		`, sessionID)
+		if err == nil {
+			defer rows.Close()
+			var entries []agent.LogEntry
+			for rows.Next() {
+				if ctx.Err() != nil {
+					break
+				}
+				var (
+					createdRaw any
+					msgData    sql.NullString
+					partData   sql.NullString
+				)
+				if err := rows.Scan(&createdRaw, &msgData, &partData); err != nil {
+					continue
+				}
+				role, modelName := extractSQLiteRoleAndModel(msgData.String)
+				text := extractSQLiteMessageText(partData.String)
+				if text == "" {
+					text = extractSQLiteMessageText(msgData.String)
+				}
+				if text == "" {
+					continue
+				}
+				entries = append(entries, agent.LogEntry{
+					TimestampMs: parseSQLiteTimestampMs(createdRaw),
+					Role:        role,
+					Event:       "message",
+					Text:        text,
+					SessionID:   sessionID,
+					Model:       modelName,
+				})
+			}
+			if len(entries) > 0 {
+				return entries, nil
+			}
+		}
+	}
+
+	return querySessionMessageTable(ctx, db, sessionID)
+}
+
+func querySessionMessageTable(ctx context.Context, db *sql.DB, sessionID string) ([]agent.LogEntry, error) {
+	if !sqliteTableExists(ctx, db, "session_message") {
+		return nil, nil
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT type, time_created, data
+		FROM session_message
+		WHERE session_id = ?
+		ORDER BY seq ASC, time_created ASC
+	`, sessionID)
+	if err != nil {
+		return nil, nil
+	}
+	defer rows.Close()
+
+	var entries []agent.LogEntry
+	for rows.Next() {
+		if ctx.Err() != nil {
+			break
+		}
+		var (
+			typ        sql.NullString
+			createdRaw any
+			dataStr    sql.NullString
+		)
+		if err := rows.Scan(&typ, &createdRaw, &dataStr); err != nil {
+			continue
+		}
+		text := extractSQLiteMessageText(dataStr.String)
+		if text == "" {
+			continue
+		}
+		role := "assistant"
+		if strings.EqualFold(strings.TrimSpace(typ.String), "user") {
+			role = "user"
+		}
+		entries = append(entries, agent.LogEntry{
+			TimestampMs: parseSQLiteTimestampMs(createdRaw),
+			Role:        role,
+			Event:       "message",
+			Text:        text,
+			SessionID:   sessionID,
+		})
+	}
+	return entries, nil
+}
+
+func extractSQLiteRoleAndModel(raw string) (string, string) {
+	role := "assistant"
+	modelName := ""
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		return role, modelName
+	}
+	if r := strings.ToLower(strings.TrimSpace(strField(doc, "role"))); r != "" {
+		role = r
+	}
+	if m, ok := doc["model"].(map[string]any); ok {
+		modelName = firstNonEmpty(strField(m, "modelID"), strField(m, "id"))
+	} else if m := strField(doc, "model"); m != "" {
+		modelName = m
+	}
+	return role, modelName
+}
+
+func extractSQLiteMessageText(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(trimmed), &doc); err != nil {
+		return ""
+	}
+	if t := strings.TrimSpace(strField(doc, "text")); t != "" {
+		return t
+	}
+	if content := firstNonNil(doc["content"], doc["parts"]); content != nil {
+		text, _, _ := extractContentParts(content)
+		if strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
 }
 
 func sqliteTableColumns(ctx context.Context, db *sql.DB, tableName string) map[string]bool {

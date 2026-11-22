@@ -470,7 +470,7 @@ func (s *fileConversationStore) Search(ctx context.Context, query string, opts a
 		}
 		if recordMatchesQuery(rec, q) {
 			matched = append(matched, rec)
-		} else if s.cfg.parser != nil && rec.SourcePath != "" && !strings.HasSuffix(strings.ToLower(rec.SourcePath), ".db") {
+		} else if s.cfg.parser != nil && rec.SourcePath != "" {
 			entries, parseErr := s.cfg.parser.ParseLog(ctx, rec.SourcePath)
 			if parseErr == nil && entriesMatchQuery(entries, q) {
 				matched = append(matched, rec)
@@ -1241,14 +1241,12 @@ func (p structuredLogParser) ParseLog(ctx context.Context, path string) ([]agent
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if p.allowDBNoop && strings.HasSuffix(strings.ToLower(path), ".db") {
-		if _, err := os.Stat(path); err != nil {
-			return nil, err
-		}
-		return nil, nil
+	lower := strings.ToLower(path)
+	if strings.HasSuffix(lower, ".db") || strings.Contains(lower, ".db#") {
+		return parseSQLiteLog(ctx, p.provider, path)
 	}
 
-	if strings.HasSuffix(strings.ToLower(path), ".json") {
+	if strings.HasSuffix(lower, ".json") {
 		return parseJSONDocumentLog(ctx, path)
 	}
 
@@ -1276,7 +1274,7 @@ func (p structuredLogParser) parseLogBounded(ctx context.Context, path string, h
 		return nil, err
 	}
 	lower := strings.ToLower(path)
-	if (p.allowDBNoop && strings.HasSuffix(lower, ".db")) || strings.HasSuffix(lower, ".json") {
+	if strings.HasSuffix(lower, ".db") || strings.Contains(lower, ".db#") || strings.HasSuffix(lower, ".json") {
 		return p.ParseLog(ctx, path)
 	}
 	var (
