@@ -1,0 +1,196 @@
+package main
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/arhammahajan/spaces/internal/model"
+	"github.com/arhammahajan/spaces/internal/tmux"
+	"github.com/arhammahajan/spaces/internal/tui"
+)
+
+func TestParseConversationsOptions(t *testing.T) {
+	opts := parseConversationsOptions([]string{"--query", "@claude rate limit"})
+	if opts.InitialMode != tui.ModeConversations || opts.InitialQuery != "@claude rate limit" {
+		t.Fatalf("unexpected opts: %+v", opts)
+	}
+	opts2 := parseConversationsOptions([]string{"--query=backoff"})
+	if opts2.InitialMode != tui.ModeConversations || opts2.InitialQuery != "backoff" {
+		t.Fatalf("unexpected opts2: %+v", opts2)
+	}
+}
+
+func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
+	t.Setenv("SPACES_BIN", "/usr/local/bin/spaces")
+
+	// Harness-managed agent with explicit profile.
+	cmd := buildConversationOpenCommand("claude", "work", "sess-123", "/repo", "Fix retries", "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	joined := strings.Join(cmd, " ")
+	wantB64 := base64.StdEncoding.EncodeToString([]byte("/usr/local/bin/harness claude profile work"))
+	for _, want := range []string{"/bin/sh -c", "/usr/local/bin/spaces __resume-wrap", wantB64, "sess-123", "status clear", `exec "${SHELL:-/bin/sh}"`} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("harness cmd missing %q: %s", want, joined)
+		}
+	}
+
+	// Non-harness agent (omp) falls back to resurrect.BuildPaneCommand.
+	cmdOmp := buildConversationOpenCommand("omp", "", "omp-sess-7", "/repo", "Omp chat", "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	joinedOmp := strings.Join(cmdOmp, " ")
+	wantOmpB64 := base64.StdEncoding.EncodeToString([]byte("omp"))
+	for _, want := range []string{"/usr/local/bin/tmux-spaces __shim omp", "__resume-wrap", wantOmpB64, "omp-sess-7"} {
+		if !strings.Contains(joinedOmp, want) {
+			t.Errorf("omp fallback cmd missing %q: %s", want, joinedOmp)
+		}
+	}
+
+	// Non-harness agent (crush) falls back cleanly too.
+	cmdCrush := buildConversationOpenCommand("crush", "", "crush-9", "/repo", "Crush chat", "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	joinedCrush := strings.Join(cmdCrush, " ")
+	wantCrushB64 := base64.StdEncoding.EncodeToString([]byte("crush"))
+	for _, want := range []string{"/usr/local/bin/tmux-spaces __shim crush", "__resume-wrap", wantCrushB64, "crush-9"} {
+		if !strings.Contains(joinedCrush, want) {
+			t.Errorf("crush fallback cmd missing %q: %s", want, joinedCrush)
+		}
+	}
+}
+
+func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T) {
+	origExec := model.ExecFn
+	defer func() { model.ExecFn = origExec }()
+	t.Setenv("SPACES_BIN", "/usr/local/bin/spaces")
+
+	var recorded []map[string]any
+	model.ExecFn = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		if len(args) >= 3 && args[0] == "__space-conversations" && args[1] == "--record" {
+			var m map[string]any
+			if err := json.Unmarshal([]byte(args[2]), &m); err != nil {
+				return nil, err
+			}
+			recorded = append(recorded, m)
+			return []byte(`{"ok":true}`), nil
+		}
+		return []byte(`{"ok":true}`), nil
+	}
+
+	var newWindows [][]string
+	var switchedTo []string
+	curSession := "alpha"
+	runner := &fakeRunner{
+		handler: func(args []string) (string, string, int, error) {
+			switch args[0] {
+			case "display-message":
+				if curSession == "" {
+					return "", "no client", 1, fmt.Errorf("no current session")
+				}
+				return curSession + "\n", "", 0, nil
+			case "list-sessions":
+				return "$0\x1falpha\x1f1\x1f1700000000\x1f1\n$1\x1fbeta\x1f0\x1f1700000000\x1f1\n", "", 0, nil
+			case "new-window":
+				newWindows = append(newWindows, append([]string(nil), args...))
+				return "", "", 0, nil
+			case "switch-client":
+				switchedTo = append(switchedTo, args[len(args)-1])
+				return "", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	client := tmux.NewClient(runner)
+	client.Getenv = func(k string) string {
+		if k == "TMUX" {
+			return "/tmp/tmux-1000/default,1,0"
+		}
+		return ""
+	}
+	b := newTUIBackend(client)
+	b.selfPath = "/usr/local/bin/tmux-spaces"
+	b.now = func() time.Time { return time.UnixMilli(1700000555000) }
+	b.dirExists = func(p string) bool { return p == "/repo/work" }
+	b.lookPath = func(bin string) (string, error) {
+		if bin == "harness" {
+			return "/usr/local/bin/harness", nil
+		}
+		return "", fmt.Errorf("not found")
+	}
+
+	// Opens in CURRENT tmux session ("alpha") even if conv.Space was "beta",
+	// uses ResumeTarget when set, and records the open event.
+	err := b.OpenConversation(context.Background(), model.ConversationEntry{
+		Agent:        "claude",
+		ID:           "conv-id-1",
+		ResumeTarget: "resume-target-1",
+		App:          "claude-code",
+		Profile:      "work",
+		Title:        "Gateway retries",
+		CWD:          "/repo/work",
+		Space:        "beta",
+	}, false)
+	if err != nil {
+		t.Fatalf("OpenConversation error: %v", err)
+	}
+	if len(newWindows) != 1 {
+		t.Fatalf("expected 1 new-window call, got %d", len(newWindows))
+	}
+	joined := strings.Join(newWindows[0], " ")
+	for _, want := range []string{"-t alpha:", "-c /repo/work", "-n work", "resume-target-1"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("new-window args missing %q: %v", want, newWindows[0])
+		}
+	}
+	if len(switchedTo) != 0 {
+		t.Errorf("should not switch-client when opening in current session alpha, got %v", switchedTo)
+	}
+	if len(recorded) != 1 || recorded[0]["session_id"] != "conv-id-1" || recorded[0]["space"] != "alpha" {
+		t.Errorf("unexpected recorded open payload: %+v", recorded)
+	}
+
+	// When CurrentSession is unavailable, falls back to conv.Space ("beta"), skips missing CWD, and switches to beta.
+	curSession = ""
+	err = b.OpenConversation(context.Background(), model.ConversationEntry{
+		Agent: "codex",
+		ID:    "conv-id-2",
+		App:   "codex",
+		CWD:   "/missing/dir",
+		Space: "beta",
+	}, true)
+	if err != nil {
+		t.Fatalf("OpenConversation fallback error: %v", err)
+	}
+	if len(newWindows) != 2 {
+		t.Fatalf("expected 2 new-window calls, got %d", len(newWindows))
+	}
+	joined2 := strings.Join(newWindows[1], " ")
+	wantDefaultB64 := base64.StdEncoding.EncodeToString([]byte("/usr/local/bin/harness codex profile default"))
+	if !strings.Contains(joined2, "-t beta:") || !strings.Contains(joined2, "-n codex") || strings.Contains(joined2, "-c /missing/dir") || !strings.Contains(joined2, wantDefaultB64) || !strings.Contains(joined2, "conv-id-2") {
+		t.Errorf("fallback new-window args = %v", newWindows[1])
+	}
+	if len(switchedTo) != 1 || switchedTo[0] != "beta" {
+		t.Errorf("expected switch-client to beta, got %v", switchedTo)
+	}
+
+	// Explicit "default" profile keeps window label as the agent name (not "default").
+	curSession = "alpha"
+	err = b.OpenConversation(context.Background(), model.ConversationEntry{
+		Agent:   "codex",
+		ID:      "conv-id-3",
+		App:     "codex",
+		Profile: "default",
+		CWD:     "/repo/work",
+	}, false)
+	if err != nil {
+		t.Fatalf("OpenConversation default profile error: %v", err)
+	}
+	if len(newWindows) != 3 {
+		t.Fatalf("expected 3 new-window calls, got %d", len(newWindows))
+	}
+	joined3 := strings.Join(newWindows[2], " ")
+	if !strings.Contains(joined3, "-n codex") || strings.Contains(joined3, "-n default") || !strings.Contains(joined3, wantDefaultB64) {
+		t.Errorf("default profile new-window args = %v", newWindows[2])
+	}
+}

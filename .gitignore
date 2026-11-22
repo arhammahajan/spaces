@@ -1,0 +1,4 @@
+/tmux-spaces
+*.test
+*.out
+.DS_Store
