@@ -82,112 +82,119 @@ func TestBuiltinPluginsRegistrationAndLookups(t *testing.T) {
 }
 
 func TestProviderPluginsFeatureParity(t *testing.T) {
+	reg := agent.NewRegistry()
+	RegisterAll(reg)
+
 	cases := []struct {
 		name           string
-		plugin         agent.Plugin
+		id             string
 		sampleViewport string
 		wantTitle      string
-		checkManifest  bool
 	}{
 		{
 			name:           "antigravity",
-			plugin:         NewAntigravity(),
+			id:             "antigravity",
 			sampleViewport: "> inspect plugin parity\n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  true,
 		},
 		{
 			name:           "claude",
-			plugin:         NewClaude(),
+			id:             "claude",
 			sampleViewport: "❯ inspect plugin parity\n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  true,
 		},
 		{
 			name:           "codex",
-			plugin:         NewCodex(),
+			id:             "codex",
 			sampleViewport: "gpt-5 high · ~/dev/spaces · inspect plugin parity\n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  true,
 		},
 		{
 			name:           "cursor",
-			plugin:         NewCursor(),
+			id:             "cursor-agent",
 			sampleViewport: "Cursor Agent · inspect plugin parity\n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  true,
 		},
 		{
 			name:           "deepseek",
-			plugin:         NewDeepSeek(),
+			id:             "deepseek",
 			sampleViewport: "DeepSeek · inspect plugin parity\n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  false, // manifest added in parallel branch
 		},
 		{
 			name:           "kilo",
-			plugin:         NewKilo(),
+			id:             "kilo",
 			sampleViewport: "‹2  Home  inspect plugin parity +  \n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  true,
 		},
 		{
 			name:           "kimi",
-			plugin:         NewKimi(),
+			id:             "kimi",
 			sampleViewport: "Kimi Code · inspect plugin parity\n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  true,
 		},
 		{
 			name:           "muse",
-			plugin:         NewMuse(),
+			id:             "muse",
 			sampleViewport: "claude-sonnet · high · ~/dev/spaces · inspect plugin parity 4k/200k (2%)\n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  true,
 		},
 		{
 			name:           "opencode",
-			plugin:         NewOpenCode(),
+			id:             "opencode",
 			sampleViewport: "‹2  Home  inspect plugin parity +  \n",
 			wantTitle:      "inspect plugin parity",
-			checkManifest:  true,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			spec := tc.plugin.Spec()
+			plugin, ok := reg.ResolveRuntime(tc.id)
+			if !ok {
+				t.Fatalf("%s: ResolveRuntime(%q) = false, want true", tc.name, tc.id)
+			}
+			spec := plugin.Spec()
 			if spec.ScreenManifestID == "" {
 				t.Errorf("%s: Spec().ScreenManifestID is empty", tc.name)
 			}
 			if len(spec.WorktreeTitlePrefixes) == 0 {
 				t.Errorf("%s: Spec().WorktreeTitlePrefixes is empty", tc.name)
 			}
-			if cp := tc.plugin.ConfigProvider(); cp == nil || len(cp.MCPConfigTargets()) == 0 {
+			if cp := plugin.ConfigProvider(); cp == nil || len(cp.MCPConfigTargets()) == 0 {
 				t.Errorf("%s: ConfigProvider().MCPConfigTargets() is empty", tc.name)
 			}
-			te := tc.plugin.TitleExtractor()
+			te := plugin.TitleExtractor()
 			if te == nil {
 				t.Fatalf("%s: TitleExtractor() is nil", tc.name)
 			}
 			if got := te.ExtractTitle(tc.sampleViewport); got != tc.wantTitle {
 				t.Errorf("%s: ExtractTitle() = %q, want %q", tc.name, got, tc.wantTitle)
 			}
-			if tc.plugin.HookPolicy() == nil {
+			if plugin.HookPolicy() == nil {
 				t.Errorf("%s: HookPolicy() is nil", tc.name)
 			}
-			if tc.plugin.SessionResolver() == nil {
-				t.Errorf("%s: SessionResolver() is nil", tc.name)
+			resolver := plugin.SessionResolver()
+			if resolver == nil {
+				t.Fatalf("%s: SessionResolver() is nil", tc.name)
 			}
-			if tc.plugin.Launcher() == nil {
+			if !resolver.SuppressMultiPaneCWDTitle() {
+				t.Errorf("%s: SessionResolver().SuppressMultiPaneCWDTitle() = false, want true", tc.name)
+			}
+			if plugin.Launcher() == nil {
 				t.Errorf("%s: Launcher() is nil", tc.name)
 			}
-			sr := tc.plugin.ScreenReader()
+			sr := plugin.ScreenReader()
 			if sr == nil {
 				t.Fatalf("%s: ScreenReader() is nil", tc.name)
 			}
-			if tc.checkManifest && !sr.HasManifest() {
+			if !sr.HasManifest() {
 				t.Errorf("%s: ScreenReader().HasManifest() = false, want true", tc.name)
+			}
+			if plugin.ConversationStore() == nil {
+				t.Errorf("%s: ConversationStore() is nil", tc.name)
+			}
+			if plugin.LogParser() == nil {
+				t.Errorf("%s: LogParser() is nil", tc.name)
 			}
 		})
 	}
