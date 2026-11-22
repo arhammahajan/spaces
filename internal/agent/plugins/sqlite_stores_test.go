@@ -502,3 +502,85 @@ func TestSQLiteFullMessageParseLogAndSearch(t *testing.T) {
 		t.Fatalf("kilo SQLite body search = (%+v, %v), want ses-kilo-1", hits, err)
 	}
 }
+
+func TestKiloPlaceholderTitleFallbackAndEmptySessionSkip(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	kiloDir := filepath.Join(home, ".local", "share", "kilo")
+	if err := os.MkdirAll(kiloDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(kiloDir, "kilo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE session (
+			id TEXT, parent_id TEXT, directory TEXT, title TEXT, model TEXT,
+			time_created INTEGER, time_updated INTEGER, time_archived INTEGER
+		);
+		CREATE TABLE message (
+			id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT
+		);
+		CREATE TABLE part (
+			id TEXT, message_id TEXT, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT
+		);
+		INSERT INTO session VALUES ('ses-real', '', '/repo/spaces', 'New session - 2026-11-22T16:31:28.215Z', '', 1795365088000, 1795365090000, 0);
+		INSERT INTO session VALUES ('ses-empty', '', '/repo/spaces', 'New session - 2026-11-19T09:40:46.067Z', '', 1795000000000, 1795000000000, 0);
+		INSERT INTO message VALUES ('m1', 'ses-real', 1795365088244, 1795365088244, '{"role":"user","model":{"modelID":"deepseek-v4.1-flash"}}');
+		INSERT INTO part VALUES ('p1', 'm1', 'ses-real', 1795365088245, 1795365088245, '{"type":"text","text":"hi what is your name"}');
+	`)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recs, err := NewKiloConversationStore(home).List(ctx, agent.ConversationListOptions{})
+	if err != nil {
+		t.Fatalf("Kilo List err = %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("got %d kilo records (%+v), want 1 (empty placeholder skipped)", len(recs), recs)
+	}
+	if recs[0].SessionID != "ses-real" || recs[0].Title != "hi what is your name" || recs[0].Model != "deepseek-v4.1-flash" {
+		t.Errorf("kilo record = %+v, want id=ses-real title='hi what is your name' model=deepseek-v4.1-flash", recs[0])
+	}
+}
+
+func TestMuseSQLiteSessionIndexStore(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	museDir := filepath.Join(home, ".local", "share", "muse")
+	if err := os.MkdirAll(museDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", filepath.Join(museDir, "session-index.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+		CREATE TABLE sessions (
+			session_id TEXT, workspace_root TEXT, title TEXT, effective_long_title TEXT,
+			first_user_prompt TEXT, model_id TEXT, created_at_us INTEGER, updated_at_us INTEGER,
+			prompt_count INTEGER, session_log_path TEXT, msp_parent_session_id TEXT
+		);
+		INSERT INTO sessions VALUES ('01a1f9ec-cf40-7151-9b21-2f41d7ff7ab7', '/repo/model-router', 'who are you', '', 'who are you', 'claude-sonnet', 1795194408000000, 1795194409000000, 2, '/tmp/s.jsonl', '');
+		INSERT INTO sessions VALUES ('01a1f9ec-subagent', '/repo/model-router', 'sub', '', 'sub', 'claude-sonnet', 1795194408000000, 1795194409000000, 1, '/tmp/sub.jsonl', '01a1f9ec-cf40-7151-9b21-2f41d7ff7ab7');
+		INSERT INTO sessions VALUES ('01a1f9ec-empty', '/repo/dots', 'New session', '', '', 'claude-sonnet', 1795194408000000, 1795194408000000, 0, '/tmp/empty.jsonl', '');
+	`)
+	db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recs, err := NewMuseConversationStore(home).List(ctx, agent.ConversationListOptions{})
+	if err != nil {
+		t.Fatalf("Muse List err = %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("got %d muse records (%+v), want 1 (subagent and empty placeholder skipped)", len(recs), recs)
+	}
+	if recs[0].SessionID != "01a1f9ec-cf40-7151-9b21-2f41d7ff7ab7" || recs[0].Title != "who are you" || recs[0].CWD != "/repo/model-router" {
+		t.Errorf("muse record = %+v", recs[0])
+	}
+}

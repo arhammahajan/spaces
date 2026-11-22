@@ -127,6 +127,232 @@ func loadKiloSQLite(ctx context.Context, home string) []agent.ConversationRecord
 	return loadSessionTableSQLite(ctx, dbPath, "kilo", "kilo", []string{"session"})
 }
 
+// loadMuseSQLite reads indexed sessions from Muse's SQLite database
+// (<home>/.local/share/muse/session-index.db), skipping subagent rows.
+func loadMuseSQLite(ctx context.Context, home string) []agent.ConversationRecord {
+	if ctx.Err() != nil {
+		return nil
+	}
+	dbPath := filepath.Join(home, ".local", "share", "muse", "session-index.db")
+	db, err := openReadOnlySQLite(dbPath)
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+
+	if !sqliteTableExists(ctx, db, "sessions") {
+		return nil
+	}
+	cols := sqliteTableColumns(ctx, db, "sessions")
+	colExpr := func(name string) string {
+		if cols[strings.ToLower(name)] {
+			return name
+		}
+		return "NULL"
+	}
+
+	query := fmt.Sprintf(
+		"SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s FROM sessions",
+		colExpr("session_id"),
+		colExpr("workspace_root"),
+		colExpr("title"),
+		colExpr("effective_long_title"),
+		colExpr("first_user_prompt"),
+		colExpr("model_id"),
+		colExpr("created_at_us"),
+		colExpr("updated_at_us"),
+		colExpr("prompt_count"),
+		colExpr("session_log_path"),
+		colExpr("msp_parent_session_id"),
+	)
+
+	rows, err := db.QueryContext(ctx, query)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	var records []agent.ConversationRecord
+	for rows.Next() {
+		if ctx.Err() != nil {
+			break
+		}
+		var (
+			sidNull     sql.NullString
+			cwdNull     sql.NullString
+			titleNull   sql.NullString
+			longNull    sql.NullString
+			promptNull  sql.NullString
+			modelNull   sql.NullString
+			createdRaw  any
+			updatedRaw  any
+			promptCount sql.NullInt64
+			logPathNull sql.NullString
+			parentNull  sql.NullString
+		)
+		if err := rows.Scan(
+			&sidNull, &cwdNull, &titleNull, &longNull, &promptNull,
+			&modelNull, &createdRaw, &updatedRaw, &promptCount,
+			&logPathNull, &parentNull,
+		); err != nil {
+			continue
+		}
+		if strings.TrimSpace(parentNull.String) != "" {
+			continue
+		}
+		id := strings.TrimSpace(sidNull.String)
+		if id == "" {
+			continue
+		}
+
+		firstPrompt := strings.TrimSpace(promptNull.String)
+		title := cleanSingleLine(firstNonEmpty(titleNull.String, longNull.String, firstPrompt), maxDerivedTitleLen)
+		msgCount := 0
+		if promptCount.Valid && promptCount.Int64 > 0 {
+			msgCount = int(promptCount.Int64)
+		}
+		if isPlaceholderSessionTitle(title) && msgCount == 0 && firstPrompt == "" {
+			continue
+		}
+		createdMs := parseSQLiteTimestampMs(createdRaw)
+		updatedMs := parseSQLiteTimestampMs(updatedRaw)
+		if updatedMs == 0 {
+			updatedMs = createdMs
+		}
+		if createdMs == 0 {
+			createdMs = updatedMs
+		}
+
+		srcPath := strings.TrimSpace(logPathNull.String)
+		if srcPath == "" {
+			srcPath = dbPath + "#" + id
+		}
+
+		records = append(records, agent.ConversationRecord{
+			Agent:        "muse",
+			App:          "muse",
+			SessionID:    id,
+			Title:        title,
+			CWD:          strings.TrimSpace(cwdNull.String),
+			Model:        strings.TrimSpace(modelNull.String),
+			FirstMessage: firstPrompt,
+			LastMessage:  firstPrompt,
+			MessageCount: msgCount,
+			CreatedAtMs:  createdMs,
+			UpdatedAtMs:  updatedMs,
+			SourcePath:   srcPath,
+		})
+	}
+	return records
+}
+
+type sqliteSessionSummary struct {
+	firstUser string
+	lastText  string
+	msgCount  int
+	model     string
+}
+
+func isPlaceholderSessionTitle(s string) bool {
+	low := strings.ToLower(strings.TrimSpace(s))
+	if low == "" || low == "new session" || low == "untitled" {
+		return true
+	}
+	return strings.HasPrefix(low, "new session - ")
+}
+
+func loadSQLiteSessionSummaries(ctx context.Context, db *sql.DB) map[string]sqliteSessionSummary {
+	out := make(map[string]sqliteSessionSummary)
+	if sqliteTableExists(ctx, db, "message") && sqliteTableExists(ctx, db, "part") {
+		rows, err := db.QueryContext(ctx, `
+			SELECT m.session_id, m.data, p.data
+			FROM message m
+			LEFT JOIN part p ON p.message_id = m.id
+			ORDER BY m.session_id ASC, m.time_created ASC, p.time_created ASC
+		`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				if ctx.Err() != nil {
+					break
+				}
+				var (
+					sidNull  sql.NullString
+					msgData  sql.NullString
+					partData sql.NullString
+				)
+				if err := rows.Scan(&sidNull, &msgData, &partData); err != nil {
+					continue
+				}
+				sid := strings.TrimSpace(sidNull.String)
+				if sid == "" {
+					continue
+				}
+				role, modelName := extractSQLiteRoleAndModel(msgData.String)
+				text := extractSQLiteMessageText(partData.String)
+				if text == "" {
+					text = extractSQLiteMessageText(msgData.String)
+				}
+				sum := out[sid]
+				if sum.model == "" && modelName != "" {
+					sum.model = modelName
+				}
+				if text != "" {
+					sum.msgCount++
+					if role == "user" && sum.firstUser == "" && !isBoilerplateUserMessage(text) {
+						sum.firstUser = text
+					}
+					sum.lastText = text
+				}
+				out[sid] = sum
+			}
+			if len(out) > 0 {
+				return out
+			}
+		}
+	}
+
+	if sqliteTableExists(ctx, db, "session_message") {
+		rows, err := db.QueryContext(ctx, `
+			SELECT session_id, type, data
+			FROM session_message
+			ORDER BY session_id ASC, seq ASC, time_created ASC
+		`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				if ctx.Err() != nil {
+					break
+				}
+				var (
+					sidNull sql.NullString
+					typNull sql.NullString
+					dataStr sql.NullString
+				)
+				if err := rows.Scan(&sidNull, &typNull, &dataStr); err != nil {
+					continue
+				}
+				sid := strings.TrimSpace(sidNull.String)
+				if sid == "" {
+					continue
+				}
+				text := extractSQLiteMessageText(dataStr.String)
+				if text == "" {
+					continue
+				}
+				sum := out[sid]
+				sum.msgCount++
+				if strings.EqualFold(strings.TrimSpace(typNull.String), "user") && sum.firstUser == "" && !isBoilerplateUserMessage(text) {
+					sum.firstUser = text
+				}
+				sum.lastText = text
+				out[sid] = sum
+			}
+		}
+	}
+	return out
+}
+
 func loadSessionTableSQLite(ctx context.Context, dbPath, agentID, appName string, candidateTables []string) []agent.ConversationRecord {
 	if ctx.Err() != nil {
 		return nil
@@ -147,6 +373,8 @@ func loadSessionTableSQLite(ctx context.Context, dbPath, agentID, appName string
 	if tableName == "" {
 		return nil
 	}
+
+	summaries := loadSQLiteSessionSummaries(ctx, db)
 
 	cols := sqliteTableColumns(ctx, db, tableName)
 	colExpr := func(name string) string {
@@ -181,14 +409,14 @@ func loadSessionTableSQLite(ctx context.Context, dbPath, agentID, appName string
 			break
 		}
 		var (
-			idNull       sql.NullString
-			parentNull   sql.NullString
-			dirNull      sql.NullString
-			titleNull    sql.NullString
-			modelNull    sql.NullString
-			createdRaw   any
-			updatedRaw   any
-			archivedRaw  any
+			idNull      sql.NullString
+			parentNull  sql.NullString
+			dirNull     sql.NullString
+			titleNull   sql.NullString
+			modelNull   sql.NullString
+			createdRaw  any
+			updatedRaw  any
+			archivedRaw any
 		)
 		if err := rows.Scan(&idNull, &parentNull, &dirNull, &titleNull, &modelNull, &createdRaw, &updatedRaw, &archivedRaw); err != nil {
 			continue
@@ -199,6 +427,26 @@ func loadSessionTableSQLite(ctx context.Context, dbPath, agentID, appName string
 		id := strings.TrimSpace(idNull.String)
 		if id == "" {
 			continue
+		}
+
+		sum := summaries[id]
+		title := cleanSingleLine(titleNull.String, maxDerivedTitleLen)
+		if isPlaceholderSessionTitle(title) {
+			if sum.firstUser != "" {
+				title = cleanSingleLine(sum.firstUser, maxDerivedTitleLen)
+			} else if sum.lastText != "" {
+				title = cleanSingleLine(sum.lastText, maxDerivedTitleLen)
+			} else if sum.msgCount == 0 {
+				// Skip empty abandoned placeholder sessions ("New session - ...").
+				continue
+			} else {
+				title = ""
+			}
+		}
+
+		modelName := parseSQLiteModel(modelNull.String)
+		if modelName == "" {
+			modelName = sum.model
 		}
 
 		createdMs := parseSQLiteTimestampMs(createdRaw)
@@ -212,16 +460,19 @@ func loadSessionTableSQLite(ctx context.Context, dbPath, agentID, appName string
 		}
 
 		records = append(records, agent.ConversationRecord{
-			Agent:       agentID,
-			App:         appName,
-			SessionID:   id,
-			Title:       cleanSingleLine(titleNull.String, maxDerivedTitleLen),
-			CWD:         strings.TrimSpace(dirNull.String),
-			Model:       parseSQLiteModel(modelNull.String),
-			CreatedAtMs: createdMs,
-			UpdatedAtMs: updatedMs,
-			Archived:    archivedMs > 0,
-			SourcePath:  dbPath + "#" + id,
+			Agent:        agentID,
+			App:          appName,
+			SessionID:    id,
+			Title:        title,
+			CWD:          strings.TrimSpace(dirNull.String),
+			Model:        modelName,
+			FirstMessage: sum.firstUser,
+			LastMessage:  sum.lastText,
+			MessageCount: sum.msgCount,
+			CreatedAtMs:  createdMs,
+			UpdatedAtMs:  updatedMs,
+			Archived:     archivedMs > 0,
+			SourcePath:   dbPath + "#" + id,
 		})
 	}
 	return records

@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -229,11 +231,12 @@ func NewMuseConversationStore(homeDir string) agent.ConversationStore {
 	return &fileConversationStore{
 		homeDir: homeDir,
 		cfg: providerStoreConfig{
-			agentID:    "muse",
-			appName:    "muse",
-			relDirs:    []string{".config/muse/sessions", ".local/share/muse/sessions"},
-			fileFilter: jsonOrJSONLFilter,
-			parser:     NewMuseLogParser(),
+			agentID:      "muse",
+			appName:      "muse",
+			relDirs:      []string{".config/muse/sessions", ".local/share/muse/sessions"},
+			fileFilter:   jsonOrJSONLFilter,
+			parser:       NewMuseLogParser(),
+			sqliteLoader: loadMuseSQLite,
 		},
 	}
 }
@@ -350,11 +353,19 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 		}
 	}
 
-	if s.cfg.agentID == "antigravity" && hasSQLiteRecords {
-		// conversation_summaries.db is authoritative for this home; walking
-		// conversations/ and brain/ would add untitled subagents and internal
-		// .system_generated/messages/*.json artifacts.
+	if (s.cfg.agentID == "antigravity" || s.cfg.agentID == "muse") && hasSQLiteRecords {
+		// SQLite index is authoritative for this home (avoids untitled subagents
+		// and internal artifacts).
 		return s.finalizeRecords(bySession, opts), nil
+	}
+
+	var codexTitles map[string]string
+	if s.cfg.agentID == "codex" {
+		codexTitles = loadCodexSessionIndex(home)
+	}
+	var kimiIdx kimiSessionIndex
+	if s.cfg.agentID == "kimi" {
+		kimiIdx = loadKimiIndexes(home)
 	}
 
 	for _, relDir := range s.cfg.relDirs {
@@ -392,8 +403,30 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 			if !ok {
 				return nil
 			}
-			if s.cfg.agentID == "kimi" && rec.MessageCount == 0 && strings.TrimSpace(rec.Title) == "" {
-				return nil
+			if s.cfg.agentID == "codex" && len(codexTitles) > 0 {
+				if idxTitle := strings.TrimSpace(codexTitles[rec.SessionID]); idxTitle != "" {
+					rec.Title = cleanSingleLine(idxTitle, maxDerivedTitleLen)
+				}
+			}
+			if s.cfg.agentID == "kimi" {
+				if kimiIdx.deleted[rec.SessionID] {
+					return nil
+				}
+				if rec.CWD == "" {
+					if wd := kimiIdx.workDirBySession[rec.SessionID]; wd != "" {
+						rec.CWD = wd
+					} else if rel, err := filepath.Rel(root, path); err == nil {
+						parts := strings.Split(filepath.ToSlash(rel), "/")
+						if len(parts) >= 2 {
+							if wd := kimiIdx.workDirByHash[strings.ToLower(parts[0])]; wd != "" {
+								rec.CWD = wd
+							}
+						}
+					}
+				}
+				if rec.MessageCount == 0 && strings.TrimSpace(rec.Title) == "" {
+					return nil
+				}
 			}
 			key := rec.SessionID
 			if key == "" {
@@ -509,6 +542,9 @@ func (s *fileConversationStore) loadRecord(ctx context.Context, root, path strin
 	}
 
 	meta := extractFileMetadata(ctx, s.cfg.agentID, path)
+	if meta.isSubagent {
+		return agent.ConversationRecord{}, false
+	}
 	if meta.sessionID != "" {
 		rec.SessionID = meta.sessionID
 	}
@@ -714,12 +750,35 @@ func inferSessionIDFromPath(agentID, root, path string) string {
 				return seg
 			}
 		}
+		// Kimi layouts:
+		//  - ~/.kimi-code/sessions/wd_<name>_<hash>/session_<uuid>/agents/main/wire.jsonl
+		//  - ~/.kimi/sessions/<cwd-md5-hash>/<uuid>/wire.jsonl (or context.jsonl)
+		if agentID == "kimi" {
+			for _, seg := range parts {
+				if strings.HasPrefix(seg, "session_") && len(seg) > len("session_") {
+					return seg
+				}
+			}
+			if len(parts) >= 3 && parts[1] != "." && parts[1] != "" {
+				return parts[1]
+			}
+			if len(parts) == 2 && parts[0] != "." && parts[0] != "" {
+				return parts[0]
+			}
+		}
+		// Muse layout: sessions/YYYY/MM/DD/<session-uuid>/session.jsonl
+		if agentID == "muse" && len(parts) >= 2 {
+			parent := strings.TrimSpace(parts[len(parts)-2])
+			if parent != "" && parent != "." {
+				return parent
+			}
+		}
 		// Generic nested session dir like sessions/<session-id>/session.json or transcript.jsonl
 		baseNoExt := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
 		switch strings.ToLower(baseNoExt) {
 		case "transcript", "transcript_full", "session", "metadata", "wire", "context", "messages", "chat":
-			if len(parts) >= 2 && parts[0] != "." && parts[0] != "" {
-				return parts[0]
+			if len(parts) >= 2 && parts[len(parts)-2] != "." && parts[len(parts)-2] != "" {
+				return parts[len(parts)-2]
 			}
 		}
 	}
@@ -750,8 +809,110 @@ type fileMetadata struct {
 	model       string
 	profile     string
 	archived    bool
+	isSubagent  bool
 	createdAtMs int64
 	updatedAtMs int64
+}
+
+func loadCodexSessionIndex(home string) map[string]string {
+	idxPath := filepath.Join(home, ".codex", "session_index.jsonl")
+	f, err := os.Open(idxPath)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	titles := make(map[string]string)
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 32*1024), 1024*1024)
+	for scanner.Scan() {
+		line := bytes.TrimSpace(scanner.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		var rec struct {
+			ID         string `json:"id"`
+			ThreadName string `json:"thread_name"`
+			Title      string `json:"title"`
+		}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			continue
+		}
+		id := strings.TrimSpace(rec.ID)
+		name := firstNonEmpty(rec.ThreadName, rec.Title)
+		if id != "" && name != "" {
+			titles[id] = name
+		}
+	}
+	return titles
+}
+
+type kimiSessionIndex struct {
+	workDirBySession map[string]string
+	workDirByHash    map[string]string
+	deleted          map[string]bool
+}
+
+func loadKimiIndexes(home string) kimiSessionIndex {
+	idx := kimiSessionIndex{
+		workDirBySession: make(map[string]string),
+		workDirByHash:    make(map[string]string),
+		deleted:          make(map[string]bool),
+	}
+
+	// 1. ~/.kimi-code/session_index.jsonl (sessionId -> workDir, deleted tombstones)
+	if f, err := os.Open(filepath.Join(home, ".kimi-code", "session_index.jsonl")); err == nil {
+		defer f.Close()
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 32*1024), 1024*1024)
+		for scanner.Scan() {
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+			var rec struct {
+				SessionID string `json:"sessionId"`
+				WorkDir   string `json:"workDir"`
+				Deleted   bool   `json:"deleted"`
+			}
+			if err := json.Unmarshal(line, &rec); err != nil {
+				continue
+			}
+			sid := strings.TrimSpace(rec.SessionID)
+			if sid == "" {
+				continue
+			}
+			if rec.Deleted {
+				idx.deleted[sid] = true
+			} else {
+				delete(idx.deleted, sid)
+				if wd := strings.TrimSpace(rec.WorkDir); wd != "" {
+					idx.workDirBySession[sid] = wd
+				}
+			}
+		}
+	}
+
+	// 2. ~/.kimi/kimi.json (work_dirs[].path -> md5(path) used as ~/.kimi/sessions/<hash>)
+	if data, err := os.ReadFile(filepath.Join(home, ".kimi", "kimi.json")); err == nil {
+		var doc struct {
+			WorkDirs []struct {
+				Path string `json:"path"`
+			} `json:"work_dirs"`
+		}
+		if err := json.Unmarshal(bytes.TrimSpace(data), &doc); err == nil {
+			for _, wd := range doc.WorkDirs {
+				p := strings.TrimSpace(wd.Path)
+				if p == "" {
+					continue
+				}
+				sum := md5.Sum([]byte(p))
+				idx.workDirByHash[hex.EncodeToString(sum[:])] = p
+			}
+		}
+	}
+
+	return idx
 }
 
 func extractFileMetadata(ctx context.Context, provider, path string) fileMetadata {
@@ -774,29 +935,72 @@ func extractFileMetadata(ctx context.Context, provider, path string) fileMetadat
 		if err := json.Unmarshal(line, &obj); err != nil {
 			return nil
 		}
-		applyMetaObject(&meta, obj)
-		// Codex embeds session_meta / turn_context inside payload
+		// Codex embeds session_meta / turn_context inside payload.
+		// NOTE: turn_context carries `"summary": "none"` (reasoning summary mode),
+		// which must NOT be mistaken for a conversation title.
 		if provider == "codex" {
-			if payload, ok := obj["payload"].(map[string]any); ok {
-				typ := strField(obj, "type")
-				if typ == "session_meta" || typ == "turn_context" {
-					applyMetaObject(&meta, payload)
+			typ := strField(obj, "type")
+			payload, _ := obj["payload"].(map[string]any)
+			switch typ {
+			case "session_meta":
+				if payload != nil {
+					if strField(payload, "parent_thread_id") != "" {
+						meta.isSubagent = true
+					}
+					if meta.sessionID == "" {
+						meta.sessionID = firstNonEmpty(strField(payload, "id"), strField(payload, "session_id"))
+					}
+					if meta.title == "" {
+						meta.title = firstNonEmpty(strField(payload, "thread_name"), strField(payload, "title"))
+					}
+					if meta.cwd == "" {
+						meta.cwd = strField(payload, "cwd")
+					}
+					if meta.model == "" {
+						meta.model = strField(payload, "model")
+					}
+					if ts := parseTimestampMs(payload["timestamp"]); ts > 0 && (meta.createdAtMs == 0 || ts < meta.createdAtMs) {
+						meta.createdAtMs = ts
+					}
+				}
+			case "turn_context":
+				if payload != nil {
+					if meta.cwd == "" {
+						meta.cwd = strField(payload, "cwd")
+					}
+					if meta.model == "" {
+						meta.model = strField(payload, "model")
+					}
 				}
 			}
+			return nil
 		}
-		// Muse embeds session stream ID, route_facts (cwd), and metadata/run_model (model_id)
+		// Muse JSONL lines carry a per-event `"id"` (record UUID) and a nested
+		// `"stream": {"kind": "session", "id": "<session-uuid>"}`. Extract stream.id
+		// for sessionID and never treat the per-event `"id"` as the session ID.
 		if provider == "muse" {
 			if stream, ok := obj["stream"].(map[string]any); ok {
-				if sid := strField(stream, "id"); sid != "" && meta.sessionID == "" {
+				if sid := strField(stream, "id"); sid != "" {
 					meta.sessionID = sid
 				}
-			}
-			if payload, ok := obj["payload"].(map[string]any); ok {
-				if recObj, ok := payload["record"].(map[string]any); ok {
-					applyMetaObject(&meta, recObj)
+				// Apply non-ID metadata from obj and payload.record while preserving stream.id
+				savedSID := meta.sessionID
+				applyMetaObject(&meta, obj)
+				if payload, ok := obj["payload"].(map[string]any); ok {
+					if recObj, ok := payload["record"].(map[string]any); ok {
+						applyMetaObject(&meta, recObj)
+					}
 				}
+				if savedSID != "" {
+					meta.sessionID = savedSID
+				}
+				return nil
 			}
+			// Flat JSONL format (no stream envelope): apply standard metadata
+			applyMetaObject(&meta, obj)
+			return nil
 		}
+		applyMetaObject(&meta, obj)
 		// Claude embeds model inside message
 		if msg, ok := obj["message"].(map[string]any); ok {
 			if meta.model == "" {

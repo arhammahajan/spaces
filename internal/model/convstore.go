@@ -15,10 +15,11 @@ import (
 )
 
 const (
-	maxConvScanWorkers  = 8
-	maxConvSnippetRunes = 140
-	maxConvTitleRunes   = 120
-	maxConvPreviewRunes = 200
+	maxConvScanWorkers      = 8
+	maxConvSnippetRunes     = 140
+	maxConvTitleRunes       = 120
+	maxConvPreviewRunes     = 200
+	currentConvCacheVersion = 2
 )
 
 // ConversationHomeDirFn resolves the real user home directory used when
@@ -132,6 +133,9 @@ func loadConversationDiskCache() (cachedConvSnapshot, bool) {
 	if err := json.Unmarshal(raw, &snap); err != nil {
 		return cachedConvSnapshot{}, false
 	}
+	if snap.Version != currentConvCacheVersion {
+		return cachedConvSnapshot{}, false
+	}
 	if len(snap.Conversations) == 0 && snap.SyncedMs <= 0 {
 		return cachedConvSnapshot{}, false
 	}
@@ -144,7 +148,7 @@ func saveConversationDiskCache(snap cachedConvSnapshot) error {
 		return nil
 	}
 	if snap.Version == 0 {
-		snap.Version = 1
+		snap.Version = currentConvCacheVersion
 	}
 
 	data, err := json.Marshal(snap)
@@ -596,7 +600,7 @@ func fetchConversationsNative(ctx context.Context, refresh, includeArchived bool
 	convCache.mu.Unlock()
 
 	_ = saveConversationDiskCache(cachedConvSnapshot{
-		Version:         1,
+		Version:         currentConvCacheVersion,
 		SyncedMs:        nowMs,
 		IndexedMessages: indexedMessages,
 		Conversations:   entries,

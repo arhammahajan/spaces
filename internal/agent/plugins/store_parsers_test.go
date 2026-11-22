@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -479,5 +480,143 @@ func TestParsersRespectContextCancellationAndEmptyFiles(t *testing.T) {
 	}
 	if _, err := NewClaudeConversationStore(dir).Search(canceled, "x", agent.ConversationListOptions{}); !errors.Is(err, context.Canceled) {
 		t.Errorf("canceled Search err = %v, want context.Canceled", err)
+	}
+}
+
+func TestCodexTurnContextSummaryNoneAndSessionIndex(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+
+	// Write ~/.codex/session_index.jsonl
+	idxPath := filepath.Join(home, ".codex", "session_index.jsonl")
+	writeFixture(t, idxPath, strings.Join([]string{
+		`{"id":"codex-indexed","thread_name":"Ask Agents About GTA Games","updated_at":"2026-11-22T14:18:59Z"}`,
+	}, "\n")+"\n")
+
+	// 1. Rollout with turn_context summary="none" AND entry in session_index.jsonl
+	writeFixture(t, filepath.Join(home, ".codex", "sessions", "2026", "11", "22", "rollout-2026-11-22T19-48-47-codex-indexed.jsonl"), strings.Join([]string{
+		`{"timestamp":"2026-11-22T14:18:53Z","type":"session_meta","payload":{"id":"codex-indexed","cwd":"/repo/spaces","model":"gpt-5"}}`,
+		`{"timestamp":"2026-11-22T14:18:54Z","type":"turn_context","payload":{"cwd":"/repo/spaces","model":"gpt-5","summary":"none"}}`,
+		`{"timestamp":"2026-11-22T14:18:55Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>...</environment_context>"}]}}`,
+		`{"timestamp":"2026-11-22T14:18:56Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"spawn two subagents"}]}}`,
+	}, "\n")+"\n")
+
+	// 2. Rollout with turn_context summary="none" and NO session_index entry -> should derive from user prompt, NOT "none"
+	writeFixture(t, filepath.Join(home, ".codex", "sessions", "2026", "11", "22", "rollout-2026-11-22T19-49-00-codex-unindexed.jsonl"), strings.Join([]string{
+		`{"timestamp":"2026-11-22T14:19:00Z","type":"session_meta","payload":{"id":"codex-unindexed","cwd":"/repo/spaces","model":"gpt-5"}}`,
+		`{"timestamp":"2026-11-22T14:19:01Z","type":"turn_context","payload":{"cwd":"/repo/spaces","model":"gpt-5","summary":"none"}}`,
+		`{"timestamp":"2026-11-22T14:19:02Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix codex title extraction"}]}}`,
+	}, "\n")+"\n")
+
+	// 3. Subagent rollout with parent_thread_id -> should be skipped
+	writeFixture(t, filepath.Join(home, ".codex", "sessions", "2026", "11", "22", "rollout-2026-11-22T19-49-43-codex-sub.jsonl"), strings.Join([]string{
+		`{"timestamp":"2026-11-22T14:19:43Z","type":"session_meta","payload":{"id":"codex-sub","parent_thread_id":"codex-indexed","cwd":"/repo/spaces"}}`,
+		`{"timestamp":"2026-11-22T14:19:44Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"subagent work"}]}}`,
+	}, "\n")+"\n")
+
+	recs, err := NewCodexConversationStore(home).List(ctx, agent.ConversationListOptions{})
+	if err != nil {
+		t.Fatalf("Codex List err = %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("got %d codex records (%+v), want 2 (subagent skipped)", len(recs), recs)
+	}
+	byID := map[string]agent.ConversationRecord{}
+	for _, r := range recs {
+		byID[r.SessionID] = r
+	}
+	if got := byID["codex-indexed"].Title; got != "Ask Agents About GTA Games" {
+		t.Errorf("codex-indexed Title = %q, want %q", got, "Ask Agents About GTA Games")
+	}
+	if got := byID["codex-unindexed"].Title; got != "Fix codex title extraction" {
+		t.Errorf("codex-unindexed Title = %q, want %q", got, "Fix codex title extraction")
+	}
+}
+
+func TestMuseNestedSessionIDAndStreamID(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+
+	const wantSID = "01a1f9ec-cf40-7151-9b21-2f41d7ff7ab7"
+	sessionPath := filepath.Join(home, ".local", "share", "muse", "sessions", "2026", "11", "20", wantSID, "session.jsonl")
+	writeFixture(t, sessionPath, strings.Join([]string{
+		`{"schema_version":1,"id":"01a1f9ec-cf69-7103-9500-0514b140e6bf","stream":{"kind":"session","id":"` + wantSID + `"},"record_type":"event","payload":{"record":{"cwd":"/repo/muse","model_id":"claude-sonnet"}}}`,
+		`{"schema_version":1,"id":"01a1f9ec-cf69-7103-9500-052f6925b33b","stream":{"kind":"session","id":"` + wantSID + `"},"role":"user","content":"who are you and what is your name"}`,
+	}, "\n")+"\n")
+
+	recs, err := NewMuseConversationStore(home).List(ctx, agent.ConversationListOptions{})
+	if err != nil {
+		t.Fatalf("Muse List err = %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("got %d muse records, want 1", len(recs))
+	}
+	if recs[0].SessionID != wantSID {
+		t.Errorf("muse SessionID = %q, want %q (must not use event record id or year dir)", recs[0].SessionID, wantSID)
+	}
+	if recs[0].CWD != "/repo/muse" {
+		t.Errorf("muse CWD = %q, want /repo/muse", recs[0].CWD)
+	}
+}
+
+func TestKimiSessionIDsWorkDirsAndDeletedTombstones(t *testing.T) {
+	home := t.TempDir()
+	ctx := context.Background()
+
+	// 1. ~/.kimi-code/sessions/wd_.../session_<uuid>/agents/main/wire.jsonl + session_index.jsonl
+	const liveKimiCodeSID = "session_8f00e297-2bd1-49e3-b80f-2a474716b019"
+	const deletedKimiCodeSID = "session_87deec7b-bfc6-4674-9290-77142908e82a"
+	writeFixture(t, filepath.Join(home, ".kimi-code", "session_index.jsonl"), strings.Join([]string{
+		`{"sessionId":"` + liveKimiCodeSID + `","workDir":"/repo/kimi-code-app"}`,
+		`{"sessionId":"` + deletedKimiCodeSID + `","workDir":"/repo/deleted-app"}`,
+		`{"sessionId":"` + deletedKimiCodeSID + `","deleted":true}`,
+	}, "\n")+"\n")
+	writeFixture(t, filepath.Join(home, ".kimi-code", "sessions", "wd_kimi-code-app_ae02d2458d2a", liveKimiCodeSID, "agents", "main", "wire.jsonl"), strings.Join([]string{
+		`{"type":"metadata","protocol_version":"1.5"}`,
+		`{"timestamp":1793796136.8,"role":"user","content":"Fix kimi session restore"}`,
+	}, "\n")+"\n")
+	writeFixture(t, filepath.Join(home, ".kimi-code", "sessions", "wd_deleted-app_111111111111", deletedKimiCodeSID, "agents", "main", "wire.jsonl"), strings.Join([]string{
+		`{"type":"metadata","protocol_version":"1.5"}`,
+		`{"timestamp":1793796136.8,"role":"user","content":"Deleted session should not appear"}`,
+	}, "\n")+"\n")
+
+	// 2. ~/.kimi/sessions/<md5(cwd)>/<uuid>/wire.jsonl + kimi.json
+	const legacyCWD = "/repo/kimi-legacy"
+	// md5("/repo/kimi-legacy") computed via kimi.json lookup
+	writeFixture(t, filepath.Join(home, ".kimi", "kimi.json"), `{"work_dirs":[{"path":"`+legacyCWD+`"}]}`)
+	const legacyUUID = "dca9a91e-c3ba-46d3-8aaf-a7498d19dd16"
+	// Compute md5 hash matching loadKimiIndexes
+	legacyIdx := loadKimiIndexes(home)
+	var legacyHash string
+	for h, p := range legacyIdx.workDirByHash {
+		if p == legacyCWD {
+			legacyHash = h
+			break
+		}
+	}
+	if legacyHash == "" {
+		t.Fatal("expected kimi.json work_dirs hash to be populated")
+	}
+	writeFixture(t, filepath.Join(home, ".kimi", "sessions", legacyHash, legacyUUID, "wire.jsonl"), strings.Join([]string{
+		`{"type":"metadata","protocol_version":"1.10"}`,
+		`{"timestamp":1793796200.0,"role":"user","content":"Legacy kimi prompt"}`,
+	}, "\n")+"\n")
+
+	recs, err := NewKimiConversationStore(home).List(ctx, agent.ConversationListOptions{})
+	if err != nil {
+		t.Fatalf("Kimi List err = %v", err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("got %d kimi records (%+v), want 2 (deleted tombstoned)", len(recs), recs)
+	}
+	byID := map[string]agent.ConversationRecord{}
+	for _, r := range recs {
+		byID[r.SessionID] = r
+	}
+	if r, ok := byID[liveKimiCodeSID]; !ok || r.CWD != "/repo/kimi-code-app" {
+		t.Errorf("kimi-code record = (%+v, %v), want id=%s cwd=/repo/kimi-code-app", r, ok, liveKimiCodeSID)
+	}
+	if r, ok := byID[legacyUUID]; !ok || r.CWD != legacyCWD {
+		t.Errorf("kimi legacy record = (%+v, %v), want id=%s cwd=%s", r, ok, legacyUUID, legacyCWD)
 	}
 }
