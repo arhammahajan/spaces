@@ -156,5 +156,17 @@ if [ "$OSC_WATCH" = "on" ] || [ "$OSC_WATCH" = "1" ] || [ "$OSC_WATCH" = "true" 
 	done < <(tmux list-panes -a -F '#{pane_id}' 2>/dev/null || true)
 fi
 
-# Persist running spaces on detach (throttled 30s autosave also runs via status-bar).
-tmux set-hook -g "client-detached[90]" "run-shell -b \"$BIN resurrect autosave\"" 2>/dev/null || true
+# Persist running spaces immediately on detach (throttled 30s autosave also runs via status-bar).
+tmux set-hook -g "client-detached[90]" "run-shell -b \"$BIN resurrect autosave --force\"" 2>/dev/null || true
+
+# Automatically restore spaces that were last open (not exited) once per fresh
+# tmux server startup (e.g., after a reboot). Disable with
+# `set -g @spaces-auto-restore off`.
+AUTO_RESTORE="$(get_tmux_option "@spaces-auto-restore" "on")"
+if [ "$AUTO_RESTORE" = "on" ] || [ "$AUTO_RESTORE" = "1" ] || [ "$AUTO_RESTORE" = "true" ]; then
+	RESTORED_STATE="$(tmux show-option -gqv "@spaces_restored" 2>/dev/null || true)"
+	if [ -z "$RESTORED_STATE" ]; then
+		tmux set-option -gq "@spaces_restored" "pending" 2>/dev/null || true
+		tmux run-shell -b "$BIN resurrect auto-restore" 2>/dev/null || true
+	fi
+fi

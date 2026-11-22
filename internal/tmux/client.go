@@ -376,6 +376,38 @@ func (c *Client) SetSessionOption(ctx context.Context, session, option, value st
 	return err
 }
 
+// GetGlobalOption reads a global tmux option (returning "" if unset).
+func (c *Client) GetGlobalOption(ctx context.Context, option string) (string, error) {
+	out, err := c.run(ctx, "show-option", "-gqv", option)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// SetGlobalOption sets a global tmux option quietly.
+func (c *Client) SetGlobalOption(ctx context.Context, option, value string) error {
+	_, err := c.run(ctx, "set-option", "-gq", option, value)
+	return err
+}
+
+// HasClients reports whether at least one client is currently attached to the
+// tmux server.
+func (c *Client) HasClients(ctx context.Context) bool {
+	out, err := c.run(ctx, "list-clients", "-F", "#{client_name}")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(out) != ""
+}
+
+// SwitchClient switches the active tmux client to session without requiring
+// $TMUX to be set (suitable for background run-shell hooks).
+func (c *Client) SwitchClient(ctx context.Context, session string) error {
+	_, err := c.run(ctx, "switch-client", "-t", session)
+	return err
+}
+
 // normalizeOption ensures a pane option carries the "@" user-option prefix.
 func normalizeOption(option string) string {
 	if strings.HasPrefix(option, "@") {
@@ -525,5 +557,89 @@ func (c *Client) SelectWindow(ctx context.Context, target string) error {
 // SelectPane activates the given pane target (e.g. "session:1.2").
 func (c *Client) SelectPane(ctx context.Context, target string) error {
 	_, err := c.run(ctx, "select-pane", "-t", target)
+	return err
+}
+
+// NewSessionDetachedWithID creates a detached tmux session (optionally with
+// initial width/height) and returns its initial window ID and pane ID.
+func (c *Client) NewSessionDetachedWithID(ctx context.Context, name, cwd, windowName string, width, height int, command ...string) (string, string, error) {
+	args := []string{"new-session", "-d", "-s", name}
+	if cwd != "" {
+		args = append(args, "-c", cwd)
+	}
+	if windowName != "" {
+		args = append(args, "-n", windowName)
+	}
+	if width > 0 {
+		args = append(args, "-x", strconv.Itoa(width))
+	}
+	if height > 0 {
+		args = append(args, "-y", strconv.Itoa(height))
+	}
+	args = append(args, "-P", "-F", "#{window_id}\x1f#{pane_id}")
+	if len(command) > 0 {
+		args = append(args, "--")
+		args = append(args, command...)
+	}
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return "", "", err
+	}
+	parts := strings.Split(strings.TrimSpace(out), unitSep)
+	if len(parts) == 2 {
+		return parts[0], parts[1], nil
+	}
+	return strings.TrimSpace(out), "", nil
+}
+
+// NewWindowDetachedWithID creates a detached window in session and returns its
+// window ID and initial pane ID.
+func (c *Client) NewWindowDetachedWithID(ctx context.Context, session, cwd, name string, command ...string) (string, string, error) {
+	args := []string{"new-window", "-d", "-P", "-F", "#{window_id}\x1f#{pane_id}"}
+	if session != "" {
+		args = append(args, "-t", session+":")
+	}
+	if cwd != "" {
+		args = append(args, "-c", cwd)
+	}
+	if name != "" {
+		args = append(args, "-n", name)
+	}
+	if len(command) > 0 {
+		args = append(args, "--")
+		args = append(args, command...)
+	}
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return "", "", err
+	}
+	parts := strings.Split(strings.TrimSpace(out), unitSep)
+	if len(parts) == 2 {
+		return parts[0], parts[1], nil
+	}
+	return strings.TrimSpace(out), "", nil
+}
+
+// SplitWindowWithID splits target without changing focus and returns the new
+// pane ID.
+func (c *Client) SplitWindowWithID(ctx context.Context, target, cwd string, command ...string) (string, error) {
+	args := []string{"split-window", "-d", "-t", target, "-P", "-F", "#{pane_id}"}
+	if cwd != "" {
+		args = append(args, "-c", cwd)
+	}
+	if len(command) > 0 {
+		args = append(args, "--")
+		args = append(args, command...)
+	}
+	out, err := c.run(ctx, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+// ResizePaneZoom toggles zoom on target pane/window.
+func (c *Client) ResizePaneZoom(ctx context.Context, target string) error {
+	_, err := c.run(ctx, "resize-pane", "-Z", "-t", target)
 	return err
 }

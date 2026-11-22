@@ -373,19 +373,37 @@ func (a *tmuxCLIAdapter) SwitchTo(target string) error {
 func (a *tmuxCLIAdapter) NewSession(name, cwd string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxTimeout)
 	defer cancel()
-	return a.client.NewSession(ctx, name, cwd)
+	if err := a.client.NewSession(ctx, name, cwd); err != nil {
+		return err
+	}
+	if a.backend != nil && a.backend.store != nil {
+		_ = a.backend.store.AddOpenSpace(name, true)
+	}
+	return nil
 }
 
 func (a *tmuxCLIAdapter) RenameSession(oldName, newName string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxTimeout)
 	defer cancel()
-	return a.client.RenameSession(ctx, oldName, newName)
+	if err := a.client.RenameSession(ctx, oldName, newName); err != nil {
+		return err
+	}
+	if a.backend != nil && a.backend.store != nil {
+		_ = a.backend.store.RenameOpenSpace(oldName, newName)
+	}
+	return nil
 }
 
 func (a *tmuxCLIAdapter) KillSession(name string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxTimeout)
 	defer cancel()
-	return a.client.KillSession(ctx, name)
+	if err := a.client.KillSession(ctx, name); err != nil {
+		return err
+	}
+	if a.backend != nil && a.backend.store != nil {
+		_ = a.backend.store.RemoveOpenSpace(name)
+	}
+	return nil
 }
 
 func (a *tmuxCLIAdapter) NewWindow(session, cwd, label string, cmd []string) error {
@@ -889,11 +907,19 @@ func (b *tuiBackend) FocusPane(ctx context.Context, session, windowID, paneID st
 }
 
 func (b *tuiBackend) CreateSpace(ctx context.Context, name, cwd string) error {
-	return b.client.NewSession(ctx, name, cwd)
+	if err := b.client.NewSession(ctx, name, cwd); err != nil {
+		return err
+	}
+	_ = b.store.AddOpenSpace(name, true)
+	return nil
 }
 
 func (b *tuiBackend) RenameSpace(ctx context.Context, oldName, newName string) error {
-	return b.client.RenameSession(ctx, oldName, newName)
+	if err := b.client.RenameSession(ctx, oldName, newName); err != nil {
+		return err
+	}
+	_ = b.store.RenameOpenSpace(oldName, newName)
+	return nil
 }
 
 func (b *tuiBackend) RenameWindow(ctx context.Context, windowID, newName string) error {
@@ -918,8 +944,10 @@ func (b *tuiBackend) KillSpace(ctx context.Context, name string) error {
 		return err
 	}
 	// Explicitly closing a space removes its saved snapshot so it does not
-	// immediately reappear under Exited (matching zellij-spaces).
+	// immediately reappear under Exited (matching zellij-spaces) and removes it
+	// from OpenState so it does not auto-restore on reboot.
 	_ = b.store.Delete(name)
+	_ = b.store.RemoveOpenSpace(name)
 	return nil
 }
 
@@ -938,10 +966,14 @@ func (b *tuiBackend) RestoreSpace(ctx context.Context, name string) error {
 	if err != nil {
 		return err
 	}
-	return resurrect.Restore(ctx, b.client, snap, resurrect.RestoreOptions{
+	if err := resurrect.Restore(ctx, b.client, snap, resurrect.RestoreOptions{
 		SelfPath: b.selfPath,
 		Switch:   true,
-	})
+	}); err != nil {
+		return err
+	}
+	_ = b.store.AddOpenSpace(name, true)
+	return nil
 }
 
 func (b *tuiBackend) DeleteExited(_ context.Context, name string) error {

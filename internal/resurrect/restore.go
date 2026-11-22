@@ -26,6 +26,19 @@ type TmuxRestorer interface {
 	SwitchToSpace(ctx context.Context, session string) error
 }
 
+// tmuxRichRestorer is an optional extension of TmuxRestorer (implemented by
+// *tmux.Client) that returns exact tmux window/pane IDs and supports restoring
+// initial window geometry, worktree options, and pane zoom state without
+// depending on tmux's base-index or pane-base-index settings.
+type tmuxRichRestorer interface {
+	NewSessionDetachedWithID(ctx context.Context, name, cwd, windowName string, width, height int, command ...string) (winID, paneID string, err error)
+	NewWindowDetachedWithID(ctx context.Context, session, cwd, name string, command ...string) (winID, paneID string, err error)
+	SplitWindowWithID(ctx context.Context, target, cwd string, command ...string) (paneID string, err error)
+	SetSessionOption(ctx context.Context, session, option, value string) error
+	SetWindowOption(ctx context.Context, windowID, option, value string) error
+	ResizePaneZoom(ctx context.Context, target string) error
+}
+
 // RestoreOptions configures how a SpaceSnapshot is recreated.
 type RestoreOptions struct {
 	// SelfPath is the path to tmux-spaces (used to wrap resumed agents in __shim).
@@ -159,15 +172,20 @@ func resolveRestoreCWD(cwd, wtPath, mainRoot string) string {
 }
 
 // Restore recreates a saved SpaceSnapshot on the tmux server, applying window
-// layouts, CWDs, active pane/window selection, and AI agent conversation resume.
+// layouts, CWDs, active pane/window selection, worktree metadata, zoom state,
+// and AI agent conversation resume.
 func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts RestoreOptions) error {
 	if strings.TrimSpace(snap.Name) == "" {
 		return fmt.Errorf("resurrect: snapshot has empty name")
 	}
+	rich, hasRich := r.(tmuxRichRestorer)
 	if len(snap.Windows) == 0 {
 		cwd := resolveRestoreCWD(snap.CWD, snap.WorktreePath, snap.MainRepoRoot)
 		if err := r.NewSessionDetached(ctx, snap.Name, cwd, ""); err != nil {
 			return err
+		}
+		if hasRich {
+			restoreSessionWorktreeOptions(ctx, rich, snap)
 		}
 		if opts.Switch {
 			return r.SwitchToSpace(ctx, snap.Name)
@@ -183,9 +201,7 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 		if win.Index > 0 {
 			winTarget = fmt.Sprintf("%s:%d", snap.Name, win.Index)
 		}
-		if win.Active || (snap.ActiveWindowIndex > 0 && win.Index == snap.ActiveWindowIndex) {
-			activeWinTarget = winTarget
-		}
+		isActiveWin := win.Active || (snap.ActiveWindowIndex > 0 && win.Index == snap.ActiveWindowIndex)
 
 		var firstPane PaneSnapshot
 		if len(win.Panes) > 0 {
@@ -208,17 +224,51 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 		firstCWD = resolveRestoreCWD(firstCWD, winWT, snap.MainRepoRoot)
 		firstCmd := buildPaneCommand(firstPane, opts, skipResume[firstKey])
 
-		if wi == 0 {
-			if err := r.NewSessionDetached(ctx, snap.Name, firstCWD, win.Name, firstCmd...); err != nil {
-				return fmt.Errorf("resurrect: create session %s: %w", snap.Name, err)
+		var createdPaneIDs []string
+		if hasRich {
+			var (
+				winID  string
+				paneID string
+				err    error
+			)
+			if wi == 0 {
+				winID, paneID, err = rich.NewSessionDetachedWithID(ctx, snap.Name, firstCWD, win.Name, win.Width, win.Height, firstCmd...)
+				if err != nil {
+					return fmt.Errorf("resurrect: create session %s: %w", snap.Name, err)
+				}
+				restoreSessionWorktreeOptions(ctx, rich, snap)
+			} else {
+				winID, paneID, err = rich.NewWindowDetachedWithID(ctx, snap.Name, firstCWD, win.Name, firstCmd...)
+				if err != nil {
+					return fmt.Errorf("resurrect: create window %s:%s: %w", snap.Name, win.Name, err)
+				}
 			}
+			if winID != "" {
+				winTarget = winID
+			}
+			restoreWindowWorktreeOptions(ctx, rich, winTarget, win)
+			createdPaneIDs = append(createdPaneIDs, paneID)
 		} else {
-			if err := r.NewWindow(ctx, snap.Name, firstCWD, win.Name, firstCmd...); err != nil {
-				return fmt.Errorf("resurrect: create window %s:%s: %w", snap.Name, win.Name, err)
+			if wi == 0 {
+				if err := r.NewSessionDetached(ctx, snap.Name, firstCWD, win.Name, firstCmd...); err != nil {
+					return fmt.Errorf("resurrect: create session %s: %w", snap.Name, err)
+				}
+			} else {
+				if err := r.NewWindow(ctx, snap.Name, firstCWD, win.Name, firstCmd...); err != nil {
+					return fmt.Errorf("resurrect: create window %s:%s: %w", snap.Name, win.Name, err)
+				}
 			}
 		}
 
+		if isActiveWin {
+			activeWinTarget = winTarget
+		}
+
 		// Recreate additional panes in this window.
+		lastPaneID := ""
+		if len(createdPaneIDs) > 0 {
+			lastPaneID = createdPaneIDs[0]
+		}
 		for pi := 1; pi < len(win.Panes); pi++ {
 			p := win.Panes[pi]
 			pKey := paneResolveKey(wi, pi)
@@ -231,8 +281,29 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 			}
 			pCWD = resolveRestoreCWD(pCWD, winWT, snap.MainRepoRoot)
 			pCmd := buildPaneCommand(p, opts, skipResume[pKey])
-			if err := r.SplitWindow(ctx, winTarget, pCWD, pCmd...); err != nil {
-				return fmt.Errorf("resurrect: split pane %d in %s: %w", pi, winTarget, err)
+			if hasRich {
+				splitTarget := winTarget
+				if lastPaneID != "" {
+					splitTarget = lastPaneID
+				}
+				paneID, err := rich.SplitWindowWithID(ctx, splitTarget, pCWD, pCmd...)
+				if err != nil {
+					return fmt.Errorf("resurrect: split pane %d in %s: %w", pi, winTarget, err)
+				}
+				createdPaneIDs = append(createdPaneIDs, paneID)
+				if paneID != "" {
+					lastPaneID = paneID
+				}
+				// Rebalance intermediate splits when recreating 3+ panes so
+				// subsequent splits never fail with "no space for new pane"
+				// before the final saved layout is applied.
+				if len(win.Panes) > 2 && pi < len(win.Panes)-1 {
+					_ = r.SelectLayout(ctx, winTarget, "tiled")
+				}
+			} else {
+				if err := r.SplitWindow(ctx, winTarget, pCWD, pCmd...); err != nil {
+					return fmt.Errorf("resurrect: split pane %d in %s: %w", pi, winTarget, err)
+				}
 			}
 		}
 
@@ -242,15 +313,28 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 		}
 
 		// Restore active pane within this window.
+		activePaneTarget := ""
 		for pi, p := range win.Panes {
 			if p.Active {
-				paneIdx := pi + 1
-				if p.Index > 0 {
-					paneIdx = p.Index
+				if hasRich && pi < len(createdPaneIDs) && createdPaneIDs[pi] != "" {
+					activePaneTarget = createdPaneIDs[pi]
+				} else {
+					paneIdx := pi + 1
+					if p.Index > 0 {
+						paneIdx = p.Index
+					}
+					activePaneTarget = fmt.Sprintf("%s.%d", winTarget, paneIdx)
 				}
-				_ = r.SelectPane(ctx, fmt.Sprintf("%s.%d", winTarget, paneIdx))
+				_ = r.SelectPane(ctx, activePaneTarget)
 				break
 			}
+		}
+		if hasRich && win.Zoomed {
+			zoomTarget := activePaneTarget
+			if zoomTarget == "" {
+				zoomTarget = winTarget
+			}
+			_ = rich.ResizePaneZoom(ctx, zoomTarget)
 		}
 	}
 
@@ -261,6 +345,30 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 		return r.SwitchToSpace(ctx, snap.Name)
 	}
 	return nil
+}
+
+func restoreSessionWorktreeOptions(ctx context.Context, r tmuxRichRestorer, snap SpaceSnapshot) {
+	if snap.WorktreePath != "" {
+		_ = r.SetSessionOption(ctx, snap.Name, "@spaces_worktree_path", snap.WorktreePath)
+	}
+	if snap.WorktreeName != "" {
+		_ = r.SetSessionOption(ctx, snap.Name, "@spaces_worktree_name", snap.WorktreeName)
+	}
+	if snap.WorktreeBase != "" {
+		_ = r.SetSessionOption(ctx, snap.Name, "@spaces_worktree_base", snap.WorktreeBase)
+	}
+}
+
+func restoreWindowWorktreeOptions(ctx context.Context, r tmuxRichRestorer, winTarget string, win WindowSnapshot) {
+	if win.WorktreePath != "" {
+		_ = r.SetWindowOption(ctx, winTarget, "@spaces_worktree_path", win.WorktreePath)
+	}
+	if win.WorktreeName != "" {
+		_ = r.SetWindowOption(ctx, winTarget, "@spaces_worktree_name", win.WorktreeName)
+	}
+	if win.WorktreeBase != "" {
+		_ = r.SetWindowOption(ctx, winTarget, "@spaces_worktree_base", win.WorktreeBase)
+	}
 }
 
 func shlexJoin(argv []string) string {

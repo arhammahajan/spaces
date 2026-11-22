@@ -3,8 +3,10 @@ package resurrect
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -539,5 +541,303 @@ func TestResolveRestoreCWDPrecedence(t *testing.T) {
 				t.Fatalf("resolveRestoreCWD(%q, %q, %q) = %q, want %q", tc.cwd, tc.wtPath, tc.mainRoot, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestOpenStateLifecycleAndListAllIgnoresDotfile(t *testing.T) {
+	now := time.UnixMilli(1700000000000)
+	st := &Store{Dir: t.TempDir(), Now: func() time.Time { return now }}
+
+	if err := st.Save(SpaceSnapshot{Name: "alpha", CWD: "/a"}); err != nil {
+		t.Fatalf("Save alpha: %v", err)
+	}
+	if err := st.Save(SpaceSnapshot{Name: "exited-one", CWD: "/e"}); err != nil {
+		t.Fatalf("Save exited-one: %v", err)
+	}
+	if err := st.SaveOpenState(OpenState{
+		ActiveSession: "alpha",
+		Spaces:        []string{"alpha", "beta", "alpha"},
+	}); err != nil {
+		t.Fatalf("SaveOpenState: %v", err)
+	}
+
+	got, err := st.LoadOpenState()
+	if err != nil {
+		t.Fatalf("LoadOpenState: %v", err)
+	}
+	if !reflect.DeepEqual(got.Spaces, []string{"alpha", "beta"}) || got.ActiveSession != "alpha" {
+		t.Fatalf("unexpected open state: %+v", got)
+	}
+
+	// ListAll must ignore .open-spaces.json.
+	all, err := st.ListAll()
+	if err != nil || len(all) != 2 {
+		t.Fatalf("ListAll = %+v, err=%v (want 2 snapshots)", all, err)
+	}
+
+	// Add, rename, remove.
+	if err := st.AddOpenSpace("gamma", true); err != nil {
+		t.Fatalf("AddOpenSpace: %v", err)
+	}
+	if err := st.RenameOpenSpace("alpha", "alpha2"); err != nil {
+		t.Fatalf("RenameOpenSpace: %v", err)
+	}
+	if _, err := st.Load("alpha2"); err != nil {
+		t.Fatalf("expected renamed snapshot alpha2 to exist: %v", err)
+	}
+	if err := st.RemoveOpenSpace("beta"); err != nil {
+		t.Fatalf("RemoveOpenSpace: %v", err)
+	}
+	got, err = st.LoadOpenState()
+	if err != nil {
+		t.Fatalf("LoadOpenState after mutations: %v", err)
+	}
+	if !reflect.DeepEqual(got.Spaces, []string{"alpha2", "gamma"}) || got.ActiveSession != "gamma" {
+		t.Fatalf("unexpected open state after mutations: %+v", got)
+	}
+}
+
+func TestCaptureOpenStateOrdersByCreationAndPicksActive(t *testing.T) {
+	t0 := time.Unix(1700000100, 0)
+	snap := tmux.ServerSnapshot{
+		CurrentSession: "second",
+		Sessions: []tmux.Session{
+			{ID: "$2", Name: "third", CreatedAt: t0.Add(20 * time.Second)},
+			{ID: "$0", Name: "first", CreatedAt: t0},
+			{ID: "$1", Name: "second", CreatedAt: t0.Add(10 * time.Second), Attached: 1},
+		},
+	}
+	st := CaptureOpenState(snap, t0.Add(time.Minute))
+	if !reflect.DeepEqual(st.Spaces, []string{"first", "second", "third"}) {
+		t.Fatalf("Spaces = %v, want [first second third]", st.Spaces)
+	}
+	if st.ActiveSession != "second" {
+		t.Fatalf("ActiveSession = %q, want second", st.ActiveSession)
+	}
+
+	// When CurrentSession is empty, falls back to first attached session.
+	snap.CurrentSession = ""
+	st = CaptureOpenState(snap, t0.Add(time.Minute))
+	if st.ActiveSession != "second" {
+		t.Fatalf("ActiveSession fallback = %q, want second", st.ActiveSession)
+	}
+}
+
+type fakeAutoRestoreClient struct {
+	fakeRestorer
+	snap       tmux.ServerSnapshot
+	hasClients bool
+	nextWin    int
+	nextPane   int
+}
+
+func (f *fakeAutoRestoreClient) Snapshot(_ context.Context) (tmux.ServerSnapshot, error) {
+	return f.snap, nil
+}
+func (f *fakeAutoRestoreClient) HasClients(_ context.Context) bool {
+	return f.hasClients
+}
+func (f *fakeAutoRestoreClient) SwitchClient(_ context.Context, session string) error {
+	f.ops = append(f.ops, "switch-client:"+session)
+	return nil
+}
+func (f *fakeAutoRestoreClient) RenameSession(_ context.Context, oldName, newName string) error {
+	f.ops = append(f.ops, "rename-session:"+oldName+"->"+newName)
+	return nil
+}
+func (f *fakeAutoRestoreClient) KillSession(_ context.Context, name string) error {
+	f.ops = append(f.ops, "kill-session:"+name)
+	return nil
+}
+func (f *fakeAutoRestoreClient) NewSessionDetachedWithID(_ context.Context, name, cwd, win string, width, height int, cmd ...string) (string, string, error) {
+	f.nextWin++
+	f.nextPane++
+	winID := fmt.Sprintf("@%d", f.nextWin)
+	paneID := fmt.Sprintf("%%%d", f.nextPane)
+	f.ops = append(f.ops, fmt.Sprintf("new-session-id:%s:%s:%s:%dx%d:%s=%s,%s", name, cwd, win, width, height, strings.Join(cmd, " "), winID, paneID))
+	return winID, paneID, nil
+}
+func (f *fakeAutoRestoreClient) NewWindowDetachedWithID(_ context.Context, session, cwd, name string, cmd ...string) (string, string, error) {
+	f.nextWin++
+	f.nextPane++
+	winID := fmt.Sprintf("@%d", f.nextWin)
+	paneID := fmt.Sprintf("%%%d", f.nextPane)
+	f.ops = append(f.ops, fmt.Sprintf("new-window-id:%s:%s:%s:%s=%s,%s", session, cwd, name, strings.Join(cmd, " "), winID, paneID))
+	return winID, paneID, nil
+}
+func (f *fakeAutoRestoreClient) SplitWindowWithID(_ context.Context, target, cwd string, cmd ...string) (string, error) {
+	f.nextPane++
+	paneID := fmt.Sprintf("%%%d", f.nextPane)
+	f.ops = append(f.ops, fmt.Sprintf("split-id:%s:%s:%s=%s", target, cwd, strings.Join(cmd, " "), paneID))
+	return paneID, nil
+}
+func (f *fakeAutoRestoreClient) SetSessionOption(_ context.Context, session, option, value string) error {
+	f.ops = append(f.ops, "set-sess-opt:"+session+":"+option+"="+value)
+	return nil
+}
+func (f *fakeAutoRestoreClient) SetWindowOption(_ context.Context, windowID, option, value string) error {
+	f.ops = append(f.ops, "set-win-opt:"+windowID+":"+option+"="+value)
+	return nil
+}
+func (f *fakeAutoRestoreClient) ResizePaneZoom(_ context.Context, target string) error {
+	f.ops = append(f.ops, "zoom:"+target)
+	return nil
+}
+
+func TestAutoRestoreOnlyOpensNonExitedAndCleansPlaceholder(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	for _, sp := range []SpaceSnapshot{
+		{
+			Name: "alpha",
+			CWD:  "/repo/a",
+			Windows: []WindowSnapshot{
+				{
+					Index:  0,
+					Name:   "dev",
+					Layout: "lay-a",
+					Active: true,
+					Width:  160,
+					Height: 48,
+					Zoomed: true,
+					Panes: []PaneSnapshot{
+						{Index: 0, CWD: "/repo/a"},
+						{Index: 1, CWD: "/repo/a/sub", Active: true},
+						{Index: 2, CWD: "/repo/a/third"},
+					},
+				},
+			},
+		},
+		{
+			Name: "beta",
+			CWD:  "/repo/b",
+			Windows: []WindowSnapshot{
+				{Index: 0, Name: "shell", Active: true, Panes: []PaneSnapshot{{Index: 0, CWD: "/repo/b", Active: true}}},
+			},
+		},
+		{
+			Name: "exited-space",
+			CWD:  "/repo/e",
+			Windows: []WindowSnapshot{
+				{Index: 0, Name: "old", Active: true, Panes: []PaneSnapshot{{Index: 0, CWD: "/repo/e", Active: true}}},
+			},
+		},
+	} {
+		if err := st.Save(sp); err != nil {
+			t.Fatalf("Save %s: %v", sp.Name, err)
+		}
+	}
+	// Only alpha and beta were open; exited-space was in Exited state.
+	if err := st.SaveOpenState(OpenState{
+		ActiveSession: "beta",
+		Spaces:        []string{"alpha", "beta"},
+	}); err != nil {
+		t.Fatalf("SaveOpenState: %v", err)
+	}
+
+	// Simulate fresh tmux server after reboot with default placeholder session "0".
+	client := &fakeAutoRestoreClient{
+		hasClients: true,
+		snap: tmux.ServerSnapshot{
+			Sessions: []tmux.Session{{ID: "$0", Name: "0", Attached: 1}},
+			Windows:  []tmux.Window{{SessionName: "0", ID: "@0", Index: 0, Name: "zsh", Active: true}},
+			Panes:    []tmux.Pane{{SessionName: "0", WindowID: "@0", ID: "%0", CurrentCommand: "zsh", Active: true}},
+		},
+	}
+
+	res, err := AutoRestore(context.Background(), client, st, RestoreOptions{SelfPath: "/bin/tmux-spaces"})
+	if err != nil {
+		t.Fatalf("AutoRestore: %v", err)
+	}
+	if !reflect.DeepEqual(res.Restored, []string{"alpha", "beta"}) {
+		t.Fatalf("Restored = %v, want [alpha beta]", res.Restored)
+	}
+	if res.ActiveSession != "beta" || !res.RemovedPlaceholder {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+
+	joined := strings.Join(client.ops, "\n")
+	for _, want := range []string{
+		"new-session-id:alpha:/repo/a:dev:160x48:=@1,%1",
+		"split-id:%1:/repo/a/sub:=%2",
+		"layout:@1:tiled",
+		"split-id:%2:/repo/a/third:=%3",
+		"layout:@1:lay-a",
+		"select-pane:%2",
+		"zoom:%2",
+		"select-win:@1",
+		"new-session-id:beta:/repo/b:shell:0x0:=@2,%4",
+		"switch-client:beta",
+		"kill-session:0",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in ops:\n%s", want, joined)
+		}
+	}
+	if strings.Contains(joined, "exited-space") {
+		t.Fatalf("exited-space must NOT be auto-restored:\n%s", joined)
+	}
+
+	// exited-space must still be in ListExited so clicking it restores it on demand.
+	exited, err := st.ListExited(map[string]bool{"alpha": true, "beta": true})
+	if err != nil || len(exited) != 1 || exited[0].Name != "exited-space" {
+		t.Fatalf("ListExited = %+v, err=%v; want [exited-space]", exited, err)
+	}
+}
+
+func TestAutoRestoreNamedMatchingSessionAndCustomSession(t *testing.T) {
+	st := &Store{Dir: t.TempDir()}
+	_ = st.Save(SpaceSnapshot{
+		Name: "main",
+		CWD:  "/repo/main",
+		Windows: []WindowSnapshot{
+			{Index: 1, Name: "code", Active: true, Panes: []PaneSnapshot{{Index: 1, CWD: "/repo/main", Active: true}}},
+			{Index: 2, Name: "logs", Panes: []PaneSnapshot{{Index: 1, CWD: "/repo/main"}}},
+		},
+	})
+	_ = st.SaveOpenState(OpenState{ActiveSession: "main", Spaces: []string{"main"}})
+
+	// Case 1: `tmux new-session -A -s main` creates empty "main" matching OpenState.
+	// AutoRestore renames it aside, restores full "main", switches to "main", kills temp.
+	c1 := &fakeAutoRestoreClient{
+		hasClients: true,
+		snap: tmux.ServerSnapshot{
+			Sessions: []tmux.Session{{ID: "$0", Name: "main", Attached: 1}},
+			Windows:  []tmux.Window{{SessionName: "main", ID: "@0", Index: 0, Name: "zsh", Active: true}},
+			Panes:    []tmux.Pane{{SessionName: "main", WindowID: "@0", ID: "%0", CurrentCommand: "zsh", Active: true}},
+		},
+	}
+	res1, err := AutoRestore(context.Background(), c1, st, RestoreOptions{SelfPath: "/bin/tmux-spaces"})
+	if err != nil {
+		t.Fatalf("AutoRestore matching name: %v", err)
+	}
+	if !reflect.DeepEqual(res1.Restored, []string{"main"}) || !res1.RemovedPlaceholder {
+		t.Fatalf("unexpected res1: %+v", res1)
+	}
+	joined1 := strings.Join(c1.ops, "\n")
+	if !strings.Contains(joined1, "rename-session:main->__spaces_bootstrap_") ||
+		!strings.Contains(joined1, "new-window-id:main:/repo/main:logs:") ||
+		!strings.Contains(joined1, "kill-session:__spaces_bootstrap_") {
+		t.Fatalf("expected rename+restore+cleanup for matching session:\n%s", joined1)
+	}
+
+	// Case 2: User explicitly started `tmux new-session -s scratch` (not "0", not in OpenState).
+	// AutoRestore restores "main" alongside "scratch" and does NOT kill "scratch".
+	c2 := &fakeAutoRestoreClient{
+		hasClients: true,
+		snap: tmux.ServerSnapshot{
+			Sessions: []tmux.Session{{ID: "$0", Name: "scratch", Attached: 1}},
+			Windows:  []tmux.Window{{SessionName: "scratch", ID: "@0", Index: 0, Name: "zsh", Active: true}},
+			Panes:    []tmux.Pane{{SessionName: "scratch", WindowID: "@0", ID: "%0", CurrentCommand: "zsh", Active: true}},
+		},
+	}
+	res2, err := AutoRestore(context.Background(), c2, st, RestoreOptions{SelfPath: "/bin/tmux-spaces"})
+	if err != nil {
+		t.Fatalf("AutoRestore custom session: %v", err)
+	}
+	if !reflect.DeepEqual(res2.Restored, []string{"main"}) || res2.RemovedPlaceholder {
+		t.Fatalf("unexpected res2: %+v", res2)
+	}
+	if strings.Contains(strings.Join(c2.ops, "\n"), "kill-session:scratch") {
+		t.Fatalf("must not kill user-named session scratch")
 	}
 }

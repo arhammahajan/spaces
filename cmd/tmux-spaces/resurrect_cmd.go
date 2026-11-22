@@ -14,7 +14,15 @@ import (
 	"github.com/arhammahajan/spaces/internal/worktree"
 )
 
+const spacesRestoredOption = "@spaces_restored"
+
 func saveSpacesToStore(ctx context.Context, client *tmux.Client, store *resurrect.Store, onlySpace string) (int, error) {
+	// Never overwrite open-space state while startup auto-restore is in progress.
+	if onlySpace == "" {
+		if status, err := client.GetGlobalOption(ctx, spacesRestoredOption); err == nil && status == "pending" {
+			return 0, nil
+		}
+	}
 	snap, err := newTUIBackend(client).ResolveSnapshot(ctx)
 	if err != nil {
 		snap, err = client.Snapshot(ctx)
@@ -22,11 +30,15 @@ func saveSpacesToStore(ctx context.Context, client *tmux.Client, store *resurrec
 			return 0, err
 		}
 	}
+	if len(snap.Sessions) == 0 {
+		return 0, nil
+	}
+	now := time.Now()
 	var hooks *model.HookSnapshot
 	if hs, err := model.FetchHooks(ctx); err == nil && hs.OK {
 		hooks = &hs
 	}
-	captured := resurrect.CaptureSpaces(snap, hooks, time.Now())
+	captured := resurrect.CaptureSpaces(snap, hooks, now)
 	wtMgr := worktree.NewManager()
 	saved := 0
 	for _, sp := range captured {
@@ -44,6 +56,7 @@ func saveSpacesToStore(ctx context.Context, client *tmux.Client, store *resurrec
 		saved++
 	}
 	if onlySpace == "" {
+		_ = store.SaveOpenState(resurrect.CaptureOpenState(snap, now))
 		_ = store.TouchAutoSave()
 	}
 	return saved, nil
@@ -54,7 +67,8 @@ func runResurrectCLI(client *tmux.Client, store *resurrect.Store, selfPath strin
 		fmt.Fprintf(env.Stdout, `usage: tmux-spaces resurrect <subcommand> [args]
 
   save [SPACE]               snapshot all running spaces (or one space)
-  autosave                   save all spaces if the 30s interval has elapsed
+  autosave [--force]         save all spaces if the 30s interval has elapsed
+  auto-restore               restore spaces that were last open (not exited)
   list [--json]              list exited/resurrectable space snapshots
   restore <SPACE | --all>    restore a saved space (and resume AI agents)
   delete <SPACE>             delete a saved space snapshot
@@ -62,10 +76,14 @@ func runResurrectCLI(client *tmux.Client, store *resurrect.Store, selfPath strin
 		return cli.ExitOK
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	sub, rest := args[0], args[1:]
+	timeout := 15 * time.Second
+	if sub == "auto-restore" || (sub == "restore" && len(rest) > 0 && rest[0] == "--all") {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	sub, rest := args[0], args[1:]
 	switch sub {
 	case "save":
 		only := ""
@@ -81,12 +99,33 @@ func runResurrectCLI(client *tmux.Client, store *resurrect.Store, selfPath strin
 		return cli.ExitOK
 
 	case "autosave":
-		if !store.ShouldAutoSave() {
+		force := len(rest) > 0 && (rest[0] == "--force" || rest[0] == "-f")
+		if !force && !store.ShouldAutoSave() {
 			return cli.ExitOK
 		}
 		if _, err := saveSpacesToStore(ctx, client, store, ""); err != nil {
 			return cli.ExitOK
 		}
+		return cli.ExitOK
+
+	case "auto-restore":
+		defer func() {
+			_ = client.SetGlobalOption(ctx, spacesRestoredOption, "done")
+		}()
+		// Wait briefly for tmux's initial session/client if launched during
+		// ~/.tmux.conf startup via `run-shell -b`.
+		waitForInitialTmuxReady(ctx, client)
+		res, err := resurrect.AutoRestore(ctx, client, store, resurrect.RestoreOptions{
+			SelfPath: selfPath,
+		})
+		if err != nil {
+			fmt.Fprintf(env.Stderr, "tmux-spaces resurrect auto-restore: %v\n", err)
+			return cli.ExitError
+		}
+		if len(res.Restored) > 0 {
+			_ = store.TouchAutoSave()
+		}
+		fmt.Fprintf(env.Stdout, "restored %d space(s)\n", len(res.Restored))
 		return cli.ExitOK
 
 	case "list":
@@ -150,6 +189,7 @@ func runResurrectCLI(client *tmux.Client, store *resurrect.Store, selfPath strin
 					fmt.Fprintf(env.Stderr, "tmux-spaces resurrect restore %s: %v\n", sp.Name, err)
 					continue
 				}
+				_ = store.AddOpenSpace(sp.Name, false)
 				restored++
 			}
 			fmt.Fprintf(env.Stdout, "restored %d space(s)\n", restored)
@@ -165,6 +205,7 @@ func runResurrectCLI(client *tmux.Client, store *resurrect.Store, selfPath strin
 			fmt.Fprintf(env.Stderr, "tmux-spaces resurrect restore: %v\n", err)
 			return cli.ExitError
 		}
+		_ = store.AddOpenSpace(name, opts.Switch)
 		fmt.Fprintf(env.Stdout, "restored %s\n", name)
 		return cli.ExitOK
 
@@ -182,5 +223,21 @@ func runResurrectCLI(client *tmux.Client, store *resurrect.Store, selfPath strin
 	default:
 		fmt.Fprintf(env.Stderr, "tmux-spaces resurrect: unknown subcommand %q\n", sub)
 		return cli.ExitUsage
+	}
+}
+
+// waitForInitialTmuxReady waits briefly (up to 400ms) when auto-restore is
+// invoked during ~/.tmux.conf loading so tmux finishes creating its initial
+// session and attaching the client before we inspect/switch sessions.
+func waitForInitialTmuxReady(ctx context.Context, client *tmux.Client) {
+	for i := 0; i < 8; i++ {
+		if snap, err := client.Snapshot(ctx); err == nil && len(snap.Sessions) > 0 && client.HasClients(ctx) {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }

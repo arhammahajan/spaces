@@ -48,10 +48,23 @@ type WindowSnapshot struct {
 	Name         string         `json:"name"`
 	Layout       string         `json:"layout,omitempty"`
 	Active       bool           `json:"active"`
+	Zoomed       bool           `json:"zoomed,omitempty"`
+	Width        int            `json:"width,omitempty"`
+	Height       int            `json:"height,omitempty"`
 	WorktreePath string         `json:"worktree_path,omitempty"`
 	WorktreeName string         `json:"worktree_name,omitempty"`
 	WorktreeBase string         `json:"worktree_base,omitempty"`
 	Panes        []PaneSnapshot `json:"panes"`
+}
+
+// OpenState records the ordered list of spaces that were actively open (not
+// exited) on the tmux server, along with the last focused space. Persisted to
+// a dotfile inside the snapshot directory so Store.ListAll() ignores it.
+type OpenState struct {
+	Version       int      `json:"version"`
+	SavedAtMs     int64    `json:"saved_at_ms"`
+	ActiveSession string   `json:"active_session,omitempty"`
+	Spaces        []string `json:"spaces"`
 }
 
 // PaneSnapshot captures one tmux pane, including AI-agent resume metadata.
@@ -291,4 +304,185 @@ func (s *Store) TouchAutoSave() error {
 		return err
 	}
 	return os.Chtimes(p, now, now)
+}
+
+func (s *Store) openStatePath() string {
+	return filepath.Join(s.Dir, ".open-spaces.json")
+}
+
+// SaveOpenState atomically persists the set of currently open (non-exited) spaces.
+func (s *Store) SaveOpenState(state OpenState) error {
+	if state.Version == 0 {
+		state.Version = SnapshotVersion
+	}
+	if state.SavedAtMs == 0 {
+		state.SavedAtMs = s.now().UnixMilli()
+	}
+	seen := make(map[string]bool, len(state.Spaces))
+	dedup := make([]string, 0, len(state.Spaces))
+	for _, name := range state.Spaces {
+		name = strings.TrimSpace(name)
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		dedup = append(dedup, name)
+	}
+	state.Spaces = dedup
+	state.ActiveSession = strings.TrimSpace(state.ActiveSession)
+
+	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
+		return fmt.Errorf("resurrect: mkdir %s: %w", s.Dir, err)
+	}
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("resurrect: marshal open state: %w", err)
+	}
+	data = append(data, '\n')
+	dst := s.openStatePath()
+	tmp, err := os.CreateTemp(s.Dir, ".open-*.tmp")
+	if err != nil {
+		return fmt.Errorf("resurrect: create temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("resurrect: rename %s: %w", dst, err)
+	}
+	return nil
+}
+
+// LoadOpenState reads the persisted list of last-open spaces.
+func (s *Store) LoadOpenState() (OpenState, error) {
+	path := s.openStatePath()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return OpenState{}, err
+	}
+	var state OpenState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return OpenState{}, fmt.Errorf("resurrect: parse %s: %w", path, err)
+	}
+	return state, nil
+}
+
+// AddOpenSpace records name as open in OpenState, optionally updating ActiveSession.
+func (s *Store) AddOpenSpace(name string, makeActive bool) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	state, err := s.LoadOpenState()
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		state = OpenState{Version: SnapshotVersion}
+	}
+	found := false
+	for _, sp := range state.Spaces {
+		if sp == name {
+			found = true
+			break
+		}
+	}
+	if !found {
+		state.Spaces = append(state.Spaces, name)
+	}
+	if makeActive || state.ActiveSession == "" {
+		state.ActiveSession = name
+	}
+	state.SavedAtMs = s.now().UnixMilli()
+	return s.SaveOpenState(state)
+}
+
+// RemoveOpenSpace removes name from OpenState so a closed space is not
+// automatically reopened on reboot.
+func (s *Store) RemoveOpenSpace(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	state, err := s.LoadOpenState()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	kept := make([]string, 0, len(state.Spaces))
+	changed := false
+	for _, sp := range state.Spaces {
+		if sp == name {
+			changed = true
+			continue
+		}
+		kept = append(kept, sp)
+	}
+	if state.ActiveSession == name {
+		state.ActiveSession = ""
+		if len(kept) > 0 {
+			state.ActiveSession = kept[0]
+		}
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	state.Spaces = kept
+	state.SavedAtMs = s.now().UnixMilli()
+	return s.SaveOpenState(state)
+}
+
+// RenameOpenSpace updates OpenState (and any existing snapshot file) when a
+// space is renamed.
+func (s *Store) RenameOpenSpace(oldName, newName string) error {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if oldName == "" || newName == "" || oldName == newName {
+		return nil
+	}
+	if snap, err := s.Load(oldName); err == nil {
+		snap.Name = newName
+		if err := s.Save(snap); err == nil {
+			_ = s.Delete(oldName)
+		}
+	}
+	state, err := s.LoadOpenState()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	changed := false
+	for i, sp := range state.Spaces {
+		if sp == oldName {
+			state.Spaces[i] = newName
+			changed = true
+		}
+	}
+	if state.ActiveSession == oldName {
+		state.ActiveSession = newName
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	state.SavedAtMs = s.now().UnixMilli()
+	return s.SaveOpenState(state)
 }

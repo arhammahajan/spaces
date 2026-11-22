@@ -640,3 +640,63 @@ func TestCtrlDExitedAntigravityClearsStaleOptionsAndShowsOutcomeInInbox(t *testi
 		t.Fatalf("outcomes = %+v (err=%v), want conv-41 done outcome", outcomes, err)
 	}
 }
+
+func TestSaveSpacesToStoreSkipsWhenAutoRestorePendingAndPersistsOpenState(t *testing.T) {
+	origExec := model.ExecFn
+	defer func() { model.ExecFn = origExec }()
+	model.ExecFn = func(_ context.Context, _ string, _ ...string) ([]byte, error) {
+		return []byte(`{"ok":true,"version":1,"now_ms":0,"panes":{}}`), nil
+	}
+
+	restoredOpt := "pending"
+	runner := &fakeRunner{
+		handler: func(args []string) (string, string, int, error) {
+			switch args[0] {
+			case "show-option":
+				return restoredOpt + "\n", "", 0, nil
+			case "has-session":
+				return "", "", 0, nil
+			case "display-message":
+				return "alpha\x1f%1\n", "", 0, nil
+			case "list-sessions":
+				return "$0\x1falpha\x1f1\x1f1700000000\x1f1\n", "", 0, nil
+			case "list-windows":
+				return "alpha\x1f@1\x1f0\x1fzsh\x1f1\x1f0\x1f0\x1f0\n", "", 0, nil
+			case "list-panes":
+				return "alpha\x1f@1\x1f0\x1fzsh\x1f%1\x1fzsh\x1fzsh\x1f/repo\x1f1234\x1f1\x1f1\x1f0\x1f0\x1f0\x1f0\x1fidle\x1f\x1f\x1f\x1f0\n", "", 0, nil
+			}
+			return "", "", 0, nil
+		},
+	}
+
+	store := &resurrect.Store{Dir: t.TempDir()}
+	// Pre-populate OpenState as it existed before reboot.
+	if err := store.SaveOpenState(resurrect.OpenState{
+		ActiveSession: "beta",
+		Spaces:        []string{"beta", "gamma"},
+	}); err != nil {
+		t.Fatalf("SaveOpenState: %v", err)
+	}
+
+	client := tmux.NewClient(runner)
+	// While @spaces_restored is "pending", saveSpacesToStore must NOT overwrite OpenState.
+	n, err := saveSpacesToStore(context.Background(), client, store, "")
+	if err != nil || n != 0 {
+		t.Fatalf("pending saveSpacesToStore = (%d, %v), want (0, nil)", n, err)
+	}
+	st, err := store.LoadOpenState()
+	if err != nil || len(st.Spaces) != 2 || st.Spaces[0] != "beta" {
+		t.Fatalf("OpenState overwritten while pending: %+v, err=%v", st, err)
+	}
+
+	// Once @spaces_restored is "done", saveSpacesToStore saves snapshots and updates OpenState.
+	restoredOpt = "done"
+	n, err = saveSpacesToStore(context.Background(), client, store, "")
+	if err != nil || n != 1 {
+		t.Fatalf("done saveSpacesToStore = (%d, %v), want (1, nil)", n, err)
+	}
+	st, err = store.LoadOpenState()
+	if err != nil || len(st.Spaces) != 1 || st.Spaces[0] != "alpha" || st.ActiveSession != "alpha" {
+		t.Fatalf("OpenState after save = %+v, err=%v", st, err)
+	}
+}

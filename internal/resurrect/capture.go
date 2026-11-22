@@ -110,6 +110,9 @@ func CaptureSpaces(snap tmux.ServerSnapshot, hooks *model.HookSnapshot, now time
 				Name:         w.Name,
 				Layout:       w.Layout,
 				Active:       w.Active,
+				Zoomed:       w.Zoomed,
+				Width:        w.Width,
+				Height:       w.Height,
 				WorktreePath: w.WorktreePath,
 				WorktreeName: w.WorktreeName,
 				WorktreeBase: w.WorktreeBase,
@@ -144,6 +147,49 @@ func CaptureSpaces(snap tmux.ServerSnapshot, hooks *model.HookSnapshot, now time
 		out = append(out, spaceSnap)
 	}
 	return out
+}
+
+// CaptureOpenState records the ordered list of currently running spaces and
+// the last active space from a live tmux ServerSnapshot.
+func CaptureOpenState(snap tmux.ServerSnapshot, now time.Time) OpenState {
+	sessions := append([]tmux.Session(nil), snap.Sessions...)
+	sort.Slice(sessions, func(i, j int) bool {
+		if !sessions[i].CreatedAt.Equal(sessions[j].CreatedAt) {
+			return sessions[i].CreatedAt.Before(sessions[j].CreatedAt)
+		}
+		if sessions[i].ID != sessions[j].ID {
+			return sessions[i].ID < sessions[j].ID
+		}
+		return sessions[i].Name < sessions[j].Name
+	})
+
+	spaces := make([]string, 0, len(sessions))
+	inSet := make(map[string]bool, len(sessions))
+	firstAttached := ""
+	for _, s := range sessions {
+		if strings.TrimSpace(s.Name) == "" {
+			continue
+		}
+		spaces = append(spaces, s.Name)
+		inSet[s.Name] = true
+		if firstAttached == "" && s.Attached > 0 {
+			firstAttached = s.Name
+		}
+	}
+
+	active := strings.TrimSpace(snap.CurrentSession)
+	if active == "" || !inSet[active] {
+		active = firstAttached
+	}
+	if active == "" && len(spaces) > 0 {
+		active = spaces[0]
+	}
+	return OpenState{
+		Version:       SnapshotVersion,
+		SavedAtMs:     now.UnixMilli(),
+		ActiveSession: active,
+		Spaces:        spaces,
+	}
 }
 
 func capturePane(p tmux.Pane, hook *model.HookSummary) PaneSnapshot {
