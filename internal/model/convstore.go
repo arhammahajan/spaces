@@ -31,6 +31,10 @@ var ConversationHomeDirFn = func() string {
 // Tests may override it.
 var ConversationOverlayPathFn = defaultConversationOverlayPath
 
+// ConversationCachePathFn resolves the path to conversations-cache.json.
+// Tests may override it.
+var ConversationCachePathFn = defaultConversationCachePath
+
 func defaultConversationOverlayPath() string {
 	if override := strings.TrimSpace(os.Getenv("TMUX_SPACES_CONVERSATION_OVERLAY")); override != "" {
 		return override
@@ -49,6 +53,24 @@ func defaultConversationOverlayPath() string {
 	return filepath.Join(xdg, "tmux-spaces", "conversations-overlay.json")
 }
 
+func defaultConversationCachePath() string {
+	if override := strings.TrimSpace(os.Getenv("TMUX_SPACES_CONVERSATION_CACHE")); override != "" {
+		return override
+	}
+	xdg := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME"))
+	if xdg == "" {
+		home := strings.TrimSpace(ConversationHomeDirFn())
+		if home == "" {
+			home = agent.RealHomeDir("")
+		}
+		if home == "" {
+			return ""
+		}
+		xdg = filepath.Join(home, ".cache")
+	}
+	return filepath.Join(xdg, "tmux-spaces", "conversations-cache.json")
+}
+
 type conversationOverlayEntry struct {
 	Agent        string `json:"agent"`
 	SessionID    string `json:"session_id"`
@@ -65,6 +87,13 @@ type conversationOverlayFile struct {
 	Entries map[string]conversationOverlayEntry `json:"entries"`
 }
 
+type cachedConvSnapshot struct {
+	Version         int                 `json:"version"`
+	SyncedMs        int64               `json:"synced_ms"`
+	IndexedMessages int                 `json:"indexed_messages"`
+	Conversations   []ConversationEntry `json:"conversations"`
+}
+
 type conversationCacheState struct {
 	mu              sync.RWMutex
 	loaded          bool
@@ -74,8 +103,9 @@ type conversationCacheState struct {
 }
 
 var (
-	convCache conversationCacheState
-	overlayMu sync.Mutex
+	convCache   conversationCacheState
+	overlayMu   sync.Mutex
+	diskCacheMu sync.Mutex
 )
 
 // ResetConversationStoreCache clears the in-memory conversation snapshot cache.
@@ -87,6 +117,94 @@ func ResetConversationStoreCache() {
 	convCache.entries = nil
 	convCache.syncedMs = 0
 	convCache.indexedMessages = 0
+}
+
+func loadConversationDiskCache() (cachedConvSnapshot, bool) {
+	path := strings.TrimSpace(ConversationCachePathFn())
+	if path == "" {
+		return cachedConvSnapshot{}, false
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || len(strings.TrimSpace(string(raw))) == 0 {
+		return cachedConvSnapshot{}, false
+	}
+	var snap cachedConvSnapshot
+	if err := json.Unmarshal(raw, &snap); err != nil {
+		return cachedConvSnapshot{}, false
+	}
+	if len(snap.Conversations) == 0 && snap.SyncedMs <= 0 {
+		return cachedConvSnapshot{}, false
+	}
+	return snap, true
+}
+
+func saveConversationDiskCache(snap cachedConvSnapshot) error {
+	path := strings.TrimSpace(ConversationCachePathFn())
+	if path == "" {
+		return nil
+	}
+	if snap.Version == 0 {
+		snap.Version = 1
+	}
+
+	data, err := json.Marshal(snap)
+	if err != nil {
+		return err
+	}
+
+	diskCacheMu.Lock()
+	defer diskCacheMu.Unlock()
+
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(dir, ".conversations-cache-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpPath, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	cleanup = false
+	return nil
+}
+
+func mergeConversationOverlay(entries []ConversationEntry) []ConversationEntry {
+	overlayMu.Lock()
+	overlay := loadConversationOverlay(ConversationOverlayPathFn())
+	overlayMu.Unlock()
+
+	out := make([]ConversationEntry, len(entries))
+	copy(out, entries)
+	if len(overlay) > 0 {
+		for i := range out {
+			if ov, ok := overlay[overlayKey(out[i].Agent, out[i].ID)]; ok {
+				applyOverlayToEntry(&out[i], ov)
+			}
+		}
+	}
+	sortConversationEntries(out)
+	return out
 }
 
 func overlayKey(canonAgent, sessionID string) string {
@@ -441,6 +559,26 @@ func fetchConversationsNative(ctx context.Context, refresh, includeArchived bool
 			return snap, nil
 		}
 		convCache.mu.RUnlock()
+
+		if diskSnap, ok := loadConversationDiskCache(); ok {
+			entries := mergeConversationOverlay(diskSnap.Conversations)
+			cacheCopy := append([]ConversationEntry(nil), entries...)
+
+			convCache.mu.Lock()
+			convCache.loaded = true
+			convCache.entries = cacheCopy
+			convCache.syncedMs = diskSnap.SyncedMs
+			convCache.indexedMessages = diskSnap.IndexedMessages
+			convCache.mu.Unlock()
+
+			return ConversationSnapshot{
+				OK:              true,
+				Conversations:   filterArchivedEntries(entries, includeArchived),
+				SyncedMs:        diskSnap.SyncedMs,
+				IndexedMessages: diskSnap.IndexedMessages,
+				PendingSources:  0,
+			}, nil
+		}
 	}
 
 	entries, indexedMessages, err := scanAllConversations(ctx)
@@ -448,13 +586,21 @@ func fetchConversationsNative(ctx context.Context, refresh, includeArchived bool
 		return ConversationSnapshot{}, err
 	}
 	nowMs := time.Now().UnixMilli()
+	cacheCopy := append([]ConversationEntry(nil), entries...)
 
 	convCache.mu.Lock()
 	convCache.loaded = true
-	convCache.entries = entries
+	convCache.entries = cacheCopy
 	convCache.syncedMs = nowMs
 	convCache.indexedMessages = indexedMessages
 	convCache.mu.Unlock()
+
+	_ = saveConversationDiskCache(cachedConvSnapshot{
+		Version:         1,
+		SyncedMs:        nowMs,
+		IndexedMessages: indexedMessages,
+		Conversations:   entries,
+	})
 
 	return ConversationSnapshot{
 		OK:              true,
@@ -772,6 +918,7 @@ func fetchConversationTitlesSnapshot(ctx context.Context, queries []TitleQuery) 
 		return TitleSnapshot{}, err
 	}
 
+	// Checks in-memory cache first, then disk cache, before falling back to a full scan.
 	snap, err := fetchConversationsNative(ctx, false, true)
 	if err != nil {
 		return TitleSnapshot{}, err

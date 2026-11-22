@@ -14,11 +14,14 @@ func setupNativeConvStoreEnv(t *testing.T) (homeDir, overlayPath string) {
 	t.Helper()
 	homeDir = t.TempDir()
 	overlayPath = filepath.Join(t.TempDir(), "data", "conversations-overlay.json")
+	cachePath := filepath.Join(t.TempDir(), "cache", "conversations-cache.json")
 
 	oldHome := ConversationHomeDirFn
 	oldOverlay := ConversationOverlayPathFn
+	oldCache := ConversationCachePathFn
 	ConversationHomeDirFn = func() string { return homeDir }
 	ConversationOverlayPathFn = func() string { return overlayPath }
+	ConversationCachePathFn = func() string { return cachePath }
 	ResetConversationStoreCache()
 
 	// Ensure no subprocess is ever spawned by native conversation store APIs.
@@ -30,6 +33,7 @@ func setupNativeConvStoreEnv(t *testing.T) (homeDir, overlayPath string) {
 	t.Cleanup(func() {
 		ConversationHomeDirFn = oldHome
 		ConversationOverlayPathFn = oldOverlay
+		ConversationCachePathFn = oldCache
 		ResetConversationStoreCache()
 	})
 	return homeDir, overlayPath
@@ -415,5 +419,101 @@ func TestFetchConversationTitlesNative(t *testing.T) {
 	}
 	if _, exists := titles["pane-missing"]; exists {
 		t.Errorf("pane-missing should not be present: %+v", titles)
+	}
+}
+
+func TestConversationDiskCacheInstantReload(t *testing.T) {
+	homeDir, _ := setupNativeConvStoreEnv(t)
+	cachePath := ConversationCachePathFn()
+
+	jsonlPath := filepath.Join(homeDir, ".claude", "projects", "repo-cache", "sess-disk-cache.jsonl")
+	writeConvTestFile(t, jsonlPath, strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-disk-cache","cwd":"/repo/cache","summary":"Cached disk snapshot task","timestamp":1700000500000}`,
+		`{"type":"user","sessionId":"sess-disk-cache","cwd":"/repo/cache","timestamp":1700000501000,"message":{"role":"user","content":"persist snapshot to disk"}}`,
+	}, "\n")+"\n")
+
+	// 1. FetchConversations(ctx, true, false) scans disk and writes conversations-cache.json.
+	snap1, err := FetchConversations(context.Background(), true, false)
+	if err != nil {
+		t.Fatalf("FetchConversations refresh error: %v", err)
+	}
+	if !snap1.OK || snap1.SyncedMs == 0 || len(snap1.Conversations) != 1 {
+		t.Fatalf("unexpected initial refresh snapshot: %+v", snap1)
+	}
+	if snap1.Conversations[0].ID != "sess-disk-cache" {
+		t.Fatalf("got ID %q, want sess-disk-cache", snap1.Conversations[0].ID)
+	}
+
+	fi, err := os.Stat(cachePath)
+	if err != nil {
+		t.Fatalf("expected disk cache file at %s: %v", cachePath, err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("cache file permissions = %o, want 0600", perm)
+	}
+
+	// Record an overlay open event after the disk cache was written so we can verify
+	// that reloading from disk cache merges the latest overlay.
+	if err := RecordConversationOpen(context.Background(), ConversationEntry{
+		Agent: "claude",
+		ID:    "sess-disk-cache",
+		CWD:   "/repo/cache",
+		Title: "Cached disk snapshot task",
+	}, "dev-space", 1700000999000); err != nil {
+		t.Fatalf("RecordConversationOpen error: %v", err)
+	}
+
+	// 2. Delete the source JSONL file and reset the in-memory cache.
+	if err := os.Remove(jsonlPath); err != nil {
+		t.Fatalf("remove source jsonl: %v", err)
+	}
+	ResetConversationStoreCache()
+
+	// 3. FetchConversations(ctx, false, false) loads instantaneously from conversations-cache.json
+	//    without scanning plugins and merges the latest overlay.
+	snap2, err := FetchConversations(context.Background(), false, false)
+	if err != nil {
+		t.Fatalf("FetchConversations disk cache reload error: %v", err)
+	}
+	if !snap2.OK || snap2.SyncedMs != snap1.SyncedMs || len(snap2.Conversations) != 1 {
+		t.Fatalf("unexpected disk-cached snapshot: %+v (want synced_ms=%d, 1 conv)", snap2, snap1.SyncedMs)
+	}
+	got := snap2.Conversations[0]
+	if got.ID != "sess-disk-cache" || got.Title != "Cached disk snapshot task" {
+		t.Errorf("unexpected cached conversation: %+v", got)
+	}
+	if got.Space != "dev-space" || got.LastOpenedMs != 1700000999000 {
+		t.Errorf("disk-cached conversation missing merged overlay: space=%q last_opened_ms=%d", got.Space, got.LastOpenedMs)
+	}
+
+	// Also verify FetchConversationTitles uses disk cache when in-memory cache is empty.
+	ResetConversationStoreCache()
+	titles, err := FetchConversationTitles(context.Background(), []TitleQuery{
+		{Key: "pane-1", Agent: "claude", CWD: "/repo/cache", SessionID: "sess-disk-cache"},
+	})
+	if err != nil {
+		t.Fatalf("FetchConversationTitles disk cache error: %v", err)
+	}
+	if titles["pane-1"] != "Cached disk snapshot task" {
+		t.Errorf("FetchConversationTitles = %q, want %q", titles["pane-1"], "Cached disk snapshot task")
+	}
+
+	// 4. Subsequent FetchConversations(ctx, true, false) rescans disk and updates conversations-cache.json.
+	snap3, err := FetchConversations(context.Background(), true, false)
+	if err != nil {
+		t.Fatalf("FetchConversations second refresh error: %v", err)
+	}
+	if !snap3.OK || len(snap3.Conversations) != 0 {
+		t.Fatalf("expected 0 conversations after source deletion + refresh, got: %+v", snap3)
+	}
+
+	// Verify the disk cache itself was updated to reflect the rescan.
+	ResetConversationStoreCache()
+	snap4, err := FetchConversations(context.Background(), false, false)
+	if err != nil {
+		t.Fatalf("FetchConversations post-refresh disk cache reload error: %v", err)
+	}
+	if !snap4.OK || snap4.SyncedMs != snap3.SyncedMs || len(snap4.Conversations) != 0 {
+		t.Fatalf("expected updated empty disk cache (synced_ms=%d), got: %+v", snap3.SyncedMs, snap4)
 	}
 }
