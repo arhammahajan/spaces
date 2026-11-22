@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/arhammahajan/spaces/internal/agent"
+	"github.com/arhammahajan/spaces/internal/osc"
 )
 
 // cmdShim is the pane-side agent wrapper: it primes @spaces_state through
@@ -53,9 +56,22 @@ func cmdShim(args []string, env Env) int {
 		env.errf("usage: tmux-spaces __shim [--hold] [--profile P] <app> <bin> [args...]\n")
 		return ExitUsage
 	}
-	app := canonicalApp(pos[0])
+	app := agent.DefaultRegistry().CLIDisplayApp(pos[0])
 	bin := pos[1]
 	childArgs := pos[2:]
+
+	oscEnabled := func() bool {
+		inZellij := env.Getenv("ZELLIJ_SESSION_NAME") != ""
+		inTmux := env.Getenv("TMUX") != "" && env.Getenv("TMUX_PANE") != ""
+		if !inZellij && !inTmux {
+			return false
+		}
+		switch env.Getenv("HARNESS_ATTN") {
+		case "0", "false":
+			return false
+		}
+		return osc.TtyWritable()
+	}()
 
 	setProfile := func(val string) {
 		pane := env.Getenv("TMUX_PANE")
@@ -91,6 +107,9 @@ func cmdShim(args []string, env Env) int {
 	}
 	setState("working", "")
 	setState("idle", "")
+	if oscEnabled {
+		osc.BeginWithProfile(app, profile)
+	}
 	code := env.RunChild(bin, childArgs)
 	outcome := "done"
 	msg := "finished"
@@ -100,6 +119,9 @@ func cmdShim(args []string, env Env) int {
 		outcome = "failed"
 		msg = fmt.Sprintf("exited with status %d", code)
 		setState("failed", msg)
+	}
+	if oscEnabled {
+		osc.FinishWithProfile(app, profile, code)
 	}
 	if env.RecordOutcome != nil {
 		cwd := env.Getenv("PWD")

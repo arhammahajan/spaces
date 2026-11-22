@@ -1,8 +1,12 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/base64"
 	"strings"
 	"testing"
+
+	"github.com/arhammahajan/spaces/internal/osc"
 )
 
 func shimEnv(fc *FakeClient, childCode int) Env {
@@ -185,5 +189,47 @@ func TestShimRecordsOutcomeOnExit(t *testing.T) {
 	}
 	if recorded[0].App != "antigravity" || recorded[0].Profile != "pratham" || recorded[0].Outcome != "done" || recorded[0].Pane != "%12" {
 		t.Errorf("unexpected outcome record: %+v", recorded[0])
+	}
+}
+
+func TestShimEmitsOSCLifecycle(t *testing.T) {
+	var tty bytes.Buffer
+	oldTty := osc.TtyWriter
+	osc.TtyWriter = &tty
+	t.Cleanup(func() { osc.TtyWriter = oldTty })
+
+	fc := &FakeClient{Up: true}
+	env := testEnvWithGetter(fc, func(k string) string {
+		switch k {
+		case "TMUX":
+			return "/tmp/tmux-1000/default,42,0"
+		case "TMUX_PANE":
+			return "%12"
+		}
+		return ""
+	})
+	env.RunChild = func(string, []string) int { return 0 }
+
+	if code := Run([]string{"__shim", "--profile", "pratham", "claude", "/bin/claude"}, env); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	want := "\x1b]7501;state=working:app=claude-code:profile=pratham\x1b\\" +
+		"\x1b]7501;state=idle:app=claude-code:profile=pratham\x1b\\" +
+		"\x1b]7501;state=done:app=claude-code:profile=pratham:msg=ZmluaXNoZWQ=\x1b\\"
+	if got := tty.String(); got != want {
+		t.Fatalf("osc tty = %q, want %q", got, want)
+	}
+
+	tty.Reset()
+	env.RunChild = func(string, []string) int { return 3 }
+	if code := Run([]string{"__shim", "agy", "/bin/agy"}, env); code != 3 {
+		t.Fatalf("code = %d", code)
+	}
+	wantErr := "\x1b]7501;state=working:app=antigravity\x1b\\" +
+		"\x1b]7501;state=idle:app=antigravity\x1b\\" +
+		"\x1b]7501;state=error:app=antigravity:msg=" +
+		base64.StdEncoding.EncodeToString([]byte("exited with status 3")) + "\x1b\\"
+	if got := tty.String(); got != wantErr {
+		t.Fatalf("osc tty (error) = %q, want %q", got, wantErr)
 	}
 }
