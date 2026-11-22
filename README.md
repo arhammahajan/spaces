@@ -244,3 +244,11 @@ In the Shared MCP & Skills popup (`prefix + u`), start typing to fuzzy-filter sh
 and skills from `~/.agents` and stowed harness configs (`Tab`/`Shift-Tab` cycles `all` / `mcp` / `skills`,
 `Enter` opens a scrollable detail inspector, `Ctrl-o` opens the source file in your editor, and
 `Ctrl-r` reloads from disk).
+
+## Adding new coding agents
+
+Agent-specific behavior (identity/aliases, screen reading, title extraction, hook arbitration policy,
+conversation store/log parsing hooks, live session discovery, launch/resume metadata, and MCP config
+paths) is encapsulated behind the overarching `agent.Plugin` interface in `internal/agent` with
+per-agent plugins in `internal/agent/plugins`. See [docs/agent-plugins.md](docs/agent-plugins.md)
+for the architecture overview and a quick-start guide to adding a new coding agent.
