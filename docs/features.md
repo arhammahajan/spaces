@@ -1312,7 +1312,7 @@ Persist normalized operational events in a dedicated SQLite WAL database (`logs.
 Mirror the modular plugin/adapter architecture so adding or updating an agent stays isolated to one adapter file:
 
 - **Adapter interface.** Define `Agent() string`, `Discover(ctx, env) ([]DiscoveredSource, error)`, and `ParseEvents(ctx, src, prev) (*EventsResult, error)` returning normalized events plus the updated `ByteOffset` and `PrefixHash`.
-- **Shared profile discovery.** Reuse profile discovery helpers so every adapter finds default homes, `profiles.json` shadow homes, and on-disk profile directories under `~/.model-router/profiles/<agent>/*/home` without double-counting symlinked paths.
+- **Shared profile discovery.** Reuse profile discovery helpers so every adapter finds default homes, `profiles.json` shadow homes, and on-disk profile directories under `~/.harness/profiles/<agent>/*/home` without double-counting symlinked paths.
 - **Transcript vs. runtime logs.** Some signals, such as token usage, tool call failures, and compactions, live inside the same transcript files `agent.LogParser` already scans, while others, such as CLI debug logs, MCP stderr logs, and OAuth refresh failures, live in separate log files. Validate with the first three adapters (`claude`, `codex`, and `antigravity`) whether transcript-embedded events should share a scan pass with `agent.LogParser` or remain decoupled inside `logstore`.
 
 ### 11.3 Rollups, diagnostics, and stall signals (LOG-3)

@@ -85,10 +85,10 @@ func FetchHookDetail(ctx context.Context, session string, paneNum int) (HookDeta
 	return snap, nil
 }
 
-// HarnessesPath resolves the path to ~/.model-router/harnesses.json.
+// HarnessesPath resolves the path to ~/.harness/harnesses.json.
 // If TMUX_SPACES_HARNESSES_FILE is set, it overrides the default location.
-// If HOME points into a shadow profile under ~/.model-router/ and harnesses.json
-// does not exist there, it falls back to the real home prefix before /.model-router/.
+// If HOME points into a shadow profile under ~/.harness/ and harnesses.json
+// does not exist there, it falls back to the real home prefix before /.harness/.
 func HarnessesPath(homeDir string) string {
 	home := strings.TrimSpace(homeDir)
 	if home == "" {
@@ -100,14 +100,14 @@ func HarnessesPath(homeDir string) string {
 	if override := strings.TrimSpace(os.Getenv("TMUX_SPACES_HARNESSES_FILE")); override != "" {
 		return expandHomePath(override, home)
 	}
-	candidate := filepath.Join(home, ".model-router", "harnesses.json")
+	candidate := filepath.Join(home, ".harness", "harnesses.json")
 	if isRegularFile(candidate) {
 		return candidate
 	}
-	marker := string(filepath.Separator) + ".model-router" + string(filepath.Separator)
+	marker := string(filepath.Separator) + ".harness" + string(filepath.Separator)
 	if idx := strings.Index(home, marker); idx > 0 {
 		realHome := home[:idx]
-		alt := filepath.Join(realHome, ".model-router", "harnesses.json")
+		alt := filepath.Join(realHome, ".harness", "harnesses.json")
 		if isRegularFile(alt) {
 			return alt
 		}
@@ -144,7 +144,7 @@ func LoadHarnessesFile(path string) (HarnessFile, error) {
 	return file, nil
 }
 
-// FetchHarnesses reads ~/.model-router/harnesses.json directly and parses the HarnessFile.
+// FetchHarnesses reads ~/.harness/harnesses.json directly and parses the HarnessFile.
 func FetchHarnesses(_ context.Context) (HarnessFile, error) {
 	return LoadHarnessesFile(HarnessesPath(""))
 }

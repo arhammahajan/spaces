@@ -98,8 +98,8 @@ type SharedSnapshot struct {
 // to the Stow-resolved ~/.agents directory in $HOME (falling back to the
 // legacy ~/dev/dots/harnesses/shared layout when ~/.agents does not exist).
 // Overridable via explicit dir or TMUX_SPACES_SHARED_DIR. If HOME points into
-// a shadow profile under ~/.model-router/ and the candidate does not exist
-// there, it falls back to the real home prefix before /.model-router/.
+// a shadow profile under ~/.harness/ and the candidate does not exist
+// there, it falls back to the real home prefix before /.harness/.
 func DefaultSharedDir(explicit, homeDir string) string {
 	raw := strings.TrimSpace(explicit)
 	if raw == "" {
@@ -124,7 +124,7 @@ func DefaultSharedDir(explicit, homeDir string) string {
 }
 
 func realHomeDir(homeDir string) string {
-	if idx := strings.Index(homeDir, string(filepath.Separator)+".model-router"+string(filepath.Separator)); idx > 0 {
+	if idx := strings.Index(homeDir, string(filepath.Separator)+".harness"+string(filepath.Separator)); idx > 0 {
 		return homeDir[:idx]
 	}
 	return homeDir

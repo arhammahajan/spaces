@@ -176,7 +176,7 @@ func TestFetchHarnesses(t *testing.T) {
 	})
 
 	home := t.TempDir()
-	mrDir := filepath.Join(home, ".model-router")
+	mrDir := filepath.Join(home, ".harness")
 	if err := os.MkdirAll(mrDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +246,7 @@ func TestFetchHarnesses(t *testing.T) {
 		t.Errorf("agent[2] = %+v", file.Agents[2])
 	}
 
-	// Shadow profile HOME under ~/.model-router/profiles/.../home falls back to real ~/.model-router/harnesses.json.
+	// Shadow profile HOME under ~/.harness/profiles/.../home falls back to real ~/.harness/harnesses.json.
 	shadowHome := filepath.Join(mrDir, "profiles", "antigravity", "work", "home")
 	if err := os.MkdirAll(shadowHome, 0o755); err != nil {
 		t.Fatal(err)
