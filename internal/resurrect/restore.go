@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	"github.com/arhammahajan/spaces/internal/model"
 )
 
@@ -47,10 +48,14 @@ type RestoreOptions struct {
 	Switch bool
 	// SpacesBinary returns the argv prefix for zj helpers (defaults to model.SpacesBinary).
 	SpacesBinary func() []string
+	// ResolveSession resolves an unclaimed session/conversation ID for
+	// (agent, cwd, profile, title) while excluding already-claimed IDs.
+	// Returns (id, ok) where ok=false means resolution was unavailable.
+	// Defaults to invoking `spaces resume-command <agent> ...`.
+	ResolveSession agent.SessionLookupFunc
 	// ResolveAntigravity resolves an unclaimed Antigravity conversation ID for
-	// (cwd, profile, title) while excluding already-claimed IDs. Returns (id, ok)
-	// where ok=false means resolution was unavailable. Defaults to invoking
-	// `spaces resume-command antigravity ...`.
+	// (cwd, profile, title) while excluding already-claimed IDs. Kept for
+	// backwards compatibility when ResolveSession is nil.
 	ResolveAntigravity func(ctx context.Context, cwd, profile, title string, exclude map[string]bool) (string, bool)
 }
 
@@ -193,7 +198,7 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 		return nil
 	}
 
-	assigned, skipResume := resolveAntigravitySessions(ctx, snap, opts)
+	assigned, skipResume := resolveAgentSessions(ctx, snap, opts)
 
 	activeWinTarget := ""
 	for wi, win := range snap.Windows {
@@ -399,37 +404,21 @@ func paneResolveKey(wi, pi int) string {
 	return fmt.Sprintf("%d:%d", wi, pi)
 }
 
-// resolveAntigravitySessions ensures multiple Antigravity panes in the same
-// SpaceSnapshot never resume the same conversation_id. Panes that already carry
-// a SessionID (or `--conversation <id>` in FullCommand) claim those IDs first;
-// remaining Antigravity panes resolve distinct unclaimed conversations via
-// `spaces resume-command` (matching saved Title when available), or skip resume
-// when all matching conversations are already claimed.
-func resolveAntigravitySessions(ctx context.Context, snap SpaceSnapshot, opts RestoreOptions) (map[string]string, map[string]bool) {
+// resolveAgentSessions delegates restore-time session resolution and
+// deduplication to each agent plugin's SessionResolver.
+func resolveAgentSessions(ctx context.Context, snap SpaceSnapshot, opts RestoreOptions) (map[string]string, map[string]bool) {
 	assigned := map[string]string{}
 	skipResume := map[string]bool{}
-	claimed := map[string]bool{}
 
-	type pendingPane struct {
-		key     string
-		cwd     string
-		profile string
-		title   string
-	}
-	var pending []pendingPane
-
+	byAgent := map[string][]agent.SessionPaneRef{}
+	var agentOrder []string
 	for wi, win := range snap.Windows {
 		for pi, p := range win.Panes {
-			if p.Agent != "antigravity" {
+			if p.Agent == "" {
 				continue
 			}
-			sid := strings.TrimSpace(p.SessionID)
-			if sid == "" {
-				sid = extractSessionIDFromCommand("antigravity", p.FullCommand)
-			}
-			if sid != "" {
-				claimed[sid] = true
-				continue
+			if _, seen := byAgent[p.Agent]; !seen {
+				agentOrder = append(agentOrder, p.Agent)
 			}
 			cwd := p.CWD
 			if cwd == "" {
@@ -437,50 +426,62 @@ func resolveAntigravitySessions(ctx context.Context, snap SpaceSnapshot, opts Re
 			}
 			prof := p.Profile
 			if prof == "" {
-				prof = harnessProfileFromArgv(p.FullCommand)
+				prof = agent.HarnessProfileFromArgv(p.FullCommand)
 			}
-			pending = append(pending, pendingPane{
-				key:     paneResolveKey(wi, pi),
-				cwd:     cwd,
-				profile: prof,
-				title:   p.Title,
+			byAgent[p.Agent] = append(byAgent[p.Agent], agent.SessionPaneRef{
+				Key:         paneResolveKey(wi, pi),
+				Agent:       p.Agent,
+				SessionID:   p.SessionID,
+				Profile:     prof,
+				CWD:         cwd,
+				Title:       p.Title,
+				FullCommand: p.FullCommand,
 			})
 		}
 	}
 
-	if len(pending) == 0 {
+	if len(agentOrder) == 0 {
 		return assigned, skipResume
 	}
 
-	resolver := opts.ResolveAntigravity
-	if resolver == nil {
-		resolver = func(ctx context.Context, cwd, profile, title string, exclude map[string]bool) (string, bool) {
-			return defaultResolveAntigravity(ctx, opts.SpacesBinary, cwd, profile, title, exclude)
+	lookup := func(ctx context.Context, agentID, cwd, profile, title string, exclude map[string]bool) (string, bool) {
+		if opts.ResolveSession != nil {
+			return opts.ResolveSession(ctx, agentID, cwd, profile, title, exclude)
 		}
+		if agentID == "antigravity" && opts.ResolveAntigravity != nil {
+			return opts.ResolveAntigravity(ctx, cwd, profile, title, exclude)
+		}
+		return defaultResolveAgentSession(ctx, opts.SpacesBinary, agentID, cwd, profile, title, exclude)
 	}
 
-	for _, p := range pending {
-		sid, ok := resolver(ctx, p.cwd, p.profile, p.title, claimed)
-		if sid != "" {
-			assigned[p.key] = sid
-			claimed[sid] = true
-		} else if ok && len(claimed) > 0 {
-			skipResume[p.key] = true
+	for _, agentID := range agentOrder {
+		plugin, ok := agent.DefaultRegistry().ResolveRuntime(agentID)
+		if !ok {
+			continue
+		}
+		res := plugin.SessionResolver().ResolveRestoreSessions(ctx, byAgent[agentID], lookup)
+		for k, v := range res.SessionIDs {
+			assigned[k] = v
+		}
+		for k, v := range res.SkipResume {
+			if v {
+				skipResume[k] = true
+			}
 		}
 	}
 	return assigned, skipResume
 }
 
-func defaultResolveAntigravity(ctx context.Context, zjFn func() []string, cwd, profile, title string, exclude map[string]bool) (string, bool) {
+func defaultResolveAgentSession(ctx context.Context, zjFn func() []string, agentID, cwd, profile, title string, exclude map[string]bool) (string, bool) {
 	if zjFn == nil {
 		zjFn = model.SpacesBinary
 	}
 	zj := zjFn()
-	if len(zj) == 0 {
+	if len(zj) == 0 || agentID == "" {
 		return "", false
 	}
 	args := append([]string(nil), zj[1:]...)
-	args = append(args, "resume-command", "antigravity", cwd)
+	args = append(args, "resume-command", agentID, cwd)
 	if profile != "" {
 		args = append(args, "--profile", profile)
 	}
@@ -506,22 +507,4 @@ func defaultResolveAntigravity(ctx context.Context, zjFn func() []string, cwd, p
 		return "", false
 	}
 	return res.SessionID, true
-}
-
-func harnessProfileFromArgv(argv []string) string {
-	if len(argv) < 3 || filepath.Base(argv[0]) != "harness" {
-		return ""
-	}
-	switch {
-	case argv[1] == "profile" && !strings.HasPrefix(argv[2], "-"):
-		return argv[2]
-	case len(argv) >= 4 && argv[2] == "profile" && !strings.HasPrefix(argv[3], "-"):
-		return argv[3]
-	case len(argv) >= 4 && argv[1] == "spaces" && argv[2] == "__shim-profile":
-		if _, prof, ok := strings.Cut(argv[3], "/"); ok {
-			return prof
-		}
-		return argv[3]
-	}
-	return ""
 }
