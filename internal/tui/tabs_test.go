@@ -1141,3 +1141,166 @@ func TestTabsOutOfOrderTickSnapshotIgnored(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatHookUsage(t *testing.T) {
+	tests := []struct {
+		name  string
+		usage *model.HookUsage
+		want  string
+	}{
+		{
+			name:  "nil usage",
+			usage: nil,
+			want:  "",
+		},
+		{
+			name:  "empty usage",
+			usage: &model.HookUsage{},
+			want:  "",
+		},
+		{
+			name: "input output cached cost",
+			usage: &model.HookUsage{
+				InputTokens:     12_400,
+				OutputTokens:    3_100,
+				CacheReadTokens: 8_200,
+				CostUSD:         0.04,
+			},
+			want: "12.4k in · 3.1k out · 8.2k cached · $0.04",
+		},
+		{
+			name: "small counts without cache or cost",
+			usage: &model.HookUsage{
+				InputTokens:  450,
+				OutputTokens: 120,
+			},
+			want: "450 in · 120 out",
+		},
+		{
+			name: "millions reasoning and sub-cent cost",
+			usage: &model.HookUsage{
+				InputTokens:     1_500_000,
+				OutputTokens:    125_400,
+				ReasoningTokens: 4_000,
+				CostUSD:         0.0025,
+			},
+			want: "1.5M in · 125k out · 4k reason · $0.0025",
+		},
+		{
+			name: "cache write shown when no cache read",
+			usage: &model.HookUsage{
+				InputTokens:      2_000,
+				OutputTokens:     500,
+				CacheWriteTokens: 1_500,
+			},
+			want: "2k in · 500 out · 1.5k cache-w",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatHookUsage(tc.usage); got != tc.want {
+				t.Fatalf("formatHookUsage(%+v) = %q, want %q", tc.usage, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTabsInspectorRendersDaemonSSESourceAndUsage(t *testing.T) {
+	nowMs := tabsTestNow().UnixMilli()
+	spaces := sampleTabsSpaces()
+	// Configure tab 2 (@3 / %4) as an OpenCode pane fed by daemon_sse with usage telemetry.
+	spaces[0].Panes[3].App = "opencode"
+	spaces[0].Panes[3].Command = "opencode"
+	spaces[0].Panes[3].Source = "" // verify p.Hook.Source is respected even when Pane.Source is empty
+	spaces[0].Panes[3].Hook = &model.HookSummary{
+		Agent:         "opencode",
+		App:           "opencode",
+		State:         "working",
+		Event:         "tool.execute.before",
+		Source:        "daemon_sse",
+		TsMs:          nowMs - 12_000,
+		StateSinceMs:  nowMs - 12_000,
+		TurnStartedMs: nowMs - 45_000,
+		Model:         "claude-sonnet-4",
+		SessionID:     "ses-opencode-42",
+		Usage: &model.HookUsage{
+			InputTokens:     12_400,
+			OutputTokens:    3_100,
+			CacheReadTokens: 8_200,
+			CostUSD:         0.04,
+		},
+	}
+
+	fb := &fakeTabsBackend{fakeBackend: fakeBackend{spaces: spaces}}
+	m := newTestTabsModel(t, fb, Options{})
+	next, cmd := m.Update(keyRunes("2"))
+	m = runCmdBatch(next.(Model), cmd)
+
+	layout := m.tabsLayout(m.width, m.height)
+	rightLines, _ := m.renderTabInspectorWithHits(m.spaces[0], m.tabsItems()[m.selected], layout.rightWidth, layout.bodyHeight)
+	rhs := ansi.Strip(strings.Join(rightLines, "\n"))
+
+	for _, want := range []string{
+		"Usage",
+		"12.4k in · 3.1k out · 8.2k cached · $0.04",
+		"ses-opencode-42 · tool.execute.before · daemon_sse",
+	} {
+		if !strings.Contains(rhs, want) {
+			t.Errorf("daemon_sse inspector RHS missing %q:\n%s", want, rhs)
+		}
+	}
+
+	// Also verify fallback to HookDetail.Usage and upgrading generic "hook" Pane.Source to detail.Source.
+	spaces2 := sampleTabsSpaces()
+	spaces2[0].Panes[3].App = "opencode"
+	spaces2[0].Panes[3].Source = "hook"
+	spaces2[0].Panes[3].Hook = &model.HookSummary{
+		Agent:     "opencode",
+		App:       "opencode",
+		State:     "working",
+		Event:     "session.busy",
+		TsMs:      nowMs - 5_000,
+		SessionID: "ses-detail-99",
+		HasDetail: true,
+	}
+	fb2 := &fakeTabsBackend{
+		fakeBackend: fakeBackend{spaces: spaces2},
+		hookDetails: map[int]*model.HookDetail{
+			4: {
+				HookSummary: model.HookSummary{
+					Agent:     "opencode",
+					App:       "opencode",
+					State:     "working",
+					Event:     "session.busy",
+					Source:    "daemon_sse",
+					TsMs:      nowMs - 5_000,
+					SessionID: "ses-detail-99",
+					Usage: &model.HookUsage{
+						InputTokens:  5_600,
+						OutputTokens: 1_200,
+						CostUSD:      0.02,
+					},
+					HasDetail: true,
+				},
+			},
+		},
+	}
+	m2 := newTestTabsModel(t, fb2, Options{})
+	next, cmd = m2.Update(keyRunes("2"))
+	m2 = runCmdBatch(next.(Model), cmd)
+
+	layout2 := m2.tabsLayout(m2.width, m2.height)
+	rightLines2, _ := m2.renderTabInspectorWithHits(m2.spaces[0], m2.tabsItems()[m2.selected], layout2.rightWidth, layout2.bodyHeight)
+	rhs2 := ansi.Strip(strings.Join(rightLines2, "\n"))
+
+	for _, want := range []string{
+		"Usage",
+		"5.6k in · 1.2k out · $0.02",
+		"ses-detail-99 · session.busy · daemon_sse",
+	} {
+		if !strings.Contains(rhs2, want) {
+			t.Errorf("detail fallback inspector RHS missing %q:\n%s", want, rhs2)
+		}
+	}
+}

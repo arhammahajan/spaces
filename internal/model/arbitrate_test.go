@@ -746,3 +746,153 @@ func TestAntigravityClearsStaleWorkingHooksWhenVisiblyIdle(t *testing.T) {
 		t.Fatalf("active subagent must stay StatusWorking even with idle parent prompt, got %v", got4.Panes[0].Status)
 	}
 }
+
+func TestHookUsageHelpers(t *testing.T) {
+	var nilUsage *HookUsage
+	if nilUsage.HasData() || nilUsage.TotalTokens() != 0 {
+		t.Fatalf("nil HookUsage should report no data and 0 total")
+	}
+	empty := &HookUsage{}
+	if empty.HasData() || empty.TotalTokens() != 0 {
+		t.Fatalf("empty HookUsage should report no data and 0 total")
+	}
+	full := &HookUsage{
+		InputTokens:      12_400,
+		OutputTokens:     3_100,
+		ReasoningTokens:  500,
+		CacheReadTokens:  8_200,
+		CacheWriteTokens: 1_000,
+		CostUSD:          0.04,
+	}
+	if !full.HasData() {
+		t.Fatalf("full HookUsage.HasData() = false, want true")
+	}
+	if got := full.TotalTokens(); got != 16_000 {
+		t.Fatalf("full HookUsage.TotalTokens() = %d, want 16000", got)
+	}
+	costOnly := &HookUsage{CostUSD: 0.01}
+	if !costOnly.HasData() {
+		t.Fatalf("cost-only HookUsage.HasData() = false, want true")
+	}
+	cacheOnly := &HookUsage{CacheReadTokens: 2048}
+	if !cacheOnly.HasData() || cacheOnly.TotalTokens() != 0 {
+		t.Fatalf("cache-only HookUsage: hasData=%v total=%d, want true/0", cacheOnly.HasData(), cacheOnly.TotalTokens())
+	}
+}
+
+func TestDaemonSSESourceAttributionAndArbitration(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+
+	// 1. Fresh daemon_sse working hook sets pane.Source = "daemon_sse" and StatusWorking.
+	arb1 := NewArbitrator()
+	daemonWorking := &HookSnapshot{
+		OK: true, Version: 1, NowMs: t0 + 1_000,
+		Panes: map[string]map[string]HookSummary{
+			"dots": {
+				"1": {
+					Agent:        "opencode",
+					App:          "opencode",
+					State:        "working",
+					Event:        "session.busy",
+					Source:       "daemon_sse",
+					TsMs:         t0,
+					StateSinceMs: t0,
+					Text:         "Running tool: bash",
+					Usage: &HookUsage{
+						InputTokens:     12_400,
+						OutputTokens:    3_100,
+						CacheReadTokens: 8_200,
+						CostUSD:         0.04,
+					},
+				},
+			},
+		},
+	}
+	got1 := applyOne(t, arb1, arbSpace("dots", "opencode", StatusIdle, false), daemonWorking, nil, t0+1_000)
+	if got1.Panes[0].Status != StatusWorking {
+		t.Fatalf("daemon_sse working: got %v want StatusWorking", got1.Panes[0].Status)
+	}
+	if got1.Panes[0].Source != "daemon_sse" {
+		t.Fatalf("daemon_sse source = %q, want %q", got1.Panes[0].Source, "daemon_sse")
+	}
+	if got1.Panes[0].Hook == nil || got1.Panes[0].Hook.Usage == nil || got1.Panes[0].Hook.Usage.TotalTokens() != 15_500 {
+		t.Fatalf("daemon_sse usage not preserved on pane.Hook: %+v", got1.Panes[0].Hook)
+	}
+
+	// 2. daemon_sse working suppresses screen-inferred idle/done transitions
+	// (both screenFinishedNewerTurn and yieldWorkingToIdle).
+	arb2 := NewArbitrator()
+	idleReading := map[string]ScreenReading{
+		"%%1": {App: "antigravity", State: "idle", VisibleIdle: true},
+	}
+	daemonAGY := &HookSnapshot{
+		OK: true, Version: 1, NowMs: t0 + plugins.AntigravityHookIdleGraceMs + 5_000,
+		Panes: map[string]map[string]HookSummary{
+			"dots": {
+				"1": {
+					Agent:        "antigravity",
+					App:          "antigravity",
+					State:        "working",
+					Event:        "session.busy",
+					Source:       "daemon_sse",
+					TsMs:         t0,
+					StateSinceMs: t0,
+					Text:         "Streaming response",
+				},
+			},
+		},
+	}
+	sp2 := arbSpace("dots", "antigravity", StatusWorking, false)
+	sp2.Panes[0].Source = "screen"
+	sp2.Panes[0].BaseAgeMs = 2_000 // newer than hook silence to trigger screenFinishedNewerTurn if not suppressed
+	got2 := applyOne(t, arb2, sp2, daemonAGY, idleReading, t0+plugins.AntigravityHookIdleGraceMs+5_000)
+	if got2.Panes[0].Status != StatusWorking {
+		t.Fatalf("daemon_sse working with visibly idle screen: got %v, want StatusWorking", got2.Panes[0].Status)
+	}
+	if got2.Panes[0].Source != "daemon_sse" {
+		t.Fatalf("daemon_sse source after screen idle = %q, want %q", got2.Panes[0].Source, "daemon_sse")
+	}
+	if newlyDone := arb2.TakeNewlyDone(); len(newlyDone) != 0 {
+		t.Fatalf("daemon_sse working must suppress screen newlyDone, got %v", newlyDone)
+	}
+
+	// 3. daemon_sse permission and question blockers surface as StatusNeedsYou.
+	for _, kind := range []string{"permission", "question"} {
+		arb3 := NewArbitrator()
+		daemonBlocked := &HookSnapshot{
+			OK: true, Version: 1, NowMs: t0 + 1_000,
+			Panes: map[string]map[string]HookSummary{
+				"dots": {
+					"1": {
+						Agent:        "opencode",
+						App:          "opencode",
+						State:        "blocked",
+						Kind:         kind,
+						Event:        "permission.asked",
+						Source:       "daemon_sse",
+						TsMs:         t0,
+						StateSinceMs: t0,
+						Text:         "Allow bash command?",
+					},
+				},
+			},
+		}
+		got3 := applyOne(t, arb3, arbSpace("dots", "opencode", StatusWorking, false), daemonBlocked, nil, t0+1_000)
+		if got3.Panes[0].Status != StatusNeedsYou {
+			t.Fatalf("daemon_sse %s blocker: got %v, want StatusNeedsYou", kind, got3.Panes[0].Status)
+		}
+		if got3.Panes[0].Source != "daemon_sse" {
+			t.Fatalf("daemon_sse %s blocker source = %q, want %q", kind, got3.Panes[0].Source, "daemon_sse")
+		}
+	}
+
+	// 4. A visible screen blocker still overrides a fresh daemon_sse working state.
+	arb4 := NewArbitrator()
+	blockerReading := map[string]ScreenReading{
+		"%%1": {App: "opencode", State: "blocked", VisibleBlocker: true},
+	}
+	got4 := applyOne(t, arb4, arbSpace("dots", "opencode", StatusIdle, false), daemonWorking, blockerReading, t0+1_000)
+	if got4.Panes[0].Status != StatusNeedsYou {
+		t.Fatalf("visible screen blocker over daemon_sse working: got %v, want StatusNeedsYou", got4.Panes[0].Status)
+	}
+}

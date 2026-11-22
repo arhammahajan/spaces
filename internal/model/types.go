@@ -169,6 +169,34 @@ func (c Counts) Rollup() Status {
 	}
 }
 
+// HookUsage carries token and estimated cost telemetry reported by a
+// passive telemetry source (e.g. daemon_sse, router, otlp).
+type HookUsage struct {
+	InputTokens      int64   `json:"input_tokens,omitempty"`
+	OutputTokens     int64   `json:"output_tokens,omitempty"`
+	ReasoningTokens  int64   `json:"reasoning_tokens,omitempty"`
+	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
+	CostUSD          float64 `json:"cost_usd,omitempty"`
+}
+
+// TotalTokens returns the sum of input, output, and reasoning tokens.
+func (u *HookUsage) TotalTokens() int64 {
+	if u == nil {
+		return 0
+	}
+	return u.InputTokens + u.OutputTokens + u.ReasoningTokens
+}
+
+// HasData reports whether any token count or cost value is populated.
+func (u *HookUsage) HasData() bool {
+	if u == nil {
+		return false
+	}
+	return u.InputTokens > 0 || u.OutputTokens > 0 || u.ReasoningTokens > 0 ||
+		u.CacheReadTokens > 0 || u.CacheWriteTokens > 0 || u.CostUSD > 0
+}
+
 // HookSummary is the per-pane summary returned by `spaces __space-hooks`.
 type HookSummary struct {
 	Agent           string      `json:"agent"`
@@ -176,6 +204,7 @@ type HookSummary struct {
 	State           string      `json:"state"`
 	Kind            string      `json:"kind,omitempty"`
 	Event           string      `json:"event"`
+	Source          string      `json:"source,omitempty"`
 	TsMs            int64       `json:"ts_ms"`
 	StateSinceMs    int64       `json:"state_since_ms"`
 	TurnStartedMs   int64       `json:"turn_started_ms"`
@@ -184,6 +213,7 @@ type HookSummary struct {
 	Model           string      `json:"model,omitempty"`
 	SessionID       string      `json:"session_id,omitempty"`
 	CWD             string      `json:"cwd,omitempty"`
+	Usage           *HookUsage  `json:"usage,omitempty"`
 	ChildCount      int         `json:"child_count"`
 	Background      int         `json:"background,omitempty"`
 	FiniteActive    int         `json:"finite_active,omitempty"`

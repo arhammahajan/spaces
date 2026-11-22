@@ -916,6 +916,11 @@ func (m Model) renderInspectorDetailsSection(sp model.Space, tab TabItem, p mode
 			items = append(items, inspectorKV{label: "Runtime", value: strings.Join(rParts, " · "), color: ColorOverlay0})
 		}
 
+		// Token / cost usage summary (from passive telemetry such as daemon_sse, router, or OTLP).
+		if usageStr := formatHookUsage(resolveHookUsage(p, detail)); usageStr != "" {
+			items = append(items, inspectorKV{label: "Usage", value: usageStr, color: ColorSubtext0})
+		}
+
 		// Session + hook event + source.
 		var sParts []string
 		sid := strings.TrimSpace(p.ResumeSession)
@@ -938,7 +943,18 @@ func (m Model) renderInspectorDetailsSection(sp model.Space, tab TabItem, p mode
 		if event != "" {
 			sParts = append(sParts, event)
 		}
-		if src := strings.TrimSpace(p.Source); src != "" {
+		src := strings.TrimSpace(p.Source)
+		if p.Hook != nil {
+			if hs := strings.TrimSpace(p.Hook.Source); hs != "" && (src == "" || strings.EqualFold(src, "hook")) {
+				src = hs
+			}
+		}
+		if detail != nil {
+			if ds := strings.TrimSpace(detail.Source); ds != "" && (src == "" || strings.EqualFold(src, "hook")) {
+				src = ds
+			}
+		}
+		if src != "" {
 			sParts = append(sParts, src)
 		}
 		if len(sParts) > 0 {
@@ -1149,4 +1165,66 @@ func resolveTurnStartedMs(sp model.Space, p model.Pane, bgDetails map[string]*mo
 		}
 	}
 	return 0
+}
+
+func resolveHookUsage(p model.Pane, detail *model.HookDetail) *model.HookUsage {
+	if p.Hook != nil && p.Hook.Usage != nil && p.Hook.Usage.HasData() {
+		return p.Hook.Usage
+	}
+	if detail != nil && detail.Usage != nil && detail.Usage.HasData() {
+		return detail.Usage
+	}
+	return nil
+}
+
+func formatTokenCount(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		s := fmt.Sprintf("%.1f", float64(n)/1_000_000)
+		return strings.TrimSuffix(s, ".0") + "M"
+	case n >= 100_000:
+		return fmt.Sprintf("%dk", (n+500)/1_000)
+	case n >= 1_000:
+		s := fmt.Sprintf("%.1f", float64(n)/1_000)
+		return strings.TrimSuffix(s, ".0") + "k"
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+func formatCostUSD(cost float64) string {
+	switch {
+	case cost <= 0:
+		return ""
+	case cost < 0.01:
+		return fmt.Sprintf("$%.4f", cost)
+	default:
+		return fmt.Sprintf("$%.2f", cost)
+	}
+}
+
+func formatHookUsage(u *model.HookUsage) string {
+	if u == nil || !u.HasData() {
+		return ""
+	}
+	var parts []string
+	if u.InputTokens > 0 {
+		parts = append(parts, formatTokenCount(u.InputTokens)+" in")
+	}
+	if u.OutputTokens > 0 {
+		parts = append(parts, formatTokenCount(u.OutputTokens)+" out")
+	}
+	if u.ReasoningTokens > 0 {
+		parts = append(parts, formatTokenCount(u.ReasoningTokens)+" reason")
+	}
+	if u.CacheReadTokens > 0 {
+		parts = append(parts, formatTokenCount(u.CacheReadTokens)+" cached")
+	}
+	if u.CacheWriteTokens > 0 && u.CacheReadTokens == 0 {
+		parts = append(parts, formatTokenCount(u.CacheWriteTokens)+" cache-w")
+	}
+	if cost := formatCostUSD(u.CostUSD); cost != "" {
+		parts = append(parts, cost)
+	}
+	return strings.Join(parts, " · ")
 }

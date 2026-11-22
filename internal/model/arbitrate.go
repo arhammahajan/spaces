@@ -331,8 +331,10 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 			// screen-completed turn or contradicted by a visibly idle viewport
 			// (e.g. Antigravity after a missed Stop or finished local_bash task).
 			if hook != nil {
+				hookSource := strings.TrimSpace(hook.Source)
+				isDaemonSSE := strings.EqualFold(hookSource, "daemon_sse")
 				hookSilence := saturatingSub(nowMs, hook.TsMs)
-				screenFinishedNewerTurn := len(a.newlyDone) > prevNewlyDoneLen &&
+				screenFinishedNewerTurn := !isDaemonSSE && len(a.newlyDone) > prevNewlyDoneLen &&
 					status == StatusDone &&
 					pane.BaseAgeMs > 0 && pane.BaseAgeMs < hookSilence
 				var policy agent.HookPolicy = agent.BaseHookPolicy{StaleLocalCmdMs: hookWorkingStaleMs}
@@ -343,7 +345,7 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 				if hasReading {
 					screenState = reading.State
 				}
-				yieldWorkingToIdle := policy.ShouldYieldWorkingHookToIdle(agent.HookArbitrationInput{
+				yieldWorkingToIdle := !isDaemonSSE && policy.ShouldYieldWorkingHookToIdle(agent.HookArbitrationInput{
 					HookState:                 hook.State,
 					HookSilenceMs:             hookSilence,
 					HasActiveFiniteWork:       hook.HasActiveFiniteWork(),
@@ -360,6 +362,9 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 						pane.AgeMs = age
 						if strings.TrimSpace(text) != "" {
 							pane.Text = text
+						}
+						if hookSource != "" {
+							pane.Source = hookSource
 						}
 						if visibleBlocker && status != StatusNeedsYou {
 							status = StatusNeedsYou
