@@ -81,12 +81,15 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 	overlayPath := filepath.Join(tmpHome, "conversations-overlay.json")
 	origHome := model.ConversationHomeDirFn
 	origOverlay := model.ConversationOverlayPathFn
+	origCache := model.ConversationCachePathFn
 	model.ConversationHomeDirFn = func() string { return tmpHome }
 	model.ConversationOverlayPathFn = func() string { return overlayPath }
+	model.ConversationCachePathFn = func() string { return filepath.Join(tmpHome, "conversations-cache.json") }
 	model.ResetConversationStoreCache()
 	defer func() {
 		model.ConversationHomeDirFn = origHome
 		model.ConversationOverlayPathFn = origOverlay
+		model.ConversationCachePathFn = origCache
 		model.ResetConversationStoreCache()
 	}()
 

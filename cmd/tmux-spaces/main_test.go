@@ -228,6 +228,7 @@ func TestMain(m *testing.M) {
 		defer os.RemoveAll(tmp)
 		model.ConversationHomeDirFn = func() string { return tmp }
 		model.ConversationOverlayPathFn = func() string { return filepath.Join(tmp, "conversations-overlay.json") }
+		model.ConversationCachePathFn = func() string { return filepath.Join(tmp, "conversations-cache.json") }
 		model.ResetConversationStoreCache()
 	}
 	os.Exit(m.Run())
@@ -252,14 +253,17 @@ func TestMultipleAntigravityPanesResolveDistinctTitles(t *testing.T) {
 
 	origHome := model.ConversationHomeDirFn
 	origOverlay := model.ConversationOverlayPathFn
+	origCache := model.ConversationCachePathFn
 	origExec := model.ExecFn
 	origProcAgy := resurrect.ProcAntigravitySessionFunc
 	model.ConversationHomeDirFn = func() string { return tmpHome }
 	model.ConversationOverlayPathFn = func() string { return filepath.Join(tmpHome, "overlay.json") }
+	model.ConversationCachePathFn = func() string { return filepath.Join(tmpHome, "cache.json") }
 	model.ResetConversationStoreCache()
 	defer func() {
 		model.ConversationHomeDirFn = origHome
 		model.ConversationOverlayPathFn = origOverlay
+		model.ConversationCachePathFn = origCache
 		model.ResetConversationStoreCache()
 		model.ExecFn = origExec
 		resurrect.ProcAntigravitySessionFunc = origProcAgy
