@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -232,6 +235,15 @@ func (r *Registry) BinaryName(name string) string {
 	return strings.TrimSpace(name)
 }
 
+// ResumeArgs returns the CLI arguments needed to resume sessionID for name
+// (e.g. ["--resume", id] for claude, ["resume", id] for codex).
+func (r *Registry) ResumeArgs(name, sessionID string) []string {
+	if p, ok := r.ResolveRuntime(name); ok {
+		return p.Launcher().ResumeArgs(sessionID)
+	}
+	return nil
+}
+
 // IsOSCAuthority reports whether live non-idle OSC 7501 / hook state wins over
 // bare screen working/idle readings for name.
 func (r *Registry) IsOSCAuthority(name string) bool {
@@ -420,4 +432,164 @@ func (r *Registry) DetectProcess(proc ProcessInfo) string {
 		}
 	}
 	return ""
+}
+
+// RealHomeDir unwraps a harness shadow profile HOME
+// (`<realHome>/.model-router/profiles/<agent>/<profile>/home`) back to
+// `<realHome>`. When home is empty, os.UserHomeDir() is used.
+func RealHomeDir(home string) string {
+	h := strings.TrimSpace(home)
+	if h == "" {
+		var err error
+		h, err = os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+	}
+	if idx := strings.Index(h, "/.model-router/"); idx > 0 {
+		return h[:idx]
+	}
+	return h
+}
+
+// DiscoverProfileRoots discovers optional harness-managed profile home
+// directories under `<realHome>/.model-router/profiles/<agent>/<profile>/home`.
+// Returns nil cleanly when no harness profile directory exists.
+func (r *Registry) DiscoverProfileRoots(realHome string) []ProfileRoot {
+	base := RealHomeDir(realHome)
+	if base == "" {
+		return nil
+	}
+	profilesDir := filepath.Join(base, ".model-router", "profiles")
+	agentEntries, err := os.ReadDir(profilesDir)
+	if err != nil {
+		return nil
+	}
+	var out []ProfileRoot
+	for _, ae := range agentEntries {
+		if !ae.IsDir() {
+			continue
+		}
+		agentID := r.CanonicalID(ae.Name())
+		if agentID == "" {
+			agentID = strings.ToLower(strings.TrimSpace(ae.Name()))
+		}
+		profEntries, err := os.ReadDir(filepath.Join(profilesDir, ae.Name()))
+		if err != nil {
+			continue
+		}
+		for _, pe := range profEntries {
+			if !pe.IsDir() {
+				continue
+			}
+			homeDir := filepath.Join(profilesDir, ae.Name(), pe.Name(), "home")
+			if info, statErr := os.Stat(homeDir); statErr == nil && info.IsDir() {
+				out = append(out, ProfileRoot{
+					Agent:   agentID,
+					Profile: pe.Name(),
+					HomeDir: homeDir,
+				})
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Agent != out[j].Agent {
+			return out[i].Agent < out[j].Agent
+		}
+		return out[i].Profile < out[j].Profile
+	})
+	return out
+}
+
+// FindUnclaimedConversation queries the native ConversationStore for agentName
+// across realHome and any discovered harness profile roots, returning the
+// newest unclaimed session ID matching cwd (preferring matching profile and
+// title). Returns ("", false) when the agent has no native ConversationStore.
+func (r *Registry) FindUnclaimedConversation(
+	ctx context.Context,
+	realHome, agentName, cwd, profile, title string,
+	exclude map[string]bool,
+) (string, bool) {
+	p, ok := r.ResolveRuntime(agentName)
+	if !ok {
+		return "", false
+	}
+	store := p.ConversationStore()
+	if store == nil {
+		return "", false
+	}
+	agentID := p.Spec().ID
+	baseHome := RealHomeDir(realHome)
+	wantProfile := strings.TrimSpace(profile)
+	wantTitle := strings.ToLower(strings.TrimSpace(title))
+
+	type scanTarget struct {
+		profile string
+		homeDir string
+	}
+	var targets []scanTarget
+	if wantProfile != "" && wantProfile != "default" {
+		for _, pr := range r.DiscoverProfileRoots(baseHome) {
+			if pr.Agent == agentID && strings.EqualFold(pr.Profile, wantProfile) {
+				targets = append(targets, scanTarget{profile: pr.Profile, homeDir: pr.HomeDir})
+			}
+		}
+	}
+	if len(targets) == 0 {
+		if baseHome != "" {
+			targets = append(targets, scanTarget{profile: "", homeDir: baseHome})
+		}
+		for _, pr := range r.DiscoverProfileRoots(baseHome) {
+			if pr.Agent == agentID {
+				targets = append(targets, scanTarget{profile: pr.Profile, homeDir: pr.HomeDir})
+			}
+		}
+	}
+
+	var all []ConversationRecord
+	for _, tgt := range targets {
+		recs, err := store.List(ctx, ConversationListOptions{
+			HomeDir:         tgt.homeDir,
+			Profile:         tgt.profile,
+			CWD:             cwd,
+			IncludeArchived: false,
+		})
+		if err != nil {
+			continue
+		}
+		all = append(all, recs...)
+	}
+
+	// Sort newest first.
+	sort.Slice(all, func(i, j int) bool {
+		if all[i].UpdatedAtMs != all[j].UpdatedAtMs {
+			return all[i].UpdatedAtMs > all[j].UpdatedAtMs
+		}
+		if all[i].CreatedAtMs != all[j].CreatedAtMs {
+			return all[i].CreatedAtMs > all[j].CreatedAtMs
+		}
+		return all[i].SessionID < all[j].SessionID
+	})
+
+	// Pass 1: exact title match if requested.
+	if wantTitle != "" {
+		for _, rec := range all {
+			sid := strings.TrimSpace(rec.SessionID)
+			if sid == "" || exclude[sid] {
+				continue
+			}
+			if strings.ToLower(strings.TrimSpace(rec.Title)) == wantTitle {
+				return sid, true
+			}
+		}
+	}
+	// Pass 2: newest unclaimed conversation in this CWD.
+	for _, rec := range all {
+		sid := strings.TrimSpace(rec.SessionID)
+		if sid == "" || exclude[sid] {
+			continue
+		}
+		return sid, true
+	}
+	return "", true
 }

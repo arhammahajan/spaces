@@ -19,6 +19,7 @@ func NewOpenCode() agent.Plugin {
 		PluginSpec: agent.Spec{
 			ID:                      "opencode",
 			Aliases:                 []string{"open-code", "herdr:opencode", "oc"},
+			ResumeFlag:              "--session",
 			ScreenManifestID:        "opencode",
 			HarnessManaged:          true,
 			OSCAuthority:            true,

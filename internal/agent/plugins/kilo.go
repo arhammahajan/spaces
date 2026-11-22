@@ -8,6 +8,7 @@ func NewKilo() agent.Plugin {
 		PluginSpec: agent.Spec{
 			ID:                      "kilo",
 			Aliases:                 []string{"kilo-code", "kilo code", "herdr:kilo"},
+			ResumeFlag:              "--session",
 			ScreenManifestID:        "kilo",
 			HarnessManaged:          true,
 			OSCAuthority:            false,

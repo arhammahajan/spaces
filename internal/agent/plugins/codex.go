@@ -13,6 +13,7 @@ func NewCodex() agent.Plugin {
 		PluginSpec: agent.Spec{
 			ID:                      "codex",
 			Aliases:                 []string{"openai-codex"},
+			ResumeSubcommand:        "resume",
 			ScreenManifestID:        "codex",
 			HarnessManaged:          true,
 			OSCAuthority:            true,

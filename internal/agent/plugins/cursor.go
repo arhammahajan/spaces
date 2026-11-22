@@ -18,6 +18,7 @@ func NewCursor() agent.Plugin {
 			ConversationID:          "cursor-agent",
 			ShortName:               "cursor",
 			Binary:                  "cursor-agent",
+			ResumeFlag:              "--resume",
 			ScreenManifestID:        "cursor",
 			HarnessManaged:          false,
 			OSCAuthority:            false,

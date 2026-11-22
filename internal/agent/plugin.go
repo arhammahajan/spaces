@@ -82,6 +82,14 @@ type Spec struct {
 	// (e.g. "cursor-agent" for cursor). Defaults to ID when empty.
 	Binary string
 
+	// ResumeFlag is the CLI flag used to resume a specific session ID
+	// (e.g. "--resume", "--conversation", "--session").
+	ResumeFlag string
+
+	// ResumeSubcommand is the positional subcommand used to resume a specific
+	// session ID (e.g. "resume" for codex and muse: `codex resume <id>`).
+	ResumeSubcommand string
+
 	// ScreenManifestID is the manifest ID in internal/screen/manifests.json
 	// used by the default ManifestScreenReader (e.g. "agy", "cursor", "qodercli").
 	ScreenManifestID string
@@ -209,9 +217,20 @@ type HookPolicy interface {
 
 // ConversationListOptions configures a native plugin ConversationStore query.
 type ConversationListOptions struct {
+	// HomeDir overrides the home directory scanned by the store when non-empty.
+	HomeDir string
+	// Profile tags returned records that do not carry an explicit profile field.
+	Profile         string
 	CWD             string
 	IncludeArchived bool
 	Limit           int
+}
+
+// ProfileRoot describes a harness-managed shadow home directory for an agent profile.
+type ProfileRoot struct {
+	Agent   string
+	Profile string
+	HomeDir string
 }
 
 // ConversationRecord is the normalized conversation metadata produced by a
@@ -298,10 +317,15 @@ type SessionResolver interface {
 	ResolveRestoreSessions(ctx context.Context, panes []SessionPaneRef, lookup SessionLookupFunc) SessionResolution
 }
 
-// Launcher encapsulates agent-specific binary resolution and harness management.
+// Launcher encapsulates agent-specific binary resolution, resume flags, and
+// harness management.
 type Launcher interface {
 	BinaryName() string
 	IsHarnessManaged() bool
+	// ResumeArgs returns the agent-specific CLI arguments to resume sessionID
+	// (e.g. ["--resume", id] or ["resume", id]). Returns nil when sessionID is
+	// empty or resume is unsupported.
+	ResumeArgs(sessionID string) []string
 }
 
 // MCPConfigTarget identifies a harness-specific MCP configuration file relative

@@ -15,6 +15,7 @@ func NewClaude() agent.Plugin {
 			CLIDisplayApp:           "claude-code",
 			ConversationID:          "claude",
 			ShortName:               "claude",
+			ResumeFlag:              "--resume",
 			ScreenManifestID:        "claude",
 			HarnessManaged:          true,
 			OSCAuthority:            true,

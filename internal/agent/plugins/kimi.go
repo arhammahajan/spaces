@@ -17,6 +17,7 @@ func NewKimi() agent.Plugin {
 			CLIDisplayApp:           "kimi",
 			ConversationID:          "kimi",
 			ShortName:               "kimi",
+			ResumeFlag:              "--session",
 			ScreenManifestID:        "kimi",
 			HarnessManaged:          true,
 			OSCAuthority:            true,

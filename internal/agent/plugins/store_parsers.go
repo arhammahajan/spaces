@@ -300,7 +300,10 @@ type fileConversationStore struct {
 	cfg     providerStoreConfig
 }
 
-func (s *fileConversationStore) resolveHome() (string, error) {
+func (s *fileConversationStore) resolveHome(override string) (string, error) {
+	if strings.TrimSpace(override) != "" {
+		return override, nil
+	}
 	if strings.TrimSpace(s.homeDir) != "" {
 		return s.homeDir, nil
 	}
@@ -311,7 +314,7 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	home, err := s.resolveHome()
+	home, err := s.resolveHome(opts.HomeDir)
 	if err != nil || strings.TrimSpace(home) == "" {
 		return nil, err
 	}
@@ -362,8 +365,12 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 	}
 
 	wantCWD := normalizeCWD(opts.CWD)
+	wantProfile := strings.TrimSpace(opts.Profile)
 	records := make([]agent.ConversationRecord, 0, len(bySession))
 	for _, rec := range bySession {
+		if wantProfile != "" && strings.TrimSpace(rec.Profile) == "" {
+			rec.Profile = wantProfile
+		}
 		if !opts.IncludeArchived && rec.Archived {
 			continue
 		}

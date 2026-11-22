@@ -254,6 +254,20 @@ func (l BaseLauncher) IsHarnessManaged() bool {
 	return l.Spec.HarnessManaged
 }
 
+func (l BaseLauncher) ResumeArgs(sessionID string) []string {
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		return nil
+	}
+	if l.Spec.ResumeSubcommand != "" {
+		return []string{l.Spec.ResumeSubcommand, sid}
+	}
+	if l.Spec.ResumeFlag != "" {
+		return []string{l.Spec.ResumeFlag, sid}
+	}
+	return nil
+}
+
 // BaseConfigProvider returns static MCP config targets declared by a plugin.
 type BaseConfigProvider struct {
 	DefaultLabel string

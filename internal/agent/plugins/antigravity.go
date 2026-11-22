@@ -27,6 +27,7 @@ func NewAntigravity() agent.Plugin {
 			CLIDisplayApp:           "antigravity",
 			ConversationID:          "antigravity",
 			ShortName:               "agy",
+			ResumeFlag:              "--conversation",
 			ScreenManifestID:        "agy",
 			HarnessManaged:          true,
 			OSCAuthority:            false,

@@ -16,6 +16,7 @@ func NewMuse() agent.Plugin {
 		PluginSpec: agent.Spec{
 			ID:                      "muse",
 			Aliases:                 []string{"muse-code", "muse-cli"},
+			ResumeSubcommand:        "resume",
 			ScreenManifestID:        "muse",
 			HarnessManaged:          true,
 			OSCAuthority:            true,

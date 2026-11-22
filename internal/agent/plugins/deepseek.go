@@ -13,6 +13,7 @@ func NewDeepSeek() agent.Plugin {
 		PluginSpec: agent.Spec{
 			ID:                      "deepseek",
 			Aliases:                 []string{"dsh", "dsh-tui"},
+			ResumeFlag:              "--session",
 			DisplayApp:              "deepseek",
 			CLIDisplayApp:           "deepseek",
 			ConversationID:          "deepseek",
