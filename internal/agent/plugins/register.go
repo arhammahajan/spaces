@@ -27,6 +27,9 @@ func All() []agent.Plugin {
 	list = append(list, harnessManagedPlugins()...)
 	list = append(list, otherRuntimePlugins()...)
 	list = append(list, worktreeOnlyPlugins()...)
+	for _, p := range list {
+		AttachProviderTelemetry(p)
+	}
 	return list
 }
 
