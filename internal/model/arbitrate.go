@@ -16,6 +16,11 @@ const (
 	hookAuthTTLMs      = int64(60 * 60_000)
 )
 
+// antigravityHookIdleGraceMs is the brief grace window before a visible idle
+// prompt on Antigravity overrides a silent working hook that has no active
+// background work (e.g. when a Stop hook was missed).
+const antigravityHookIdleGraceMs = int64(10_000)
+
 // doneTTLMs is how long a screen-synthesized working->idle Done is kept
 // before decaying back to Idle. It clears early when the pane becomes
 // active/focused.
@@ -370,21 +375,40 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 
 			// 4. Fresh hooks win over screen evidence, with one exception:
 			// a permission/question prompt actually visible on screen.
+			// Also yield when a stale working hook is superseded by a newer
+			// screen-completed turn or contradicted by a visibly idle viewport
+			// (e.g. Antigravity after a missed Stop or finished local_bash task).
 			if hook != nil {
-				if hs, age, text, fresh := hookView(hook, base, pane.BaseAgeMs, nowMs); fresh {
-					status = hs
-					pane.AgeMs = age
-					if strings.TrimSpace(text) != "" {
-						pane.Text = text
-					}
-					if visibleBlocker && status != StatusNeedsYou {
-						status = StatusNeedsYou
-					}
-					if len(a.newlyDone) > prevNewlyDoneLen {
-						a.newlyDone = a.newlyDone[:prevNewlyDoneLen]
-					}
-					if status != StatusDone {
-						delete(a.done, pane.ID)
+				hookSilence := saturatingSub(nowMs, hook.TsMs)
+				screenFinishedNewerTurn := len(a.newlyDone) > prevNewlyDoneLen &&
+					status == StatusDone &&
+					pane.BaseAgeMs > 0 && pane.BaseAgeMs < hookSilence
+				staleLocalCmdIdle := hook.State == "working" &&
+					hookSilence > hookWorkingStaleMs &&
+					hook.HasOnlyLocalCommandBackgroundWork() &&
+					hasReading && reading.VisibleIdle
+				agyIdleMissedStop := hook.State == "working" &&
+					canonicalApp(pane.App) == "antigravity" &&
+					!hook.HasActiveFiniteWork() &&
+					hookSilence >= antigravityHookIdleGraceMs &&
+					hasReading && reading.VisibleIdle
+
+				if !(hook.State == "working" && screenFinishedNewerTurn) && !staleLocalCmdIdle && !agyIdleMissedStop {
+					if hs, age, text, fresh := hookView(hook, base, pane.BaseAgeMs, nowMs); fresh {
+						status = hs
+						pane.AgeMs = age
+						if strings.TrimSpace(text) != "" {
+							pane.Text = text
+						}
+						if visibleBlocker && status != StatusNeedsYou {
+							status = StatusNeedsYou
+						}
+						if len(a.newlyDone) > prevNewlyDoneLen {
+							a.newlyDone = a.newlyDone[:prevNewlyDoneLen]
+						}
+						if status != StatusDone {
+							delete(a.done, pane.ID)
+						}
 					}
 				}
 			}

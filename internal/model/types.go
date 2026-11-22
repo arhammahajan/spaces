@@ -227,6 +227,39 @@ func (h *HookSummary) HasActiveFiniteWork() bool {
 	return false
 }
 
+// HasOnlyLocalCommandBackgroundWork reports whether the pane's active finite
+// background work consists solely of local shell/bash commands (with no active
+// subagents). Used to avoid pinning a pane in Working forever when a harness
+// fails to emit a TaskCompleted hook for a finished local_bash command and the
+// viewport is visibly idle past hookWorkingStaleMs.
+func (h *HookSummary) HasOnlyLocalCommandBackgroundWork() bool {
+	if h == nil || !h.HasActiveFiniteWork() {
+		return false
+	}
+	if strings.Contains(strings.ToLower(h.WaitingOn), "subagent") {
+		return false
+	}
+	for _, ch := range h.Children {
+		if ch.IsActive() && ch.IsFinite() {
+			return false
+		}
+	}
+	hasLocalCmd := false
+	for _, item := range h.BackgroundTasks {
+		if !item.IsActive() || !item.IsFinite() {
+			continue
+		}
+		role := strings.ToLower(strings.TrimSpace(item.Role))
+		typ := strings.ToLower(strings.TrimSpace(item.Kind))
+		if role == "command" || typ == "local_bash" {
+			hasLocalCmd = true
+		} else {
+			return false
+		}
+	}
+	return hasLocalCmd
+}
+
 // AllBackgroundWork returns deduplicated subagents and background tasks ordered
 // with active finite jobs first, then active services/watchers/schedules, then
 // finished outcomes (newest first within each group).

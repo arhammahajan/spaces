@@ -647,3 +647,101 @@ func TestFreshWorkingHookSuppressesSpuriousScreenNewlyDone(t *testing.T) {
 		t.Fatalf("fresh working hook must suppress spurious screen newlyDone, got %v", newlyDone)
 	}
 }
+
+func TestAntigravityClearsStaleWorkingHooksWhenVisiblyIdle(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	idleReading := map[string]ScreenReading{
+		"%%1": {App: "antigravity", State: "idle", VisibleIdle: true},
+	}
+
+	// Case 1: Stale local_bash background task (finite_active=1, >hookWorkingStaleMs,
+	// no active subagents) while viewport is visibly idle -> must NOT stay working forever.
+	arb1 := NewArbitrator()
+	hooksLocalCmd := &HookSnapshot{
+		OK: true, Version: 1, NowMs: t0 + hookWorkingStaleMs + 60_000,
+		Panes: map[string]map[string]HookSummary{
+			"dots": {
+				"1": {
+					Agent:        "antigravity",
+					App:          "antigravity",
+					State:        "working",
+					Event:        "post_tool",
+					TsMs:         t0,
+					StateSinceMs: t0,
+					FiniteActive: 1,
+					WaitingOn:    "waiting on: for l in ...",
+					BackgroundTasks: []HookChild{
+						{ID: "conv/task-115", Role: "command", Kind: "local_bash", Category: "finite", State: "working", SinceMs: t0, TsMs: t0},
+					},
+				},
+			},
+		},
+	}
+	got1 := applyOne(t, arb1, arbSpace("dots", "antigravity", StatusIdle, false), hooksLocalCmd, idleReading, t0+hookWorkingStaleMs+60_000)
+	if got1.Panes[0].Status != StatusIdle {
+		t.Fatalf("stale local_bash hook with visibly idle viewport: got %v, want StatusIdle", got1.Panes[0].Status)
+	}
+
+	// Case 2: Newer screen turn completes after an older working hook -> transitions to Done
+	// and preserves newlyDone instead of letting the older hook overwrite it back to Working.
+	arb2 := NewArbitrator()
+	sp2 := arbSpace("dots", "antigravity", StatusWorking, false)
+	sp2.Panes[0].Source = "screen"
+	sp2.Panes[0].BaseAgeMs = 4_000 // screen saw working 4s ago (much newer than t0)
+	got2 := applyOne(t, arb2, sp2, hooksLocalCmd, idleReading, t0+60_000)
+	if got2.Panes[0].Status != StatusDone {
+		t.Fatalf("newer screen turn finished over older working hook: got %v, want StatusDone", got2.Panes[0].Status)
+	}
+	if newlyDone := arb2.TakeNewlyDone(); len(newlyDone) != 1 || newlyDone[0] != "%%1" {
+		t.Fatalf("expected newlyDone=[%%%%1], got %v", newlyDone)
+	}
+
+	// Case 3: Antigravity missed Stop hook (working, no finite work, >10s silent) while
+	// viewport is visibly idle -> transitions to Done instead of staying Working for 2m.
+	arb3 := NewArbitrator()
+	hooksMissedStop := &HookSnapshot{
+		OK: true, Version: 1, NowMs: t0 + antigravityHookIdleGraceMs + 1_000,
+		Panes: map[string]map[string]HookSummary{
+			"dots": {
+				"1": {
+					Agent:        "antigravity",
+					App:          "antigravity",
+					State:        "working",
+					Event:        "post_tool",
+					TsMs:         t0,
+					StateSinceMs: t0,
+				},
+			},
+		},
+	}
+	sp3 := arbSpace("dots", "antigravity", StatusWorking, false)
+	sp3.Panes[0].Source = "osc7501"
+	got3 := applyOne(t, arb3, sp3, hooksMissedStop, idleReading, t0+antigravityHookIdleGraceMs+1_000)
+	if got3.Panes[0].Status != StatusDone {
+		t.Fatalf("antigravity missed Stop hook with visibly idle viewport: got %v, want StatusDone", got3.Panes[0].Status)
+	}
+
+	// Case 4: Active subagent (NOT local_bash) still stays StatusWorking even with VisibleIdle!
+	arb4 := NewArbitrator()
+	hooksSubagent := &HookSnapshot{
+		OK: true, Version: 1, NowMs: t0 + hookWorkingStaleMs + 60_000,
+		Panes: map[string]map[string]HookSummary{
+			"dots": {
+				"1": {
+					Agent:        "antigravity",
+					App:          "antigravity",
+					State:        "working",
+					Event:        "stop",
+					TsMs:         t0,
+					StateSinceMs: t0,
+					FiniteActive: 1,
+					WaitingOn:    "waiting on subagent: Codebase Researcher",
+				},
+			},
+		},
+	}
+	got4 := applyOne(t, arb4, arbSpace("dots", "antigravity", StatusIdle, false), hooksSubagent, idleReading, t0+hookWorkingStaleMs+60_000)
+	if got4.Panes[0].Status != StatusWorking {
+		t.Fatalf("active subagent must stay StatusWorking even with idle parent prompt, got %v", got4.Panes[0].Status)
+	}
+}

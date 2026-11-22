@@ -605,3 +605,29 @@ func TestHasEvidence(t *testing.T) {
 		t.Error("visible flags should count as evidence")
 	}
 }
+
+func TestAntigravityIdlePromptAndWorkingPriority(t *testing.T) {
+	idleViewport := strings.Join([]string{
+		"  Done with the change.",
+		"────────────────────────────────────────────────────────────────────────────────",
+		">",
+		"────────────────────────────────────────────────────────────────────────────────",
+		"? for shortcuts                                    auto · Gemini 4 Hydrogen · medium",
+	}, "\n")
+	d := Detect("antigravity", idleViewport, "")
+	if d.State != StateIdle || !d.VisibleIdle {
+		t.Fatalf("idle antigravity viewport: got %+v, want StateIdle + VisibleIdle", d)
+	}
+
+	// While esc to cancel is visible, working rule wins over idle_prompt.
+	workingViewport := strings.Join([]string{
+		"⠋ Thinking...",
+		"────────────────────────────────────────────────────────────────────────────────",
+		">",
+		"──────────────── esc to cancel ────────────────",
+	}, "\n")
+	dw := Detect("antigravity", workingViewport, "")
+	if dw.State != StateWorking || !dw.VisibleWorking {
+		t.Fatalf("working antigravity viewport: got %+v, want StateWorking + VisibleWorking", dw)
+	}
+}
