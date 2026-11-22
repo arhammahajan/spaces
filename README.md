@@ -45,7 +45,7 @@ All keys are bound in the `prefix` table.
 | `prefix + s`    | `tmux-spaces popup`  | Navigator (spaces/panes/TUI)  |
 | `prefix + i`    | `tmux-spaces inbox`  | Attention Inbox (agents + live previews across spaces) |
 | `prefix + y`    | `tmux-spaces conversations` | Conversations (fuzzy + full-message search & resume across harnesses) |
-| `prefix + u`    | `tmux-spaces shared` | Shared MCP servers & skills browser (`~/dev/dots/harnesses/shared`) |
+| `prefix + u`    | `tmux-spaces shared` | Shared MCP servers & skills browser (`~/.agents` + stowed harness configs) |
 | `prefix + T`    | `tmux-spaces tabs`   | Tabs inspector (all tabs in current workspace with full pane, git/worktree/PR & agent telemetry) |
 | `prefix + c`    | `tmux-spaces tabs --new` | Create a new tab inside the Tabs popup (optional name + existing/new git worktree) |
 | `prefix + a`    | `tmux-spaces agents` | Agents selector TUI           |
@@ -64,7 +64,7 @@ set -g @spaces-key 's'               # Navigator key
 set -g @spaces-inbox-key 'i'         # Attention Inbox key
 set -g @spaces-conversations-key 'y' # Conversations search/resume key
 set -g @spaces-shared-key 'u'        # Shared MCP & skills browser key
-set -g @spaces-shared-dir ''         # Override shared harnesses dir (default ~/dev/dots/harnesses/shared)
+set -g @spaces-shared-dir ''         # Override shared harnesses dir (default ~/.agents)
 set -g @spaces-tabs-key 'T'          # Current-workspace Tabs inspector key
 set -g @spaces-new-tab-key 'c'       # New-tab key (opens Tabs popup in new-tab flow; set 'off' to keep tmux default)
 set -g @spaces-agents-key 'a'        # Agents selector key
@@ -74,6 +74,7 @@ set -g @spaces-popup-width '86%'     # display-popup width
 set -g @spaces-popup-height '82%'    # display-popup height
 set -g @spaces-border 'rounded'      # display-popup border style
 set -g @spaces-pane-border 'on'      # show agent (and `— <profile>`) on top pane border
+set -g @spaces-auto-restore 'on'     # auto-restore last-open (non-exited) spaces on fresh tmux start
 ```
 
 ## Git worktree-backed spaces & tabs
@@ -239,6 +240,6 @@ plus debounced full-message search across all coding harnesses (use `@<agent>` i
 scope, `Ctrl-a` to include archived/`/tmp` chats, `Enter` to focus a live pane or resume in a new
 tab, and `Ctrl-o` to always open in a new tab).
 In the Shared MCP & Skills popup (`prefix + u`), start typing to fuzzy-filter shared MCP servers
-and skills from `~/dev/dots/harnesses/shared` (`Tab`/`Shift-Tab` cycles `all` / `mcp` / `skills`,
+and skills from `~/.agents` and stowed harness configs (`Tab`/`Shift-Tab` cycles `all` / `mcp` / `skills`,
 `Enter` opens a scrollable detail inspector, `Ctrl-o` opens the source file in your editor, and
 `Ctrl-r` reloads from disk).

@@ -236,6 +236,54 @@ func TestDefaultSharedDirShadowHomeFallback(t *testing.T) {
 	}
 }
 
+func TestDefaultSharedDirAndLoadSharedFromStowedHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("TMUX_SPACES_SHARED_DIR", "")
+
+	// Stow-resolved ~/.agents/skills and harness MCP configs in $HOME.
+	writeTestFile(t, filepath.Join(home, ".agents", "skills", "bro", "SKILL.md"), `---
+name: bro
+description: Quick second opinion.
+---
+
+Body.
+`)
+	writeTestFile(t, filepath.Join(home, ".gemini", "config", "mcp_config.json"), `{
+  "mcpServers": {
+    "agent-browser": {
+      "command": "/usr/local/bin/agent-browser",
+      "args": ["mcp"]
+    }
+  }
+}`)
+	writeTestFile(t, filepath.Join(home, ".codex", "config.toml"), `
+[mcp_servers.agent-browser]
+command = "/usr/local/bin/agent-browser"
+args = ["mcp"]
+`)
+
+	// Shadow profile under ~/.model-router/ resolves to real $HOME/.agents.
+	shadowHome := filepath.Join(home, ".model-router", "profiles", "antigravity", "work", "home")
+	wantRoot := filepath.Join(home, ".agents")
+	if got := DefaultSharedDir("", shadowHome); got != wantRoot {
+		t.Fatalf("DefaultSharedDir shadow = %q, want %q", got, wantRoot)
+	}
+
+	snap, err := LoadShared("", shadowHome)
+	if err != nil {
+		t.Fatalf("LoadShared: %v", err)
+	}
+	if snap.RootDir != wantRoot || len(snap.Skills) != 1 || snap.Skills[0].Name != "bro" {
+		t.Fatalf("unexpected skills snap: %+v", snap)
+	}
+	if len(snap.MCPs) != 1 || snap.MCPs[0].Name != "agent-browser" {
+		t.Fatalf("unexpected MCPs: %+v", snap.MCPs)
+	}
+	if got := strings.Join(snap.MCPs[0].Harnesses, ","); got != "antigravity,codex" {
+		t.Fatalf("harnesses = %q, want antigravity,codex", got)
+	}
+}
+
 func TestFuzzyScoreShared(t *testing.T) {
 	sk := SharedSkill{
 		Name:        "pstack-tdd",

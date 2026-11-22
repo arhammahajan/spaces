@@ -94,11 +94,12 @@ type SharedSnapshot struct {
 	RootExists bool
 }
 
-// DefaultSharedDir resolves the shared harnesses directory, defaulting to
-// ~/dev/dots/harnesses/shared (overridable via explicit dir or
-// TMUX_SPACES_SHARED_DIR). If HOME points into a shadow profile under
-// ~/.model-router/ and ~/dev/dots/harnesses/shared does not exist there, it
-// falls back to the real home prefix before /.model-router/.
+// DefaultSharedDir resolves the shared skills/MCP root directory, defaulting
+// to the Stow-resolved ~/.agents directory in $HOME (falling back to the
+// legacy ~/dev/dots/harnesses/shared layout when ~/.agents does not exist).
+// Overridable via explicit dir or TMUX_SPACES_SHARED_DIR. If HOME points into
+// a shadow profile under ~/.model-router/ and the candidate does not exist
+// there, it falls back to the real home prefix before /.model-router/.
 func DefaultSharedDir(explicit, homeDir string) string {
 	raw := strings.TrimSpace(explicit)
 	if raw == "" {
@@ -107,18 +108,37 @@ func DefaultSharedDir(explicit, homeDir string) string {
 	if raw != "" {
 		return expandHomePath(raw, homeDir)
 	}
-	candidate := filepath.Join(homeDir, "dev", "dots", "harnesses", "shared")
-	if isDir(candidate) {
-		return candidate
-	}
-	if idx := strings.Index(homeDir, string(filepath.Separator)+".model-router"+string(filepath.Separator)); idx > 0 {
-		realHome := homeDir[:idx]
-		alt := filepath.Join(realHome, "dev", "dots", "harnesses", "shared")
-		if isDir(alt) {
-			return alt
+
+	homes := candidateHomes(homeDir)
+	for _, h := range homes {
+		if cand := filepath.Join(h, ".agents"); isDir(cand) {
+			return cand
 		}
 	}
-	return candidate
+	for _, h := range homes {
+		if cand := filepath.Join(h, "dev", "dots", "harnesses", "shared"); isDir(cand) {
+			return cand
+		}
+	}
+	return filepath.Join(realHomeDir(homeDir), ".agents")
+}
+
+func realHomeDir(homeDir string) string {
+	if idx := strings.Index(homeDir, string(filepath.Separator)+".model-router"+string(filepath.Separator)); idx > 0 {
+		return homeDir[:idx]
+	}
+	return homeDir
+}
+
+func candidateHomes(homeDir string) []string {
+	if homeDir == "" {
+		return nil
+	}
+	real := realHomeDir(homeDir)
+	if real != homeDir {
+		return []string{homeDir, real}
+	}
+	return []string{homeDir}
 }
 
 func expandHomePath(p, homeDir string) string {
@@ -160,7 +180,7 @@ func LoadShared(dir, homeDir string) (SharedSnapshot, error) {
 	}
 
 	snap.Skills = loadSharedSkills(snap.SkillsDir)
-	snap.MCPs = loadSharedMCPs(root)
+	snap.MCPs = loadSharedMCPs(root, homeDir)
 	return snap, nil
 }
 
@@ -477,7 +497,7 @@ func firstMarkdownParagraph(body string) string {
 // MCP loader
 // ---------------------------------------------------------------------------
 
-func loadSharedMCPs(root string) []SharedMCP {
+func loadSharedMCPs(root, homeDir string) []SharedMCP {
 	// Pass 1: discover MCP configs directly under <root> (e.g. mcp.json,
 	// mcp_config.json, mcp/*.json, mcps/*.json, *mcp*.toml).
 	direct := loadDirectMCPs(root)
@@ -491,7 +511,65 @@ func loadSharedMCPs(root string) []SharedMCP {
 	if filepath.Base(root) == "shared" {
 		return loadSiblingHarnessMCPs(filepath.Dir(root))
 	}
+
+	// Pass 3: when <root> is the Stow-resolved ~/.agents directory (or $HOME),
+	// aggregate MCP definitions across stowed harness configs in $HOME.
+	if filepath.Base(root) == ".agents" {
+		return loadHomeHarnessMCPs(filepath.Dir(root))
+	}
+	if homeDir != "" && (filepath.Clean(root) == filepath.Clean(homeDir) || filepath.Clean(root) == filepath.Clean(realHomeDir(homeDir))) {
+		return loadHomeHarnessMCPs(root)
+	}
 	return nil
+}
+
+type homeMCPTarget struct {
+	harness string
+	relPath string
+}
+
+var homeMCPTargets = []homeMCPTarget{
+	{harness: "antigravity", relPath: filepath.Join(".gemini", "config", "mcp_config.json")},
+	{harness: "antigravity", relPath: filepath.Join(".gemini", "antigravity-cli", "settings.json")},
+	{harness: "claude", relPath: ".claude.json"},
+	{harness: "claude", relPath: filepath.Join(".claude", "mcp.json")},
+	{harness: "claude", relPath: filepath.Join(".claude", "settings.json")},
+	{harness: "cline", relPath: filepath.Join(".cline", "cline_mcp_settings.json")},
+	{harness: "codex", relPath: filepath.Join(".codex", "config.toml")},
+	{harness: "copilot", relPath: filepath.Join(".copilot", "mcp-config.json")},
+	{harness: "fx", relPath: filepath.Join(".fx", "mcp.json")},
+	{harness: "gemini", relPath: filepath.Join(".gemini", "settings.json")},
+	{harness: "grok", relPath: filepath.Join(".grok", "config.toml")},
+	{harness: "kilo", relPath: filepath.Join(".config", "kilo", "kilo.json")},
+	{harness: "kimi-cli", relPath: filepath.Join(".kimi", "mcp.json")},
+	{harness: "kimi-cli", relPath: filepath.Join(".kimi", "config.toml")},
+	{harness: "kimi-code", relPath: filepath.Join(".kimi-code", "mcp.json")},
+	{harness: "kimi-code", relPath: filepath.Join(".kimi-code", "config.toml")},
+	{harness: "mcode", relPath: filepath.Join(".minimax", "mcp.json")},
+	{harness: "muse", relPath: filepath.Join(".config", "muse", "settings.json")},
+	{harness: "opencode", relPath: filepath.Join(".config", "opencode", "opencode.json")},
+	{harness: "pi", relPath: filepath.Join(".pi", "agent", "mcp.json")},
+	{harness: "qwen", relPath: filepath.Join(".qwen", "settings.json")},
+	{harness: "vibe", relPath: filepath.Join(".vibe", "config.toml")},
+}
+
+func loadHomeHarnessMCPs(homeRoot string) []SharedMCP {
+	if !isDir(homeRoot) {
+		return nil
+	}
+	byName := make(map[string]*SharedMCP)
+	for _, target := range homeMCPTargets {
+		p := filepath.Join(homeRoot, target.relPath)
+		fi, err := os.Stat(p)
+		if err != nil || fi.IsDir() {
+			continue
+		}
+		parsed := parseMCPFile(p, "harnesses", target.harness)
+		for _, item := range parsed {
+			mergeMCP(byName, item)
+		}
+	}
+	return finalizeMCPMap(byName)
 }
 
 func loadDirectMCPs(root string) []SharedMCP {
