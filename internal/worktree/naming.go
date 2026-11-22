@@ -10,6 +10,9 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/arhammahajan/spaces/internal/agent"
+	_ "github.com/arhammahajan/spaces/internal/agent/plugins"
 )
 
 const (
@@ -69,43 +72,6 @@ var genericTargetNames = map[string]bool{
 	"default":  true,
 	"untitled": true,
 	"new":      true,
-}
-
-var knownCodingAgents = map[string]string{
-	"claude":          "claude",
-	"claude-code":     "claude",
-	"claude_code":     "claude",
-	"claudecode":      "claude",
-	"antigravity":     "agy",
-	"antigravity-cli": "agy",
-	"agy":             "agy",
-	"cursor":          "cursor",
-	"cursor-agent":    "cursor",
-	"cursor_agent":    "cursor",
-	"cursor-cli":      "cursor",
-	"codex":           "codex",
-	"openai-codex":    "codex",
-	"opencode":        "opencode",
-	"open-code":       "opencode",
-	"oc":              "opencode",
-	"gemini":          "gemini",
-	"gemini-cli":      "gemini",
-	"aider":           "aider",
-	"amp":             "amp",
-	"copilot":         "copilot",
-	"github-copilot":  "copilot",
-	"goose":           "goose",
-	"pi":              "pi",
-	"windsurf":        "windsurf",
-	"cline":           "cline",
-	"roo":             "roo",
-	"roo-code":        "roo",
-	"qwen":            "qwen",
-	"qwen-code":       "qwen",
-	"kiro":            "kiro",
-	"droid":           "droid",
-	"crush":           "crush",
-	"kimi":            "kimi",
 }
 
 var stopWords = map[string]bool{
@@ -479,10 +445,7 @@ func knownCodingAgentShort(app string) (string, bool) {
 	if low == "" || genericShellNames[low] {
 		return "", false
 	}
-	if short, ok := knownCodingAgents[low]; ok {
-		return short, true
-	}
-	return "", false
+	return agent.DefaultRegistry().ShortName(low)
 }
 
 func normalizeCompare(s string) string {
@@ -572,10 +535,10 @@ func extractHarnessTitleSlug(title, repoNorm, curNorm string) string {
 	if genericShellNames[low] || genericTargetNames[low] || numberedGenRe.MatchString(low) {
 		return ""
 	}
-	if _, isAgentOnly := knownCodingAgents[low]; isAgentOnly {
+	if _, isAgentOnly := agent.DefaultRegistry().ShortName(low); isAgentOnly {
 		return ""
 	}
-	if low == "claude code" || low == "new chat" || low == "new session" {
+	if agent.DefaultRegistry().AllBoilerplateTitles()[low] || low == "new chat" || low == "new session" {
 		return ""
 	}
 	if looksLikePath(s) || versionBannerRe.MatchString(s) {
@@ -652,36 +615,9 @@ func stripLeadingStatusGlyphs(s string) string {
 	})
 }
 
-var harnessPrefixes = []string{
-	"oc | ",
-	"oc: ",
-	"oc - ",
-	"opencode | ",
-	"opencode - ",
-	"opencode: ",
-	"claude code - ",
-	"claude code: ",
-	"claude code | ",
-	"claude - ",
-	"claude: ",
-	"claude | ",
-	"codex - ",
-	"codex: ",
-	"codex | ",
-	"antigravity - ",
-	"antigravity: ",
-	"antigravity | ",
-	"cursor - ",
-	"cursor: ",
-	"cursor | ",
-	"gemini - ",
-	"gemini: ",
-	"gemini | ",
-}
-
 func stripHarnessPrefixes(s string) string {
 	low := strings.ToLower(s)
-	for _, p := range harnessPrefixes {
+	for _, p := range agent.DefaultRegistry().AllWorktreeTitlePrefixes() {
 		if strings.HasPrefix(low, p) {
 			return strings.TrimSpace(s[len(p):])
 		}
