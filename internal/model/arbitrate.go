@@ -3,6 +3,8 @@ package model
 import (
 	"strconv"
 	"strings"
+
+	"github.com/arhammahajan/spaces/internal/agent"
 )
 
 // Hook staleness TTLs, matching zellij-spaces (app.rs) / spacecore:
@@ -15,11 +17,6 @@ const (
 	hookBlockTTLMs     = int64(30 * 60_000)
 	hookAuthTTLMs      = int64(60 * 60_000)
 )
-
-// antigravityHookIdleGraceMs is the brief grace window before a visible idle
-// prompt on Antigravity overrides a silent working hook that has no active
-// background work (e.g. when a Stop hook was missed).
-const antigravityHookIdleGraceMs = int64(10_000)
 
 // doneTTLMs is how long a screen-synthesized working->idle Done is kept
 // before decaying back to Idle. It clears early when the pane becomes
@@ -46,61 +43,16 @@ type ScreenReading struct {
 	Title string
 }
 
-// authorityApps mirrors zellij-spaces OSC_AUTHORITY_APPS: harnesses whose
-// live `@spaces_*` lifecycle is complete enough that a bare screen
-// working/idle reading must not override a live non-idle state.
-// A strong VisibleBlocker still overrides.
-var authorityApps = map[string]bool{
-	"claude": true, "codex": true, "opencode": true, "pi": true,
-	"crush": true, "grok": true, "omp": true, "copilot": true,
-	"kimi": true, "muse": true, "mcode": true, "fx": true,
-	"fx-router": true, "vibe": true, "vibe-acp": true,
-	"dsh-tui": true, "deepseek": true,
-}
-
 // canonicalApp normalizes an app label for comparison, mirroring
 // zellij-spaces canonical_app aliases.
 func canonicalApp(app string) string {
-	n := strings.ToLower(strings.TrimSpace(app))
-	if i := strings.LastIndex(n, "/"); i >= 0 {
-		n = n[i+1:]
-	}
-	for _, suffix := range []string{".exe", ".cmd", ".bat", ".ps1", ".js", ".mjs", ".cjs"} {
-		if strings.HasSuffix(n, suffix) {
-			n = strings.TrimSuffix(n, suffix)
-			break
-		}
-	}
-	switch n {
-	case "dsh", "dsh-tui":
-		return "deepseek"
-	case "fx-router":
-		return "fx"
-	case "vibe-acp":
-		return "vibe"
-	case "kimi-cli", "kimi-code":
-		return "kimi"
-	case "claude", "claude-code":
-		return "claude"
-	case "agy", "antigravity", "antigravity-cli":
-		return "antigravity"
-	case "cursor", "cursor-agent":
-		return "cursor"
-	case "copilot", "github-copilot", "ghcs":
-		return "copilot"
-	default:
-		return n
-	}
+	return agent.DefaultRegistry().CanonicalOrNormalized(app)
 }
 
 // IsAuthorityApp reports whether app has a complete live lifecycle whose
 // non-idle state wins over bare screen working/idle evidence.
 func IsAuthorityApp(app string) bool {
-	c := canonicalApp(app)
-	if authorityApps[c] {
-		return true
-	}
-	return authorityApps[strings.ToLower(strings.TrimSpace(app))]
+	return agent.DefaultRegistry().IsOSCAuthority(app)
 }
 
 // idleLike reports whether s is an idle-family status that screen working
@@ -383,17 +335,26 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 				screenFinishedNewerTurn := len(a.newlyDone) > prevNewlyDoneLen &&
 					status == StatusDone &&
 					pane.BaseAgeMs > 0 && pane.BaseAgeMs < hookSilence
-				staleLocalCmdIdle := hook.State == "working" &&
-					hookSilence > hookWorkingStaleMs &&
-					hook.HasOnlyLocalCommandBackgroundWork() &&
-					hasReading && reading.VisibleIdle
-				agyIdleMissedStop := hook.State == "working" &&
-					canonicalApp(pane.App) == "antigravity" &&
-					!hook.HasActiveFiniteWork() &&
-					hookSilence >= antigravityHookIdleGraceMs &&
-					hasReading && reading.VisibleIdle
+				var policy agent.HookPolicy = agent.BaseHookPolicy{StaleLocalCmdMs: hookWorkingStaleMs}
+				if p, ok := agent.DefaultRegistry().ResolveRuntime(pane.App); ok {
+					policy = p.HookPolicy()
+				}
+				screenState := ""
+				if hasReading {
+					screenState = reading.State
+				}
+				yieldWorkingToIdle := policy.ShouldYieldWorkingHookToIdle(agent.HookArbitrationInput{
+					HookState:                 hook.State,
+					HookSilenceMs:             hookSilence,
+					HasActiveFiniteWork:       hook.HasActiveFiniteWork(),
+					HasOnlyLocalCmdBackground: hook.HasOnlyLocalCommandBackgroundWork(),
+					VisibleIdle:               hasReading && reading.VisibleIdle,
+					VisibleWorking:            hasReading && reading.VisibleWorking,
+					VisibleBlocker:            hasReading && reading.VisibleBlocker,
+					ScreenState:               screenState,
+				})
 
-				if !(hook.State == "working" && screenFinishedNewerTurn) && !staleLocalCmdIdle && !agyIdleMissedStop {
+				if !(hook.State == "working" && screenFinishedNewerTurn) && !yieldWorkingToIdle {
 					if hs, age, text, fresh := hookView(hook, base, pane.BaseAgeMs, nowMs); fresh {
 						status = hs
 						pane.AgeMs = age

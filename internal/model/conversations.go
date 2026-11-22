@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/arhammahajan/spaces/internal/agent"
 )
 
 // ConversationEntry mirrors convstore.Conversation returned by
@@ -82,37 +84,7 @@ type ConversationSearchResponse struct {
 // CanonicalConversationAgent normalizes shorthand agent aliases to canonical IDs,
 // mirroring convstore.CanonicalAgent.
 func CanonicalConversationAgent(name string) string {
-	s := strings.ToLower(strings.TrimSpace(name))
-	switch s {
-	case "claude-code":
-		return "claude"
-	case "agy", "antigravity-cli":
-		return "antigravity"
-	case "dsh", "dsh-tui":
-		return "deepseek"
-	case "kimi-code":
-		return "kimi"
-	case "cursor":
-		return "cursor-agent"
-	case "fx-router":
-		return "fx"
-	case "open-code":
-		return "opencode"
-	case "qwen-code":
-		return "qwen"
-	case "kilo-code":
-		return "kilo"
-	case "vibe-acp":
-		return "vibe"
-	case "grok-build":
-		return "grok"
-	case "muse-code", "muse-cli":
-		return "muse"
-	case "github-copilot", "ghcs":
-		return "copilot"
-	default:
-		return s
-	}
+	return agent.DefaultRegistry().ConversationID(name)
 }
 
 // DisplayApp returns the user-facing harness label for this conversation.
@@ -120,15 +92,7 @@ func (c ConversationEntry) DisplayApp() string {
 	if a := strings.TrimSpace(c.App); a != "" {
 		return a
 	}
-	canon := CanonicalConversationAgent(c.Agent)
-	switch canon {
-	case "claude":
-		return "claude-code"
-	case "kimi-cli":
-		return "kimi"
-	default:
-		return canon
-	}
+	return agent.DefaultRegistry().CLIDisplayApp(c.Agent)
 }
 
 // ProjectName returns the workspace directory basename for display and search.

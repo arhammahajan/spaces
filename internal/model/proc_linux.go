@@ -75,7 +75,7 @@ func procChildren(pid int) []int {
 func agentFromProc(pid int) string {
 	base := filepath.Join("/proc", strconv.Itoa(pid))
 	if comm, err := os.ReadFile(filepath.Join(base, "comm")); err == nil {
-		if n := NormalizeAgentCommand(strings.TrimSpace(string(comm))); knownAgents[n] {
+		if n := NormalizeAgentCommand(strings.TrimSpace(string(comm))); IsKnownAgent(n) {
 			return n
 		}
 	}
@@ -92,7 +92,7 @@ func agentFromProc(pid int) string {
 		if arg == "" || strings.HasPrefix(arg, "-") {
 			continue
 		}
-		if n := NormalizeAgentCommand(arg); knownAgents[n] {
+		if n := NormalizeAgentCommand(arg); IsKnownAgent(n) {
 			return n
 		}
 		// Also check parent directory segments for versioned binaries like
@@ -102,7 +102,7 @@ func agentFromProc(pid int) string {
 				if seg == "" {
 					continue
 				}
-				if n := NormalizeAgentCommand(seg); knownAgents[n] {
+				if n := NormalizeAgentCommand(seg); IsKnownAgent(n) {
 					return n
 				}
 			}

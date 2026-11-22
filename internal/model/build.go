@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	"github.com/arhammahajan/spaces/internal/tmux"
 )
 
@@ -258,10 +259,7 @@ func isRuntimeOrVersionCommand(cmd string) bool {
 		"npx", "pnpm", "yarn", "harness", "spaces", "tmux-spaces":
 		return true
 	}
-	if len(c) > 0 && c[0] >= '0' && c[0] <= '9' && strings.Contains(c, ".") {
-		return true
-	}
-	return false
+	return agent.DefaultRegistry().MatchesBareVersionCommand(c)
 }
 
 // mapSpacesState maps a `@spaces_state` value to a Status.
@@ -326,7 +324,7 @@ func resolveApp(p tmux.Pane, shellReturned bool, descAgent string) string {
 			if IsShell(app) {
 				return "shell"
 			}
-			if norm := NormalizeAgentCommand(app); knownAgents[norm] {
+			if norm := NormalizeAgentCommand(app); IsKnownAgent(norm) {
 				// Preserve canonical labels like "claude-code", but collapse
 				// versioned binary names like "muse-bin-1.4.24-R9131.1" -> "muse".
 				if strings.EqualFold(app, norm) {
@@ -341,7 +339,7 @@ func resolveApp(p tmux.Pane, shellReturned bool, descAgent string) string {
 		if IsShell(cmd) {
 			return "shell"
 		}
-		if norm := NormalizeAgentCommand(cmd); knownAgents[norm] {
+		if norm := NormalizeAgentCommand(cmd); IsKnownAgent(norm) {
 			return displayAgentApp(norm)
 		}
 		if descAgent != "" {
@@ -352,19 +350,8 @@ func resolveApp(p tmux.Pane, shellReturned bool, descAgent string) string {
 	return "terminal"
 }
 
-func displayAgentApp(agent string) string {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case "agy":
-		return "antigravity"
-	case "dsh", "dsh-tui":
-		return "deepseek"
-	case "kimi-cli", "kimi-code":
-		return "kimi"
-	case "cursor":
-		return "cursor-agent"
-	default:
-		return agent
-	}
+func displayAgentApp(app string) string {
+	return agent.DefaultRegistry().DisplayApp(app)
 }
 
 // spaceCWD prefers the active pane's CWD, then the first pane with one.
