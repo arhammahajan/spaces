@@ -147,6 +147,21 @@ func OSCAuthority(app string) bool {
 	return ok
 }
 
+// HasManifest reports whether a bundled manifest exists for id (or alias).
+func HasManifest(id string) bool {
+	return engine().manifest(normalizeApp(id)) != nil
+}
+
+// DetectManifest evaluates only the manifest rules for manifestID (without
+// running ExtractTitle). Used by agent plugins that pair manifest screen
+// detection with their own TitleExtractor.
+func DetectManifest(manifestID, viewport, oscTitle string) Detected {
+	if strings.TrimSpace(viewport) == "" {
+		return unknownDetected("")
+	}
+	return engine().detect(normalizeApp(manifestID), viewport, oscTitle, "")
+}
+
 // Detect evaluates the viewport for an app. oscTitle is the pane title (the
 // OSC 0/2 title); oscProgress is unavailable to tmux, pass "".
 func Detect(app, screen, oscTitle string) Detected {
