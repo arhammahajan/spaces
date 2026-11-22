@@ -1,0 +1,106 @@
+# The PR Agent - GitHub Actions PR Description, Auto-Labeling & Commands (OpenCode Go)
+#
+# Automatically describes and labels non-draft PRs on open/reopen/ready_for_review,
+# and responds to on-demand slash commands (/describe, /ask, /update_changelog,
+# /add_docs, /similar_issue, /help, etc.) from OWNER/MEMBER/COLLABORATOR users.
+#
+# Automatic code review (/review, /improve) is disabled here so it does not
+# duplicate Alibaba OpenCodeReview (.github/workflows/ocr-review.yml).
+#
+# Auth: uses the repository's OpenCode Console GitHub Actions OIDC service account
+# (no static API key secret needed).
+#
+# Optional GitHub Actions repository variables (Settings -> Secrets and variables -> Actions):
+#   PR_AGENT_MODEL   Model ID with LiteLLM prefix (default: openai/muse-spark-1.3-contributor)
+
+name: PR Agent
+
+concurrency:
+  group: >-
+    ${{
+      (
+        (github.event_name == 'pull_request_target' && !github.event.pull_request.draft)
+        || (
+          github.event_name == 'issue_comment'
+          && github.event.issue.pull_request
+          && github.event.comment.user.type != 'Bot'
+          && (
+            github.event.comment.author_association == 'MEMBER'
+            || github.event.comment.author_association == 'OWNER'
+            || github.event.comment.author_association == 'COLLABORATOR'
+          )
+          && startsWith(github.event.comment.body, '/')
+          && !startsWith(github.event.comment.body, '/open-code-review')
+        )
+      )
+      && format('pr-agent-{0}', github.event.pull_request.number || github.event.issue.number)
+      || format('pr-agent-noop-{0}', github.run_id)
+    }}
+  cancel-in-progress: true
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  pr-agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    if: |
+      (github.event_name == 'pull_request_target' && !github.event.pull_request.draft)
+      || (
+        github.event_name == 'issue_comment'
+        && github.event.issue.pull_request
+        && github.event.comment.user.type != 'Bot'
+        && (
+          github.event.comment.author_association == 'MEMBER'
+          || github.event.comment.author_association == 'OWNER'
+          || github.event.comment.author_association == 'COLLABORATOR'
+        )
+        && startsWith(github.event.comment.body, '/')
+        && !startsWith(github.event.comment.body, '/open-code-review')
+      )
+    steps:
+      - name: Sign in to OpenCode
+        env:
+          AUDIENCE: https://opencode.ai/console
+        run: |
+          oidc=$(curl -sS --fail-with-body --oauth2-bearer "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=$AUDIENCE" | jq -er .value)
+          token=$(curl -sS --fail-with-body https://opencode.ai/console/auth/oauth/token \
+            -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+            -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+            -d client_id=sk_98ed2673-9455-44dd-a811-c756428f36d0 \
+            -d subject_token="$oidc" | jq -er .access_token)
+          echo "::add-mask::$token"
+          echo "OPENCODE_API_KEY=$token" >> "$GITHUB_ENV"
+
+      - name: Run PR Agent
+        uses: The-PR-Agent/pr-agent@e673a02076ce09a4726c3d0c3cc85780e59ca52b # v0.50.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OPENAI_KEY: ${{ env.OPENCODE_API_KEY }}
+          OPENAI.API_BASE: "https://opencode.ai/inference/go/openai/v1"
+          CONFIG.MODEL: ${{ vars.PR_AGENT_MODEL || 'openai/muse-spark-1.3-contributor' }}
+          CONFIG.FALLBACK_MODELS: "[]"
+          CONFIG.CUSTOM_MODEL_MAX_TOKENS: "256000"
+          LITELLM.ADD_SESSION_ID_TO_REQUESTS: "true"
+          LITELLM.EXTRA_HEADERS: '{"x-opencode-session": "pr-agent-${{ github.run_id }}-${{ github.run_attempt }}"}'
+          # Auto-run /describe (summary, diagram, and automatic labels) on PR open/ready.
+          # Auto /review and /improve are disabled because OpenCodeReview handles code reviews.
+          github_action_config.auto_describe: "true"
+          github_action_config.auto_review: "false"
+          github_action_config.auto_improve: "false"
+          github_action_config.pr_actions: '["opened", "reopened", "ready_for_review"]'
+          # Enable automatic PR labeling while preserving the author's original description.
+          pr_description.publish_labels: "true"
+          pr_description.add_original_user_description: "true"
+          pr_description.enable_pr_diagram: "true"
