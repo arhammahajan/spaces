@@ -346,10 +346,16 @@ func NormalizeEvent(agent, rawEvent string, payload map[string]any, env map[stri
 	if profile == "" {
 		profile = strings.TrimSpace(envMap["HARNESS_PROFILE"])
 	}
+	source := firstStr(payload, "source")
+	if source == "" {
+		source = "hook"
+	}
+	usage := normalizeUsage(first(payload, "usage"))
 	out := map[string]any{
 		"v":           Version,
 		"agent":       agent,
 		"app":         app,
+		"source":      truncateRunes(source, MaxModel),
 		"event":       event,
 		"raw_event":   oneLine(raw, MaxModel, false),
 		"state":       state,
@@ -368,6 +374,9 @@ func NormalizeEvent(agent, rawEvent string, payload map[string]any, env map[stri
 		"child":       child,
 		"ts_ms":       ts,
 		"seq":         nowNanos(),
+	}
+	if usage != nil {
+		out["usage"] = usage
 	}
 	if len(bgTasks) > 0 || bgAuth || cronsAuth {
 		if bgTasks == nil {
@@ -399,14 +408,97 @@ func NormalizeEvent(agent, rawEvent string, payload map[string]any, env map[stri
 	return out
 }
 
+// normalizeUsage extracts and normalizes token/cost usage telemetry from a
+// payload map or Usage struct. Returns nil when all fields are zero/absent.
+func normalizeUsage(raw any) map[string]any {
+	if raw == nil {
+		return nil
+	}
+	var inTok, outTok, reasonTok, cacheRead, cacheWrite int64
+	var costUSD float64
+	switch u := raw.(type) {
+	case *Usage:
+		if u == nil {
+			return nil
+		}
+		inTok = u.InputTokens
+		outTok = u.OutputTokens
+		reasonTok = u.ReasoningTokens
+		cacheRead = u.CacheReadTokens
+		cacheWrite = u.CacheWriteTokens
+		costUSD = u.CostUSD
+	case Usage:
+		inTok = u.InputTokens
+		outTok = u.OutputTokens
+		reasonTok = u.ReasoningTokens
+		cacheRead = u.CacheReadTokens
+		cacheWrite = u.CacheWriteTokens
+		costUSD = u.CostUSD
+	case map[string]any:
+		inTok = toInt64(first(u, "input_tokens", "inputTokens"))
+		outTok = toInt64(first(u, "output_tokens", "outputTokens"))
+		reasonTok = toInt64(first(u, "reasoning_tokens", "reasoningTokens"))
+		cacheRead = toInt64(first(u, "cache_read_tokens", "cacheReadTokens"))
+		cacheWrite = toInt64(first(u, "cache_write_tokens", "cacheWriteTokens"))
+		if f, ok := toFloat64(first(u, "cost_usd", "costUsd", "costUSD")); ok {
+			costUSD = f
+		}
+	default:
+		return nil
+	}
+	out := map[string]any{}
+	if inTok > 0 {
+		out["input_tokens"] = inTok
+	}
+	if outTok > 0 {
+		out["output_tokens"] = outTok
+	}
+	if reasonTok > 0 {
+		out["reasoning_tokens"] = reasonTok
+	}
+	if cacheRead > 0 {
+		out["cache_read_tokens"] = cacheRead
+	}
+	if cacheWrite > 0 {
+		out["cache_write_tokens"] = cacheWrite
+	}
+	if costUSD > 0 {
+		out["cost_usd"] = costUSD
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// mergeUsage merges non-zero usage fields from incoming onto existing.
+func mergeUsage(existing, incoming any) map[string]any {
+	inc := normalizeUsage(incoming)
+	if inc == nil {
+		return normalizeUsage(existing)
+	}
+	base := normalizeUsage(existing)
+	if base == nil {
+		return inc
+	}
+	merged := make(map[string]any, len(base)+len(inc))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range inc {
+		merged[k] = v
+	}
+	return merged
+}
+
 // emptyRecord mirrors _empty_record.
 func emptyRecord() map[string]any {
 	return map[string]any{
-		"v": 1, "agent": "", "app": "", "state": "idle", "kind": nil,
+		"v": 1, "agent": "", "app": "", "source": "", "state": "idle", "kind": nil,
 		"event": "", "raw_event": "", "state_since_ms": int64(0),
 		"turn_started_ms": int64(0), "ts_ms": int64(0), "text": "",
 		"title": nil, "prompt": nil, "tool": "", "tool_input": nil, "tool_output": nil,
-		"reply": nil, "model": nil, "session_id": nil, "cwd": nil,
+		"reply": nil, "model": nil, "session_id": nil, "cwd": nil, "usage": nil,
 		"background": int64(0), "background_tasks": []any{}, "waiting_on": nil,
 		"children": []any{}, "last_event": nil,
 	}
@@ -525,6 +617,16 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 				record["app"] = ""
 			}
 		}
+		if s, _ := record["source"].(string); s == "" {
+			if src, _ := event["source"].(string); src != "" {
+				record["source"] = src
+			}
+		}
+		if event["usage"] != nil {
+			if u := mergeUsage(record["usage"], event["usage"]); u != nil {
+				record["usage"] = u
+			}
+		}
 		return record, true
 	}
 
@@ -562,6 +664,7 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 				if newSID, _ := event["session_id"].(string); newSID != "" && newSID != prevSID {
 					record["title"] = nil
 					record["prompt"] = nil
+					record["usage"] = nil
 				}
 			}
 		}
@@ -649,7 +752,7 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 
 	record["state"] = state
 	record["kind"] = kind
-	for _, key := range []string{"agent", "app", "event", "raw_event", "text"} {
+	for _, key := range []string{"agent", "app", "source", "event", "raw_event", "text"} {
 		if v, ok := event[key].(string); ok && v != "" {
 			record[key] = v
 		} else if _, ok := record[key]; !ok {
@@ -677,6 +780,11 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 	} {
 		if v, ok := event[key]; ok && v != nil {
 			record[key] = v
+		}
+	}
+	if event["usage"] != nil {
+		if u := mergeUsage(record["usage"], event["usage"]); u != nil {
+			record["usage"] = u
 		}
 	}
 	// Keep integer background count synced with active tracked background tasks.

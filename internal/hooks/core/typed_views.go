@@ -26,10 +26,21 @@ type Child struct {
 	Text     string `json:"text"`
 }
 
+// Usage describes token and cost telemetry for a pane.
+type Usage struct {
+	InputTokens      int64   `json:"input_tokens,omitempty"`
+	OutputTokens     int64   `json:"output_tokens,omitempty"`
+	ReasoningTokens  int64   `json:"reasoning_tokens,omitempty"`
+	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
+	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
+	CostUSD          float64 `json:"cost_usd,omitempty"`
+}
+
 // PaneSummary is the typed per-pane summary view.
 type PaneSummary struct {
 	Agent           string  `json:"agent"`
 	App             string  `json:"app"`
+	Source          string  `json:"source,omitempty"`
 	State           string  `json:"state"`
 	Kind            string  `json:"kind,omitempty"`
 	Event           string  `json:"event"`
@@ -41,6 +52,7 @@ type PaneSummary struct {
 	Model           string  `json:"model,omitempty"`
 	SessionID       string  `json:"session_id,omitempty"`
 	CWD             string  `json:"cwd,omitempty"`
+	Usage           *Usage  `json:"usage,omitempty"`
 	ChildCount      int     `json:"child_count"`
 	Background      int     `json:"background,omitempty"`
 	FiniteActive    int     `json:"finite_active,omitempty"`
@@ -121,11 +133,28 @@ func decodeChildren(raw any) []Child {
 	return out
 }
 
+func decodeUsage(raw any) *Usage {
+	m := normalizeUsage(raw)
+	if m == nil {
+		return nil
+	}
+	cost, _ := toFloat64(m["cost_usd"])
+	return &Usage{
+		InputTokens:      toInt64(m["input_tokens"]),
+		OutputTokens:     toInt64(m["output_tokens"]),
+		ReasoningTokens:  toInt64(m["reasoning_tokens"]),
+		CacheReadTokens:  toInt64(m["cache_read_tokens"]),
+		CacheWriteTokens: toInt64(m["cache_write_tokens"]),
+		CostUSD:          cost,
+	}
+}
+
 func typedSummaryRecord(record map[string]any) PaneSummary {
 	m := summaryRecord(record)
 	return PaneSummary{
 		Agent:           stringKey(m["agent"]),
 		App:             stringKey(m["app"]),
+		Source:          stringKey(m["source"]),
 		State:           stringKey(m["state"]),
 		Kind:            stringKey(m["kind"]),
 		Event:           stringKey(m["event"]),
@@ -137,6 +166,7 @@ func typedSummaryRecord(record map[string]any) PaneSummary {
 		Model:           stringKey(m["model"]),
 		SessionID:       stringKey(m["session_id"]),
 		CWD:             stringKey(m["cwd"]),
+		Usage:           decodeUsage(m["usage"]),
 		ChildCount:      int(toInt64(m["child_count"])),
 		Background:      int(toInt64(m["background"])),
 		FiniteActive:    int(toInt64(m["finite_active"])),

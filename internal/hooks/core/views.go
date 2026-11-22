@@ -46,15 +46,18 @@ func summaryRecord(record map[string]any) map[string]any {
 			bgCount = activeBg
 		}
 	}
+	usage := normalizeUsage(record["usage"])
 	hasDetail := truthy(record["prompt"]) ||
 		truthy(record["tool_input"]) ||
 		truthy(record["tool_output"]) ||
 		truthy(record["reply"]) ||
+		usage != nil ||
 		childCount > 0 ||
 		len(bgTasks) > 0 ||
 		bgCount > 0
 	agent, _ := record["agent"].(string)
 	app, _ := record["app"].(string)
+	source, _ := record["source"].(string)
 	state, _ := record["state"].(string)
 	if state == "" {
 		state = "idle"
@@ -93,6 +96,12 @@ func summaryRecord(record map[string]any) map[string]any {
 		"finite_active":   len(activeFinite),
 		"service_active":  len(activeServices),
 		"has_detail":      hasDetail,
+	}
+	if source != "" {
+		out["source"] = source
+	}
+	if usage != nil {
+		out["usage"] = usage
 	}
 	if truthy(record["waiting_on"]) {
 		out["waiting_on"] = record["waiting_on"]
@@ -241,6 +250,7 @@ func SpaceHooksDetail(session string, pane any) map[string]any {
 		truthy(detail["tool_input"]) ||
 		truthy(detail["tool_output"]) ||
 		truthy(detail["reply"]) ||
+		normalizeUsage(detail["usage"]) != nil ||
 		len(children) > 0 ||
 		len(bgTasks) > 0 ||
 		toInt64(detail["background"]) > 0

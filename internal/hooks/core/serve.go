@@ -330,11 +330,31 @@ func Serve(foreground bool, tcpPort int) int {
 		}
 	}()
 
+	var watchCancel context.CancelFunc
+	var watchDone chan struct{}
+	if DaemonWatchPaneLister != nil && DaemonWatchResolver != nil {
+		var watchCtx context.Context
+		watchCtx, watchCancel = context.WithCancel(context.Background())
+		watchDone = make(chan struct{})
+		mgr := NewDaemonWatchManager(DaemonWatchPaneLister, DaemonWatchResolver, MergeIntoStore)
+		go func() {
+			defer close(watchDone)
+			mgr.Run(watchCtx, 2*time.Second)
+		}()
+	}
+
 	sigCh := make(chan os.Signal, 2)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	<-sigCh
 	signal.Stop(sigCh)
 	close(stopOnce)
+	if watchCancel != nil {
+		watchCancel()
+		select {
+		case <-watchDone:
+		case <-time.After(3 * time.Second):
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = unixServer.Shutdown(ctx)

@@ -114,7 +114,7 @@ func init() {
 	alias("prompt",
 		"UserPromptSubmit", "userPromptSubmitted", "user_prompt_submit",
 		"beforeSubmitPrompt", "BeforeAgent", "prompt", "busy",
-		"sessionBusy", "session.execution.started")
+		"sessionBusy", "session.busy", "session.execution.started")
 	alias("pre_invocation", "PreInvocation", "preInvocation", "pre_invocation")
 	alias("pre_tool",
 		"PreToolUse", "preToolUse", "pre_tool_use", "BeforeTool",
@@ -127,7 +127,7 @@ func init() {
 	alias("tool_failure", "PostToolUseFailure", "postToolUseFailure", "tool_failure", "ToolError")
 	alias("permission",
 		"PermissionRequest", "permissionRequest", "permissionRequested",
-		"PermissionDenied")
+		"PermissionDenied", "permission.asked", "permission.updated")
 	alias("stop",
 		"Stop", "stop", "agentStop", "AfterAgent", "Interrupt",
 		"StopCancelled", "SessionIdle", "turnEnd",
@@ -137,16 +137,16 @@ func init() {
 		"PostInvocation", "postInvocation", "post_invocation")
 	alias("stop_failure",
 		"StopFailure", "stopFailure", "ErrorOccurred",
-		"session.execution.failed")
+		"session.execution.failed", "session.error")
 	alias("subagent_start", "SubagentStart", "subagentStart", "SubagentStart")
 	alias("subagent_stop", "SubagentStop", "subagentStop", "SubagentEnd", "TeammateIdle")
 	alias("task_created", "TaskCreated", "taskCreated")
 	alias("task_completed", "TaskCompleted", "taskCompleted", "BackgroundTaskCompleted", "backgroundTaskCompleted")
 	alias("compact", "PreCompact", "PostCompact", "PreCompress", "compact")
 	alias("notification", "Notification", "notification")
-	alias("elicitation", "Elicitation")
-	alias("elicitation_result", "ElicitationResult")
-	alias("working", "working", "agent.start")
+	alias("elicitation", "Elicitation", "question.asked")
+	alias("elicitation_result", "ElicitationResult", "question.replied", "question.rejected")
+	alias("working", "working", "agent.start", "permission.replied")
 	alias("done", "done", "agent.end")
 	alias("error", "error", "failed")
 	alias("blocked", "blocked", "needs_you", "needsYou")
