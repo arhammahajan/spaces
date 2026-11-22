@@ -74,6 +74,7 @@ set -g @spaces-popup-width '86%'     # display-popup width
 set -g @spaces-popup-height '82%'    # display-popup height
 set -g @spaces-border 'rounded'      # display-popup border style
 set -g @spaces-pane-border 'on'      # show agent (and `— <profile>`) on top pane border
+set -g @spaces-detach-on-destroy 'off' # switch to most recent open space instead of detaching when closing a space's last pane/tab
 set -g @spaces-auto-restore 'on'     # auto-restore last-open (non-exited) spaces on fresh tmux start
 ```
 

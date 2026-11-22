@@ -60,6 +60,13 @@ POPUP_BORDER="$(get_tmux_option "@spaces-border" "rounded")"
 
 tmux set-option -g status-position bottom
 
+# Keep tmux attached and switch to the most recently active remaining space
+# (and its active tab/pane) when all panes/tabs of the current space are
+# closed, instead of detaching. Override with e.g.
+# `set -g @spaces-detach-on-destroy on` (or `no-detached` / `previous` / `next`).
+DETACH_ON_DESTROY="$(get_tmux_option "@spaces-detach-on-destroy" "off")"
+tmux set-option -g detach-on-destroy "$DETACH_ON_DESTROY"
+
 # Show the active coding agent (and profile separated by an em dash when
 # launched through the harness CLI) on top of every pane.
 # Disable with `set -g @spaces-pane-border off`.
