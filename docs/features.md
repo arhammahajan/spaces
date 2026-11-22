@@ -35,7 +35,8 @@ and config provenance.
 | Unified conversation store & transcript parsers | `internal/model/convstore.go`, `internal/agent/plugins/{store_parsers,sqlite_stores}.go`, §3 |
 | Git worktrees & PR/git telemetry | `internal/worktree`, `internal/gitinfo`, §2.6 |
 | Navigator, Inbox, Tabs, Conversations, Shared & Worktrees TUI | `internal/tui`, `internal/cli`, `cmd/tmux-spaces` |
-| Feature plans | §1 through §12 |
+| Proposed Docker sandboxes | `internal/harness/sandbox`, §13 |
+| Feature plans | §1 through §13 |
 
 ## Tracker
 
@@ -90,6 +91,11 @@ and config provenance.
 | LOG-1 | logstore | Shared operational log event schema, SQLite store (`logs.db`), and incremental cursor sync | Proposed | §11.1 |
 | LOG-2 | logstore | Per-agent operational log and transcript adapters across isolated profiles | Proposed | §11.2 |
 | LOG-3 | logstore | Usage, rate-limit, failure, and stall analytics for `spaces` and `harness` | Proposed | §11.3 |
+| SBX-1 | sandbox | Ephemeral and persistent Docker sandbox lifecycle | Proposed | §13.2 |
+| SBX-2 | sandbox | Host binary mounting and bundle delivery for agent CLIs | Proposed | §13.3 |
+| SBX-3 | sandbox | Profile credential projection and Unix socket router bridge | Proposed | §13.4 |
+| SBX-4 | sandbox | Base image builder, doctor checks, and attention supervision | Proposed | §13.5 |
+| SBX-5 | sandbox | `tmux-spaces` status/hook relay and interactive sandbox management | Proposed | §13.6 |
 
 ## 0. Shipped baseline
 
@@ -1358,3 +1364,226 @@ Verify that the agent uses the selected profile and reaches the router. Keep
 profile and launch state in `harness` and pane state in TUIOS.
 [TUIOS program status](https://github.com/Gaurav-Gosain/tuios/blob/main/docs/PROGRAM_STATUS.md) ·
 [profile launch code](../internal/harness/spacelaunch/launch.go)
+
+## 13. Docker sandboxes
+
+**Proposed.** The implementation phases are in §13.7.
+
+Run coding agents inside isolated Linux Docker containers managed by `spaces`.
+The sandbox reuses existing `spaces` / `harness` profiles for credentials and injects agent CLIs
+from the host, so container images stay generic and do not need agent packages
+pre-installed.
+
+Design boundaries:
+
+- Support both ephemeral one-shot runs and persistent containers.
+- Copy credentials one way into the sandbox. Never sync refreshed tokens or edits back to
+  the host profile.
+- Allow outbound internet access by default over Docker bridge networking.
+- Target CLI agents directly. Exclude T3 server daemons and pairing flows.
+
+### 13.1 Container layout and defaults
+
+Every sandbox mounts the same paths inside the container:
+
+```text
+/workspace                       rw  Host workspace bind mount, defaults to current directory
+/opt/harness/bin/<agent>         ro  Host ELF CLI binary from the staging cache
+/opt/harness/bundles/<agent>/    ro  Host package directory for relocatable wrapper and Node CLIs
+/run/harness/profile/            rw  One-way copy of profile auth files and optional read-only configs
+/run/harness/router.sock         rw  Unix socket bridged to the host model-router
+/home/agent                      rw  Container-local writable home directory
+```
+
+Container runtime defaults:
+
+- Run with the host UID and GID so files created in `/workspace` keep host ownership.
+- Pass `--cap-drop=ALL`, `--security-opt=no-new-privileges`, and `--init`. Support
+  optional `--cpus` and `--memory` limits.
+- Pass `--security-opt label=disable` on SELinux hosts so workspace mounts work without
+  relabeling host repositories.
+- Default the agent access level to `full` inside sandboxes and skip the interactive
+  access picker in `spacelaunch`. Honor an explicit `--access` flag when the caller wants
+  `default`, `auto`, or `read-only`.
+- Use Docker bridge networking by default so package managers, Git remotes, and direct
+  OAuth endpoints work. Offer `--net none` for router-only sessions that talk solely over
+  `/run/harness/router.sock`.
+- Tag managed containers with Docker labels `dev.model-router.sandbox=true`,
+  `dev.model-router.agent`, `dev.model-router.profile`, and `dev.model-router.workspace`
+  so `ls` and `inspect` read live state from Docker.
+
+### 13.2 Lifecycle and CLI (SBX-1)
+
+Add a `sandbox` command group to `cmd/tmux-spaces`:
+
+```text
+spaces sandbox run <agent> [--profile <name>] [--workspace <dir>] [--image <img>]
+                   [--access <level>] [--net bridge|none]
+                   [--binary-mode auto|host|image] [--keep] [-- <agent-args...>]
+
+spaces sandbox create <name> [--workspace <dir>] [--image <img>]
+                      [--agent <agent>] [--profile <name>] [--net bridge|none]
+spaces sandbox exec <name> [<agent>] [--profile <name>] [--access <level>]
+                    [--binary-mode auto|host|image] [-- <agent-args...>]
+spaces sandbox shell <name>
+spaces sandbox ls [--json]
+spaces sandbox inspect <name> [--json]
+spaces sandbox stop <name>
+spaces sandbox start <name>
+spaces sandbox rm <name> [--force]
+
+spaces sandbox image build [--tag harness-sandbox:base]
+```
+
+`spaces sandbox run` creates a container, attaches the terminal to the agent, and
+removes both the container and `$HOME/.harness/sandboxes/<id>/` when the agent
+exits. Passing `--keep` retains the container for later inspection or reuse.
+
+`spaces sandbox create` starts a long-lived container running `sleep infinity` so
+installed packages and build caches survive across sessions. `spaces sandbox exec` runs
+an agent inside that container and can inject a different agent or profile on each call
+without rebuilding the image. `spaces sandbox shell` opens an interactive bash session
+in the container.
+
+### 13.3 Host binary delivery (SBX-2)
+
+Because `spaces` injects the agent CLI at runtime, any Linux container image such as
+`harness-sandbox:base`, `golang:1.24`, or `node:22` can run supported agents without
+custom agent Dockerfiles. `internal/harness/sandbox/binary.go` picks one of three
+delivery strategies per agent:
+
+- **Host binary.** Applies to standalone static and portable ELF CLIs: `claude`, `codex`,
+  `antigravity`, `opencode`, `copilot`, `kimi`, `grok`, `kilo`, and `fx`. Resolve the
+  configured host binary with `filepath.EvalSymlinks`, copy it into
+  `$HOME/.harness/sandbox-cache/bins/` keyed by path, size, and mtime, and mount the
+  cached file read-only at `/opt/harness/bin/<agent>`. Set `DISABLE_AUTOUPDATER=1` where
+  supported so the agent does not try to update a read-only binary.
+- **Host directory.** Applies to relocatable shell and Node packages: `pi`, `mcode`,
+  `qwen`, `deepseek`, and `gemini`. Mount the release or package directory read-only
+  under `/opt/harness/bundles/<agent>` and run its entrypoint with the container shell or
+  `node`.
+- **Image binary.** Applies to Python `uv` virtualenvs for `vibe` and `kimi-cli`, the
+  `fnm` global tree for `cline`, the self-downloading launcher for `muse`, non-Linux
+  hosts, and explicit `--binary-mode image` runs. Run the CLI installed inside the
+  container image.
+
+### 13.4 Profile credential projection and router bridge (SBX-3)
+
+Resolve profiles through `profiles.Resolve` and handle credentials in two paths based on
+`Profile.Router`.
+
+- **Router profiles.** When `Profile.Router` is true, real upstream provider keys stay on
+  the host. Because `model-router` binds to `127.0.0.1:4000` and host firewalls such as
+  Fedora `firewalld` block container traffic to `docker0`, `spaces` avoids exposing the
+  router over TCP. Instead, `spaces` runs a host-side Unix socket forwarder at
+  `$HOME/.harness/sandboxes/<id>/router.sock` that connects to the host router
+  address and mounts it at `/run/harness/router.sock`. A mounted shim subcommand,
+  `spaces __sandbox-exec`, starts a local listener on container `127.0.0.1:4000` that
+  forwards to `/run/harness/router.sock`, then executes the agent. This works with any
+  base image and keeps `model-router` bound to host loopback.
+- **Direct and OAuth profiles.** When `Profile.Router` is false, `spaces` reads
+  `AuthFiles`, `ShadowSubdir`, and `AuthFileOnly` from `profiles.OverlayLayout` and
+  copies only real auth files from the host profile's `ShadowHome` into
+  `$HOME/.harness/sandboxes/<id>/profile/` with mode `0700`. `spaces` skips host
+  symlinks in `ShadowHome` because their host targets do not exist inside the container.
+  Mounting the staged directory rather than individual files lets OAuth token refreshes
+  call `rename` without failing with `EBUSY`. Refreshed tokens stay inside the sandbox
+  directory, and `spaces sandbox rm` deletes them with the sandbox. `spaces` can also
+  copy or mount non-secret configs such as `skills` and `mcp_config.json` read-only into
+  the staged layout.
+- **Container launch resolution.** Call `agents.Resolve` with container-scoped
+  `harnessenv.Paths`, container `ShadowHome` set to `/run/harness/profile`, and container
+  `RouterSettings.URL` set to `http://127.0.0.1:4000`. Clear host `Profile.BinaryPath` so
+  the container binary path takes effect. Forward `ANTIGRAVITY_CREDENTIAL_SCOPE` computed
+  from the host `ShadowHome` path so Antigravity matches its stored credential scope
+  inside the container.
+
+### 13.5 Base image, attention, and diagnostics (SBX-4)
+
+- **Base image.** Embed one minimal Dockerfile in `internal/harness/sandbox/baseimage.go`
+  for `spaces sandbox image build`. Include `git`, `bash`, `curl`, `ca-certificates`,
+  `ripgrep`, `libstdc++6`, `node`, and `python3` with a non-root `agent` user.
+- **Attention tracking.** Run interactive `sandbox run` and `sandbox exec` commands
+  through `internal/osc` / `__shim` so `tmux-spaces` records `working`, `done`, and
+  `failed` states for sandboxed agents.
+- **Diagnostics.** Add checks to `spaces doctor` for Docker daemon reachability,
+  `harness-sandbox:base` image presence, and router bridge health.
+- **Git worktrees.** When `/workspace` is a linked Git worktree whose `.git` file points
+  to an external common Git directory on the host, mount that common directory so Git
+  commands work inside the container.
+
+### 13.6 `tmux-spaces` information relay and sandbox management (SBX-5)
+
+Integrate Docker sandboxes with `tmux-spaces` so sandboxed agents have the same live
+observability and lifecycle controls as host-native panes:
+
+- **Hook & attention relay into `tmux-spaces`.** Mount a host-side Unix socket relay at
+  `/run/harness/hooks.sock` (bridging to the `spaces` hook server) alongside the router
+  socket, and inject container-scoped hook metadata (`TMUX_PANE`, `SPACES_SESSION`,
+  `HARNESS_SANDBOX_ID`, `HARNESS_SANDBOX_NAME`, `HARNESS_SANDBOX_IMAGE`,
+  `HARNESS_PROFILE`) into `spaces __sandbox-exec`. Inside the container, agent hook
+  callbacks and OSC 7501 sequences pass through to the host pane so `tmux-spaces` receives
+  live `working`, `blocked` (`permission`/`question`/`auth`), `done`, `failed`, tool
+  activity, subagent trees, and turn timings—never relying solely on outer container exit
+  codes.
+- **Pane metadata & badges.** When `spaces sandbox run` or `exec` launches inside tmux,
+  set per-pane `@spaces_sandbox` / `@spaces_sandbox_image` options (cleared on exit) so
+  the Navigator, Attention Inbox, and Tabs inspector render a sandbox badge (container
+  name, image, network/mount mode, and linked worktree) alongside agent state and profile.
+- **Sandbox management from `tmux-spaces`.** Expose stable machine-readable CLI contracts
+  on `spaces sandbox` (`list --json`, `inspect <name> --json`, `create`, `run`, `exec`,
+  `shell`, `stop`, `start`, `rm`, `prune`) so `tmux-spaces` can:
+  - Launch new sandboxed agent tabs/spaces directly from the Agents / New Tab / New Space
+    popups (including worktree-backed tabs with automatic common `.git` dir mounting).
+  - Inspect running and stopped sandboxes in a dedicated Sandboxes view (or Tabs detail
+    pane) showing container status, image, mounted workspace, active pane link, router
+    bridge state, and resource usage.
+  - Attach/jump to the live tmux pane, open an interactive container shell (`sandbox shell`),
+    or stop, restart, remove, and prune sandboxes with dirty/active-pane confirmation
+    guards.
+
+### 13.7 Package layout, phasing, and testing
+
+Keep the sandbox subsystem in the root module with no new `go.mod` dependencies. Run the
+`docker` CLI behind an injectable `DockerRunner` interface, the same way
+`internal/harness/routerctl` wraps `systemctl`.
+
+```text
+internal/harness/sandbox/
+  docker.go      DockerRunner interface and exec implementation
+  store.go       Staged state under $HOME/.harness/sandboxes/<name>/
+  binary.go      Host binary, host directory, and image delivery strategies
+  credproj.go    One-way profile auth copy from OverlayLayout and ShadowEnvMap
+  resolve.go     Container-scoped translation over agents.Resolve
+  bridge.go      Host Unix socket forwarder and in-container __sandbox-exec shim
+  spec.go        Docker run, create, and exec argument assembly
+  lifecycle.go   Run, Create, Exec, Shell, List, Inspect, Stop, Start, and Remove
+  baseimage.go   Embedded base Dockerfile and image build helper
+```
+
+Phases:
+
+1. **Phase 1.** Build `docker.go`, `store.go`, `binary.go` for host ELF binaries,
+   `bridge.go` and `spaces __sandbox-exec`, `resolve.go`, `spec.go`, `lifecycle.go`,
+   `baseimage.go`, and `cmd/tmux-spaces` wiring. Support router-backed profiles for both
+   ephemeral `run` and persistent `create` and `exec`.
+2. **Phase 2.** Add `credproj.go` for `Router: false` profiles, host directory bundles
+   for `pi`, `mcode`, `qwen`, `deepseek`, and `gemini`, and optional read-only skills and
+   MCP config projection.
+3. **Phase 3.** Add `spaces doctor` checks, `spaces <agent> --sandbox` shorthand, and
+   linked Git worktree mounting.
+4. **Phase 4.** Ship `SBX-5` hook/OSC 7501 relay over `/run/harness/hooks.sock`,
+   `@spaces_sandbox` pane metadata, and `spaces sandbox ... --json` integration in
+   `tmux-spaces` for launching, inspecting, shelling into, and cleaning up sandboxes.
+
+Testing bar:
+
+- Run `go test ./...` with a fake `DockerRunner` and temporary directories so tests need
+  no Docker daemon, real home directory, or network.
+- Table-test `credproj.go` against temporary shadow homes with real auth files, dangling
+  symlinks, `ShadowSubdir`, `AuthFileOnly`, and `ANTIGRAVITY_CREDENTIAL_SCOPE`
+  preservation. Verify that host profile files stay untouched after staging and cleanup.
+- Test `bridge.go` end-to-end against a local `httptest.Server` over a temporary Unix
+  socket, including hook-relay forwarding and pane/sandbox metadata attribution.
+- Test `binary.go` symlink resolution, staging cache reuse, and strategy selection across
+  all agent categories.
