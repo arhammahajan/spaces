@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -19,6 +20,8 @@ import (
 const (
 	maxScannerTokenSize = 10 * 1024 * 1024 // 10 MiB for large tool output lines
 	maxDerivedTitleLen  = 120
+	listHeadScanBytes   = 256 * 1024 // 256 KiB head window for fast List() metadata scan
+	listTailScanBytes   = 128 * 1024 // 128 KiB tail window for fast List() metadata scan
 )
 
 // AttachProviderTelemetry attaches native ConversationStore and LogParser
@@ -96,6 +99,7 @@ func NewAntigravityConversationStore(homeDir string) agent.ConversationStore {
 			allowDBFallback: true,
 			fileFilter:      antigravityFileFilter,
 			parser:          NewAntigravityLogParser(),
+			sqliteLoader:    loadAntigravitySQLite,
 		},
 	}
 }
@@ -186,11 +190,12 @@ func NewKiloConversationStore(homeDir string) agent.ConversationStore {
 	return &fileConversationStore{
 		homeDir: homeDir,
 		cfg: providerStoreConfig{
-			agentID:    "kilo",
-			appName:    "kilo",
-			relDirs:    []string{".local/share/kilo/storage/session", ".config/kilo/sessions"},
-			fileFilter: jsonOrJSONLFilter,
-			parser:     NewKiloLogParser(),
+			agentID:      "kilo",
+			appName:      "kilo",
+			relDirs:      []string{".local/share/kilo/storage/session", ".config/kilo/sessions"},
+			fileFilter:   jsonOrJSONLFilter,
+			parser:       NewKiloLogParser(),
+			sqliteLoader: loadKiloSQLite,
 		},
 	}
 }
@@ -243,11 +248,12 @@ func NewOpenCodeConversationStore(homeDir string) agent.ConversationStore {
 	return &fileConversationStore{
 		homeDir: homeDir,
 		cfg: providerStoreConfig{
-			agentID:    "opencode",
-			appName:    "opencode",
-			relDirs:    []string{".local/share/opencode/storage/session", ".opencode/sessions"},
-			fileFilter: jsonOrJSONLFilter,
-			parser:     NewOpenCodeLogParser(),
+			agentID:      "opencode",
+			appName:      "opencode",
+			relDirs:      []string{".local/share/opencode/storage/session", ".opencode/sessions"},
+			fileFilter:   jsonOrJSONLFilter,
+			parser:       NewOpenCodeLogParser(),
+			sqliteLoader: loadOpenCodeSQLite,
 		},
 	}
 }
@@ -268,6 +274,11 @@ type providerStoreConfig struct {
 	allowDBFallback bool
 	fileFilter      func(name string) bool
 	parser          agent.LogParser
+	sqliteLoader    func(ctx context.Context, home string) []agent.ConversationRecord
+}
+
+type boundedLogParser interface {
+	parseLogBounded(ctx context.Context, path string, headBytes, tailBytes int64) ([]agent.LogEntry, error)
 }
 
 func jsonlOnlyFilter(name string) bool {
@@ -320,6 +331,25 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 	}
 
 	bySession := make(map[string]agent.ConversationRecord)
+	hasSQLiteRecords := false
+	if s.cfg.sqliteLoader != nil {
+		sqliteRecords := s.cfg.sqliteLoader(ctx, home)
+		if len(sqliteRecords) > 0 {
+			hasSQLiteRecords = true
+			for _, rec := range sqliteRecords {
+				key := rec.SessionID
+				if key == "" {
+					key = rec.SourcePath
+				}
+				if existing, exists := bySession[key]; exists {
+					bySession[key] = mergeConversationRecords(existing, rec)
+				} else {
+					bySession[key] = rec
+				}
+			}
+		}
+	}
+
 	for _, relDir := range s.cfg.relDirs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -341,6 +371,14 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 				return nil
 			}
 			if s.cfg.fileFilter != nil && !s.cfg.fileFilter(d.Name()) {
+				return nil
+			}
+
+			// For Antigravity: when conversation_summaries.db provided records,
+			// skip bare .db fallback files from conversations/*.db since
+			// conversation_summaries.db is authoritative (avoids untitled
+			// subagent/orphan .db entries and mtime drift).
+			if s.cfg.agentID == "antigravity" && hasSQLiteRecords && strings.HasSuffix(strings.ToLower(path), ".db") {
 				return nil
 			}
 
@@ -484,7 +522,19 @@ func (s *fileConversationStore) loadRecord(ctx context.Context, root, path strin
 	}
 
 	if s.cfg.parser != nil {
-		entries, parseErr := s.cfg.parser.ParseLog(ctx, path)
+		var (
+			entries  []agent.LogEntry
+			parseErr error
+		)
+		if strings.HasSuffix(lower, ".jsonl") && info != nil && info.Size() > listHeadScanBytes {
+			if bp, ok := s.cfg.parser.(boundedLogParser); ok {
+				entries, parseErr = bp.parseLogBounded(ctx, path, listHeadScanBytes, listTailScanBytes)
+			} else {
+				entries, parseErr = s.cfg.parser.ParseLog(ctx, path)
+			}
+		} else {
+			entries, parseErr = s.cfg.parser.ParseLog(ctx, path)
+		}
 		if parseErr == nil && len(entries) > 0 {
 			var firstUser, firstAny, lastAny string
 			var minTs, maxTs int64
@@ -504,14 +554,22 @@ func (s *fileConversationStore) loadRecord(ctx context.Context, root, path strin
 						maxTs = e.TimestampMs
 					}
 				}
+				if e.Event == "custom-title" && strings.TrimSpace(e.Text) != "" {
+					rec.Title = cleanSingleLine(e.Text, maxDerivedTitleLen)
+					continue
+				}
 				if e.Event == "summary" && rec.Title == "" && strings.TrimSpace(e.Text) != "" {
 					rec.Title = cleanSingleLine(e.Text, maxDerivedTitleLen)
+					continue
+				}
+				if e.Event == "meta" {
+					continue
 				}
 				text := strings.TrimSpace(e.Text)
 				role := strings.ToLower(strings.TrimSpace(e.Role))
 				if role == "user" || role == "assistant" {
 					msgCount++
-					if text != "" {
+					if text != "" && !isBoilerplateUserMessage(text) {
 						if role == "user" && firstUser == "" {
 							firstUser = text
 						}
@@ -555,7 +613,9 @@ func mergeConversationRecords(a, b agent.ConversationRecord) agent.ConversationR
 	aIsDB := strings.HasSuffix(strings.ToLower(a.SourcePath), ".db")
 	bIsDB := strings.HasSuffix(strings.ToLower(b.SourcePath), ".db")
 	primary, secondary := a, b
-	if (aIsDB && !bIsDB) || (aIsDB == bIsDB && b.MessageCount > a.MessageCount) {
+	if (aIsDB && !bIsDB) ||
+		(aIsDB == bIsDB && b.MessageCount > a.MessageCount) ||
+		(aIsDB == bIsDB && b.MessageCount == a.MessageCount && b.Title != "" && a.Title == "") {
 		primary, secondary = b, a
 	}
 
@@ -696,7 +756,7 @@ func extractFileMetadata(ctx context.Context, provider, path string) fileMetadat
 		return meta
 	}
 
-	_ = scanJSONL(ctx, path, func(line []byte) error {
+	_ = scanJSONLBounded(ctx, path, listHeadScanBytes, listTailScanBytes, func(line []byte) error {
 		var obj map[string]any
 		if err := json.Unmarshal(line, &obj); err != nil {
 			return nil
@@ -734,7 +794,9 @@ func applyMetaObject(meta *fileMetadata, obj map[string]any) {
 			strField(obj, "id"),
 		)
 	}
-	if meta.title == "" {
+	if ct := firstNonEmpty(strField(obj, "customTitle"), strField(obj, "custom_title")); ct != "" {
+		meta.title = cleanSingleLine(ct, maxDerivedTitleLen)
+	} else if meta.title == "" {
 		meta.title = firstNonEmpty(
 			strField(obj, "title"),
 			strField(obj, "summary"),
@@ -794,7 +856,7 @@ func applyMetaObject(meta *fileMetadata, obj map[string]any) {
 
 type claudeLogParser struct{}
 
-func (claudeLogParser) ParseLog(ctx context.Context, path string) ([]agent.LogEntry, error) {
+func (p claudeLogParser) ParseLog(ctx context.Context, path string) ([]agent.LogEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -804,97 +866,7 @@ func (claudeLogParser) ParseLog(ctx context.Context, path string) ([]agent.LogEn
 		lastModel string
 	)
 	err := scanJSONL(ctx, path, func(line []byte) error {
-		var obj map[string]any
-		if err := json.Unmarshal(line, &obj); err != nil {
-			return nil // ignore malformed lines gracefully
-		}
-
-		if sid := firstNonEmpty(strField(obj, "sessionId"), strField(obj, "session_id")); sid != "" {
-			sessionID = sid
-		}
-		ts := firstTimestamp(obj, "timestamp", "ts", "created_at", "createdAt")
-		typ := strField(obj, "type")
-		role := strField(obj, "role")
-		model := strField(obj, "model")
-
-		var content any = obj["content"]
-		if msg, ok := obj["message"].(map[string]any); ok {
-			if r := strField(msg, "role"); r != "" {
-				role = r
-			}
-			if m := strField(msg, "model"); m != "" {
-				model = m
-			}
-			if c, exists := msg["content"]; exists {
-				content = c
-			}
-		}
-		if model != "" {
-			lastModel = model
-		}
-		effModel := firstNonEmpty(model, lastModel)
-
-		if typ == "summary" {
-			summary := firstNonEmpty(strField(obj, "summary"), strField(obj, "text"))
-			if summary != "" {
-				entries = append(entries, agent.LogEntry{
-					TimestampMs: ts,
-					Role:        "system",
-					Event:       "summary",
-					Text:        summary,
-					SessionID:   sessionID,
-					Model:       effModel,
-				})
-			}
-			return nil
-		}
-
-		if role == "" && (typ == "user" || typ == "assistant" || typ == "system") {
-			role = typ
-		}
-
-		text, toolCalls, toolResults := extractContentParts(content)
-		if text == "" {
-			text = firstNonEmpty(strField(obj, "text"), strField(obj, "summary"))
-		}
-
-		event := typ
-		if event == "" {
-			event = "message"
-		}
-
-		if text != "" {
-			entries = append(entries, agent.LogEntry{
-				TimestampMs: ts,
-				Role:        role,
-				Event:       event,
-				Text:        text,
-				SessionID:   sessionID,
-				Model:       effModel,
-			})
-		}
-		for _, tc := range toolCalls {
-			entries = append(entries, agent.LogEntry{
-				TimestampMs: ts,
-				Role:        firstNonEmpty(role, "assistant"),
-				Event:       "tool_use",
-				Text:        tc.text,
-				ToolName:    tc.name,
-				SessionID:   sessionID,
-				Model:       effModel,
-			})
-		}
-		for _, tr := range toolResults {
-			entries = append(entries, agent.LogEntry{
-				TimestampMs: ts,
-				Role:        "tool",
-				Event:       "tool_result",
-				Text:        tr.text,
-				ToolName:    tr.name,
-				SessionID:   sessionID,
-				Model:       effModel,
-			})
-		}
+		parseClaudeLine(line, &entries, &sessionID, &lastModel)
 		return nil
 	})
 	if err != nil {
@@ -903,13 +875,143 @@ func (claudeLogParser) ParseLog(ctx context.Context, path string) ([]agent.LogEn
 	return entries, nil
 }
 
+func (p claudeLogParser) parseLogBounded(ctx context.Context, path string, headBytes, tailBytes int64) ([]agent.LogEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var (
+		entries   []agent.LogEntry
+		sessionID string
+		lastModel string
+	)
+	err := scanJSONLBounded(ctx, path, headBytes, tailBytes, func(line []byte) error {
+		parseClaudeLine(line, &entries, &sessionID, &lastModel)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func parseClaudeLine(line []byte, entries *[]agent.LogEntry, sessionID, lastModel *string) {
+	var obj map[string]any
+	if err := json.Unmarshal(line, &obj); err != nil {
+		return // ignore malformed lines gracefully
+	}
+
+	if sid := firstNonEmpty(strField(obj, "sessionId"), strField(obj, "session_id")); sid != "" {
+		*sessionID = sid
+	}
+	ts := firstTimestamp(obj, "timestamp", "ts", "created_at", "createdAt")
+	typ := strField(obj, "type")
+	role := strField(obj, "role")
+	model := strField(obj, "model")
+
+	var content any = obj["content"]
+	if msg, ok := obj["message"].(map[string]any); ok {
+		if r := strField(msg, "role"); r != "" {
+			role = r
+		}
+		if m := strField(msg, "model"); m != "" {
+			model = m
+		}
+		if c, exists := msg["content"]; exists {
+			content = c
+		}
+	}
+	if model != "" {
+		*lastModel = model
+	}
+	effModel := firstNonEmpty(model, *lastModel)
+
+	if typ == "custom-title" {
+		title := firstNonEmpty(strField(obj, "customTitle"), strField(obj, "custom_title"), strField(obj, "title"), strField(obj, "text"))
+		if title != "" {
+			*entries = append(*entries, agent.LogEntry{
+				TimestampMs: ts,
+				Role:        "system",
+				Event:       "custom-title",
+				Text:        title,
+				SessionID:   *sessionID,
+				Model:       effModel,
+			})
+		}
+		return
+	}
+
+	if typ == "summary" {
+		summary := firstNonEmpty(strField(obj, "summary"), strField(obj, "text"))
+		if summary != "" {
+			*entries = append(*entries, agent.LogEntry{
+				TimestampMs: ts,
+				Role:        "system",
+				Event:       "summary",
+				Text:        summary,
+				SessionID:   *sessionID,
+				Model:       effModel,
+			})
+		}
+		return
+	}
+
+	if role == "" && (typ == "user" || typ == "assistant" || typ == "system") {
+		role = typ
+	}
+
+	text, toolCalls, toolResults := extractContentParts(content)
+	if text == "" {
+		text = firstNonEmpty(strField(obj, "text"), strField(obj, "summary"))
+	}
+
+	event := typ
+	if boolField(obj, "isMeta") {
+		event = "meta"
+	} else if event == "" {
+		event = "message"
+	}
+
+	if text != "" {
+		*entries = append(*entries, agent.LogEntry{
+			TimestampMs: ts,
+			Role:        role,
+			Event:       event,
+			Text:        text,
+			SessionID:   *sessionID,
+			Model:       effModel,
+		})
+	}
+	for _, tc := range toolCalls {
+		*entries = append(*entries, agent.LogEntry{
+			TimestampMs: ts,
+			Role:        firstNonEmpty(role, "assistant"),
+			Event:       "tool_use",
+			Text:        tc.text,
+			ToolName:    tc.name,
+			SessionID:   *sessionID,
+			Model:       effModel,
+		})
+	}
+	for _, tr := range toolResults {
+		*entries = append(*entries, agent.LogEntry{
+			TimestampMs: ts,
+			Role:        "tool",
+			Event:       "tool_result",
+			Text:        tr.text,
+			ToolName:    tr.name,
+			SessionID:   *sessionID,
+			Model:       effModel,
+		})
+	}
+}
+
 // -----------------------------------------------------------------------------
 // Codex Rollout LogParser
 // -----------------------------------------------------------------------------
 
 type codexLogParser struct{}
 
-func (codexLogParser) ParseLog(ctx context.Context, path string) ([]agent.LogEntry, error) {
+func (p codexLogParser) ParseLog(ctx context.Context, path string) ([]agent.LogEntry, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -919,161 +1021,184 @@ func (codexLogParser) ParseLog(ctx context.Context, path string) ([]agent.LogEnt
 		lastModel string
 	)
 	err := scanJSONL(ctx, path, func(line []byte) error {
-		var obj map[string]any
-		if err := json.Unmarshal(line, &obj); err != nil {
-			return nil
-		}
-
-		ts := firstTimestamp(obj, "timestamp", "ts")
-		typ := strField(obj, "type")
-		payload, _ := obj["payload"].(map[string]any)
-
-		switch typ {
-		case "session_meta":
-			if payload != nil {
-				if id := firstNonEmpty(strField(payload, "id"), strField(payload, "session_id")); id != "" {
-					sessionID = id
-				}
-				if m := strField(payload, "model"); m != "" {
-					lastModel = m
-				}
-				if ts == 0 {
-					ts = parseTimestampMs(payload["timestamp"])
-				}
-			}
-			entries = append(entries, agent.LogEntry{
-				TimestampMs: ts,
-				Role:        "system",
-				Event:       "session_meta",
-				Text:        strField(payload, "cwd"),
-				SessionID:   sessionID,
-				Model:       lastModel,
-			})
-
-		case "turn_context":
-			if payload != nil {
-				if m := strField(payload, "model"); m != "" {
-					lastModel = m
-				}
-			}
-
-		case "response_item":
-			if payload == nil {
-				return nil
-			}
-			pType := strField(payload, "type")
-			switch pType {
-			case "message":
-				role := strField(payload, "role")
-				text, toolCalls, toolResults := extractContentParts(payload["content"])
-				if text != "" {
-					entries = append(entries, agent.LogEntry{
-						TimestampMs: ts,
-						Role:        role,
-						Event:       "message",
-						Text:        text,
-						SessionID:   sessionID,
-						Model:       lastModel,
-					})
-				}
-				for _, tc := range toolCalls {
-					entries = append(entries, agent.LogEntry{
-						TimestampMs: ts,
-						Role:        firstNonEmpty(role, "assistant"),
-						Event:       "tool_call",
-						Text:        tc.text,
-						ToolName:    tc.name,
-						SessionID:   sessionID,
-						Model:       lastModel,
-					})
-				}
-				for _, tr := range toolResults {
-					entries = append(entries, agent.LogEntry{
-						TimestampMs: ts,
-						Role:        "tool",
-						Event:       "tool_result",
-						Text:        tr.text,
-						ToolName:    tr.name,
-						SessionID:   sessionID,
-						Model:       lastModel,
-					})
-				}
-
-			case "function_call", "custom_tool_call":
-				name := firstNonEmpty(strField(payload, "name"), strField(payload, "tool_name"))
-				argsText := stringifyAny(firstNonNil(payload["arguments"], payload["input"]))
-				entries = append(entries, agent.LogEntry{
-					TimestampMs: ts,
-					Role:        "assistant",
-					Event:       pType,
-					Text:        argsText,
-					ToolName:    name,
-					SessionID:   sessionID,
-					Model:       lastModel,
-				})
-
-			case "function_call_output", "custom_tool_call_output":
-				outText := stringifyAny(payload["output"])
-				entries = append(entries, agent.LogEntry{
-					TimestampMs: ts,
-					Role:        "tool",
-					Event:       pType,
-					Text:        outText,
-					ToolName:    strField(payload, "name"),
-					SessionID:   sessionID,
-					Model:       lastModel,
-				})
-
-			case "reasoning":
-				text, _, _ := extractContentParts(payload["summary"])
-				if text != "" {
-					entries = append(entries, agent.LogEntry{
-						TimestampMs: ts,
-						Role:        "assistant",
-						Event:       "reasoning",
-						Text:        text,
-						SessionID:   sessionID,
-						Model:       lastModel,
-					})
-				}
-			}
-
-		case "event_msg":
-			if payload == nil {
-				return nil
-			}
-			evType := strField(payload, "type")
-			text := firstNonEmpty(strField(payload, "message"), strField(payload, "text"), strField(payload, "title"))
-			role := ""
-			switch evType {
-			case "user_message":
-				role = "user"
-			case "agent_message", "agent_reasoning":
-				role = "assistant"
-			default:
-				role = "system"
-			}
-			if text != "" || evType != "" {
-				entries = append(entries, agent.LogEntry{
-					TimestampMs: ts,
-					Role:        role,
-					Event:       firstNonEmpty(evType, "event_msg"),
-					Text:        text,
-					SessionID:   sessionID,
-					Model:       lastModel,
-				})
-			}
-
-		default:
-			// Fallback for generic/flat entries inside codex logs
-			appendStructuredEntry(&entries, obj, &sessionID, &lastModel)
-		}
+		parseCodexLine(line, &entries, &sessionID, &lastModel)
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
 	return entries, nil
+}
+
+func (p codexLogParser) parseLogBounded(ctx context.Context, path string, headBytes, tailBytes int64) ([]agent.LogEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var (
+		entries   []agent.LogEntry
+		sessionID string
+		lastModel string
+	)
+	err := scanJSONLBounded(ctx, path, headBytes, tailBytes, func(line []byte) error {
+		parseCodexLine(line, &entries, &sessionID, &lastModel)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func parseCodexLine(line []byte, entries *[]agent.LogEntry, sessionID, lastModel *string) {
+	var obj map[string]any
+	if err := json.Unmarshal(line, &obj); err != nil {
+		return
+	}
+
+	ts := firstTimestamp(obj, "timestamp", "ts")
+	typ := strField(obj, "type")
+	payload, _ := obj["payload"].(map[string]any)
+
+	switch typ {
+	case "session_meta":
+		if payload != nil {
+			if id := firstNonEmpty(strField(payload, "id"), strField(payload, "session_id")); id != "" {
+				*sessionID = id
+			}
+			if m := strField(payload, "model"); m != "" {
+				*lastModel = m
+			}
+			if ts == 0 {
+				ts = parseTimestampMs(payload["timestamp"])
+			}
+		}
+		*entries = append(*entries, agent.LogEntry{
+			TimestampMs: ts,
+			Role:        "system",
+			Event:       "session_meta",
+			Text:        strField(payload, "cwd"),
+			SessionID:   *sessionID,
+			Model:       *lastModel,
+		})
+
+	case "turn_context":
+		if payload != nil {
+			if m := strField(payload, "model"); m != "" {
+				*lastModel = m
+			}
+		}
+
+	case "response_item":
+		if payload == nil {
+			return
+		}
+		pType := strField(payload, "type")
+		switch pType {
+		case "message":
+			role := strField(payload, "role")
+			text, toolCalls, toolResults := extractContentParts(payload["content"])
+			if text != "" {
+				*entries = append(*entries, agent.LogEntry{
+					TimestampMs: ts,
+					Role:        role,
+					Event:       "message",
+					Text:        text,
+					SessionID:   *sessionID,
+					Model:       *lastModel,
+				})
+			}
+			for _, tc := range toolCalls {
+				*entries = append(*entries, agent.LogEntry{
+					TimestampMs: ts,
+					Role:        firstNonEmpty(role, "assistant"),
+					Event:       "tool_call",
+					Text:        tc.text,
+					ToolName:    tc.name,
+					SessionID:   *sessionID,
+					Model:       *lastModel,
+				})
+			}
+			for _, tr := range toolResults {
+				*entries = append(*entries, agent.LogEntry{
+					TimestampMs: ts,
+					Role:        "tool",
+					Event:       "tool_result",
+					Text:        tr.text,
+					ToolName:    tr.name,
+					SessionID:   *sessionID,
+					Model:       *lastModel,
+				})
+			}
+
+		case "function_call", "custom_tool_call":
+			name := firstNonEmpty(strField(payload, "name"), strField(payload, "tool_name"))
+			argsText := stringifyAny(firstNonNil(payload["arguments"], payload["input"]))
+			*entries = append(*entries, agent.LogEntry{
+				TimestampMs: ts,
+				Role:        "assistant",
+				Event:       pType,
+				Text:        argsText,
+				ToolName:    name,
+				SessionID:   *sessionID,
+				Model:       *lastModel,
+			})
+
+		case "function_call_output", "custom_tool_call_output":
+			outText := stringifyAny(payload["output"])
+			*entries = append(*entries, agent.LogEntry{
+				TimestampMs: ts,
+				Role:        "tool",
+				Event:       pType,
+				Text:        outText,
+				ToolName:    strField(payload, "name"),
+				SessionID:   *sessionID,
+				Model:       *lastModel,
+			})
+
+		case "reasoning":
+			text, _, _ := extractContentParts(payload["summary"])
+			if text != "" {
+				*entries = append(*entries, agent.LogEntry{
+					TimestampMs: ts,
+					Role:        "assistant",
+					Event:       "reasoning",
+					Text:        text,
+					SessionID:   *sessionID,
+					Model:       *lastModel,
+				})
+			}
+		}
+
+	case "event_msg":
+		if payload == nil {
+			return
+		}
+		evType := strField(payload, "type")
+		text := firstNonEmpty(strField(payload, "message"), strField(payload, "text"), strField(payload, "title"))
+		role := ""
+		switch evType {
+		case "user_message":
+			role = "user"
+		case "agent_message", "agent_reasoning":
+			role = "assistant"
+		default:
+			role = "system"
+		}
+		if text != "" || evType != "" {
+			*entries = append(*entries, agent.LogEntry{
+				TimestampMs: ts,
+				Role:        role,
+				Event:       firstNonEmpty(evType, "event_msg"),
+				Text:        text,
+				SessionID:   *sessionID,
+				Model:       *lastModel,
+			})
+		}
+
+	default:
+		// Fallback for generic/flat entries inside codex logs
+		appendStructuredEntry(entries, obj, sessionID, lastModel)
+	}
 }
 
 // -----------------------------------------------------------------------------
@@ -1107,6 +1232,33 @@ func (p structuredLogParser) ParseLog(ctx context.Context, path string) ([]agent
 		lastModel string
 	)
 	err := scanJSONL(ctx, path, func(line []byte) error {
+		var obj map[string]any
+		if err := json.Unmarshal(line, &obj); err != nil {
+			return nil // ignore malformed lines gracefully
+		}
+		appendStructuredEntry(&entries, obj, &sessionID, &lastModel)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return entries, nil
+}
+
+func (p structuredLogParser) parseLogBounded(ctx context.Context, path string, headBytes, tailBytes int64) ([]agent.LogEntry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	lower := strings.ToLower(path)
+	if (p.allowDBNoop && strings.HasSuffix(lower, ".db")) || strings.HasSuffix(lower, ".json") {
+		return p.ParseLog(ctx, path)
+	}
+	var (
+		entries   []agent.LogEntry
+		sessionID string
+		lastModel string
+	)
+	err := scanJSONLBounded(ctx, path, headBytes, tailBytes, func(line []byte) error {
 		var obj map[string]any
 		if err := json.Unmarshal(line, &obj); err != nil {
 			return nil // ignore malformed lines gracefully
@@ -1336,6 +1488,143 @@ func scanJSONL(ctx context.Context, path string, fn func(line []byte) error) err
 		}
 	}
 	return scanner.Err()
+}
+
+// scanJSONLBounded reads only the first headBytes and last tailBytes of a JSONL
+// file larger than headBytes, trimming partial lines at cut boundaries so List()
+// avoids reading multi-megabyte transcripts in full.
+func scanJSONLBounded(ctx context.Context, path string, headBytes, tailBytes int64, fn func(line []byte) error) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	size := info.Size()
+	if size <= headBytes || headBytes <= 0 {
+		scanner := bufio.NewScanner(f)
+		scanner.Buffer(make([]byte, 64*1024), maxScannerTokenSize)
+		for scanner.Scan() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			line := bytes.TrimSpace(scanner.Bytes())
+			if len(line) == 0 {
+				continue
+			}
+			if err := fn(line); err != nil {
+				return err
+			}
+		}
+		return scanner.Err()
+	}
+
+	headBuf := make([]byte, headBytes)
+	n, err := io.ReadFull(f, headBuf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return err
+	}
+	headBuf = headBuf[:n]
+
+	var headEnd int64
+	if lastNL := bytes.LastIndexByte(headBuf, '\n'); lastNL >= 0 {
+		headBuf = headBuf[:lastNL]
+		headEnd = int64(lastNL) + 1
+	} else {
+		headBuf = nil
+		headEnd = int64(n)
+	}
+
+	emitLines := func(buf []byte) error {
+		for len(buf) > 0 {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			var line []byte
+			if idx := bytes.IndexByte(buf, '\n'); idx >= 0 {
+				line = buf[:idx]
+				buf = buf[idx+1:]
+			} else {
+				line = buf
+				buf = nil
+			}
+			line = bytes.TrimSpace(line)
+			if len(line) == 0 {
+				continue
+			}
+			if err := fn(line); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if err := emitLines(headBuf); err != nil {
+		return err
+	}
+
+	if tailBytes <= 0 || headEnd >= size {
+		return nil
+	}
+
+	tailStart := size - tailBytes
+	trimmedStart := true
+	if tailStart <= headEnd {
+		tailStart = headEnd
+		trimmedStart = false
+	}
+
+	tailLen := size - tailStart
+	if tailLen <= 0 {
+		return nil
+	}
+	tailBuf := make([]byte, tailLen)
+	tn, err := f.ReadAt(tailBuf, tailStart)
+	if err != nil && err != io.EOF {
+		return err
+	}
+	tailBuf = tailBuf[:tn]
+	if trimmedStart {
+		if firstNL := bytes.IndexByte(tailBuf, '\n'); firstNL >= 0 {
+			tailBuf = tailBuf[firstNL+1:]
+		} else {
+			tailBuf = nil
+		}
+	}
+	return emitLines(tailBuf)
+}
+
+func isBoilerplateUserMessage(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" {
+		return true
+	}
+	lower := strings.ToLower(trimmed)
+	for _, prefix := range []string{
+		// Claude Code meta / command / IDE wrappers
+		"<local-command-caveat>",
+		"<command-name>",
+		"<command-message>",
+		"<system-reminder>",
+		"<ide_opened_file>",
+		"<ide_selection>",
+		"[request interrupted",
+		// Codex system / context wrappers
+		"<environment_context>",
+		"# agents.md",
+		"<instructions>",
+		"<permissions instructions>",
+		"<user_instructions>",
+	} {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 type toolCallInfo struct {
