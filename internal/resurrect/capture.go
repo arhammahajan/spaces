@@ -35,6 +35,23 @@ func defaultProcAntigravitySession(pid int) string {
 	return ""
 }
 
+// DiscoverLiveSessionID inspects a live process to discover the active
+// conversation/session ID for agentName via its plugin's SessionResolver,
+// while honoring ProcAntigravitySessionFunc when stubbed in tests.
+func DiscoverLiveSessionID(agentName string, pid int) string {
+	if agentName == "" || pid <= 0 {
+		return ""
+	}
+	plugin, ok := agent.DefaultRegistry().ResolveRuntime(agentName)
+	if !ok {
+		return ""
+	}
+	if plugin.Spec().ID == "antigravity" && ProcAntigravitySessionFunc != nil {
+		return strings.TrimSpace(ProcAntigravitySessionFunc(pid))
+	}
+	return strings.TrimSpace(plugin.SessionResolver().DiscoverLiveSessionID(pid))
+}
+
 // CanonicalAgent returns the canonical AI agent id if name identifies a known
 // coding harness, or "" otherwise.
 func CanonicalAgent(name string) string {
@@ -223,12 +240,8 @@ func capturePane(p tmux.Pane, hook *model.HookSummary) PaneSnapshot {
 		ps.SessionID = hook.SessionID
 	} else if sid := extractSessionIDFromCommand(ps.Agent, ps.FullCommand); sid != "" {
 		ps.SessionID = sid
-	} else if ps.Agent == "antigravity" && ProcAntigravitySessionFunc != nil && p.PID > 0 {
-		ps.SessionID = ProcAntigravitySessionFunc(p.PID)
-	} else if ps.Agent != "" && ps.Agent != "antigravity" && p.PID > 0 {
-		if plugin, ok := agent.DefaultRegistry().ResolveRuntime(ps.Agent); ok {
-			ps.SessionID = plugin.SessionResolver().DiscoverLiveSessionID(p.PID)
-		}
+	} else if sid := DiscoverLiveSessionID(ps.Agent, p.PID); sid != "" {
+		ps.SessionID = sid
 	}
 
 	if ps.App == "" && ps.Agent != "" {

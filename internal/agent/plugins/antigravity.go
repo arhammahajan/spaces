@@ -1,7 +1,6 @@
 package plugins
 
 import (
-	"context"
 	"strings"
 
 	"github.com/arhammahajan/spaces/internal/agent"
@@ -38,9 +37,11 @@ func NewAntigravity() agent.Plugin {
 			{HarnessLabel: "antigravity", RelPath: ".gemini/config/mcp_config.json"},
 			{HarnessLabel: "antigravity", RelPath: ".gemini/antigravity-cli/settings.json"},
 		},
-		CustomTitleExtractor:  agent.TitleExtractorFunc(extractAntigravityTitle),
-		CustomHookPolicy:      antigravityHookPolicy{},
-		CustomSessionResolver: antigravitySessionResolver{},
+		CustomTitleExtractor: agent.TitleExtractorFunc(extractAntigravityTitle),
+		CustomHookPolicy:     antigravityHookPolicy{},
+		CustomSessionResolver: antigravitySessionResolver{
+			BaseSessionResolver: agent.BaseSessionResolver{AgentID: "antigravity"},
+		},
 	}
 }
 
@@ -75,56 +76,4 @@ func (antigravitySessionResolver) DiscoverLiveSessionID(pid int) string {
 		return ""
 	}
 	return strings.TrimSpace(AntigravityProcSessionFunc(pid))
-}
-
-func (antigravitySessionResolver) SuppressMultiPaneCWDTitle() bool {
-	return true
-}
-
-// ResolveRestoreSessions deduplicates Antigravity conversations across
-// multiple restored panes in the same space so no two panes resume the same
-// conversation ID.
-func (r antigravitySessionResolver) ResolveRestoreSessions(
-	ctx context.Context,
-	panes []agent.SessionPaneRef,
-	lookup agent.SessionLookupFunc,
-) agent.SessionResolution {
-	res := agent.SessionResolution{
-		SessionIDs: map[string]string{},
-		SkipResume: map[string]bool{},
-	}
-	if len(panes) == 0 {
-		return res
-	}
-
-	claimed := map[string]bool{}
-	var pending []agent.SessionPaneRef
-	for _, p := range panes {
-		sid := strings.TrimSpace(p.SessionID)
-		if sid == "" {
-			sid = r.ExtractSessionIDFromArgs(p.FullCommand)
-		}
-		if sid != "" {
-			claimed[sid] = true
-			continue
-		}
-		if p.Profile == "" {
-			p.Profile = agent.HarnessProfileFromArgv(p.FullCommand)
-		}
-		pending = append(pending, p)
-	}
-	if len(pending) == 0 || lookup == nil {
-		return res
-	}
-
-	for _, p := range pending {
-		sid, ok := lookup(ctx, "antigravity", p.CWD, p.Profile, p.Title, claimed)
-		if sid != "" {
-			res.SessionIDs[p.Key] = sid
-			claimed[sid] = true
-		} else if ok && len(claimed) > 0 {
-			res.SkipResume[p.Key] = true
-		}
-	}
-	return res
 }

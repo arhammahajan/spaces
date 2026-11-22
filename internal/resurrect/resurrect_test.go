@@ -350,6 +350,75 @@ func TestRestoreMultipleAntigravityPanesDistinctConversations(t *testing.T) {
 	}
 }
 
+func TestRestoreMultipleNonAntigravityPanesDistinctConversations(t *testing.T) {
+	pools := map[string][]string{
+		"claude": {"claude-older", "claude-newest"},
+		"codex":  {"codex-older", "codex-newest"},
+	}
+
+	var calls []string
+	opts := RestoreOptions{
+		SelfPath:     "/bin/tmux-spaces",
+		SpacesBinary: func() []string { return []string{"spaces"} },
+		ResolveSession: func(_ context.Context, agentID, cwd, profile, title string, exclude map[string]bool) (string, bool) {
+			calls = append(calls, agentID+"|"+cwd)
+			for _, id := range pools[agentID] {
+				if !exclude[id] {
+					return id, true
+				}
+			}
+			return "", true
+		},
+	}
+
+	fr := &fakeRestorer{}
+	snap := SpaceSnapshot{
+		Name: "multi-agent",
+		CWD:  "/repo",
+		Windows: []WindowSnapshot{
+			{
+				Index: 1,
+				Name:  "claude",
+				Panes: []PaneSnapshot{
+					{Index: 1, CWD: "/repo", Agent: "claude", FullCommand: []string{"claude", "--resume", "claude-older"}},
+					{Index: 2, CWD: "/repo", Agent: "claude", FullCommand: []string{"claude"}},
+					{Index: 3, CWD: "/repo", Agent: "claude", FullCommand: []string{"claude"}},
+				},
+			},
+			{
+				Index: 2,
+				Name:  "codex",
+				Panes: []PaneSnapshot{
+					{Index: 1, CWD: "/repo", Agent: "codex", FullCommand: []string{"codex", "resume", "codex-older"}},
+					{Index: 2, CWD: "/repo", Agent: "codex", FullCommand: []string{"codex"}},
+					{Index: 3, CWD: "/repo", Agent: "codex", FullCommand: []string{"codex"}},
+				},
+			},
+		},
+	}
+
+	if err := Restore(context.Background(), fr, snap, opts); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	if len(calls) != 4 {
+		t.Fatalf("resolver calls = %v, want 4", calls)
+	}
+	wantClaudeB64 := base64.StdEncoding.EncodeToString([]byte("claude"))
+	wantCodexB64 := base64.StdEncoding.EncodeToString([]byte("codex"))
+	joined := strings.Join(fr.ops, "\n")
+
+	for _, want := range []string{
+		"split:multi-agent:1:/repo:/bin/tmux-spaces __shim claude spaces __resume-wrap " + wantClaudeB64 + " claude-newest",
+		"split:multi-agent:1:/repo:/bin/tmux-spaces __shim claude claude",
+		"split:multi-agent:2:/repo:/bin/tmux-spaces __shim codex spaces __resume-wrap " + wantCodexB64 + " codex-newest",
+		"split:multi-agent:2:/repo:/bin/tmux-spaces __shim codex codex",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("missing %q in restore ops:\n%s", want, joined)
+		}
+	}
+}
+
 func TestRestoreWorktreeFallbackWhenRemoved(t *testing.T) {
 	mainRoot := t.TempDir()
 	deletedWT := filepath.Join(t.TempDir(), "removed-worktree")

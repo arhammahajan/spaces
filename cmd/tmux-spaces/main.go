@@ -639,10 +639,7 @@ func discoverLiveSessionID(plugin agent.Plugin, pid int) string {
 	if plugin == nil || pid <= 0 {
 		return ""
 	}
-	if plugin.Spec().ID == "antigravity" && resurrect.ProcAntigravitySessionFunc != nil {
-		return strings.TrimSpace(resurrect.ProcAntigravitySessionFunc(pid))
-	}
-	return strings.TrimSpace(plugin.SessionResolver().DiscoverLiveSessionID(pid))
+	return resurrect.DiscoverLiveSessionID(plugin.Spec().ID, pid)
 }
 
 func (b *tuiBackend) recordScreenOutcomes(ctx context.Context, spaces []model.Space, paneIDs []string, nowMs int64) {

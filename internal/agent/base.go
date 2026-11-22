@@ -76,7 +76,11 @@ func (b *BasePlugin) SessionResolver() SessionResolver {
 	if b.CustomSessionResolver != nil {
 		return b.CustomSessionResolver
 	}
-	return BaseSessionResolver{}
+	return BaseSessionResolver{
+		AgentID:                       b.PluginSpec.ID,
+		DisableMultiPaneTitleSuppress: b.PluginSpec.WorktreeOnly,
+		DisableRestoreDedup:           b.PluginSpec.WorktreeOnly,
+	}
 }
 
 func (b *BasePlugin) Launcher() Launcher {
@@ -158,10 +162,14 @@ func (p BaseHookPolicy) ShouldYieldWorkingHookToIdle(in HookArbitrationInput) bo
 }
 
 // BaseSessionResolver provides standard CLI flag session ID extraction
-// (--conversation, --resume, --session, --id) and optional positional
-// `resume <id>` extraction (used by Codex and Muse).
+// (--conversation, --resume, --session, --id), optional positional
+// `resume <id>` extraction (used by Codex and Muse), multi-pane CWD title
+// fallback suppression, and multi-pane restore session deduplication.
 type BaseSessionResolver struct {
-	PositionalResume bool
+	AgentID                       string
+	PositionalResume              bool
+	DisableMultiPaneTitleSuppress bool
+	DisableRestoreDedup           bool
 }
 
 func (r BaseSessionResolver) ExtractSessionIDFromArgs(argv []string) string {
@@ -172,12 +180,65 @@ func (BaseSessionResolver) DiscoverLiveSessionID(int) string {
 	return ""
 }
 
-func (BaseSessionResolver) SuppressMultiPaneCWDTitle() bool {
-	return false
+func (r BaseSessionResolver) SuppressMultiPaneCWDTitle() bool {
+	return !r.DisableMultiPaneTitleSuppress
 }
 
-func (BaseSessionResolver) ResolveRestoreSessions(context.Context, []SessionPaneRef, SessionLookupFunc) SessionResolution {
-	return SessionResolution{}
+// ResolveRestoreSessions deduplicates agent conversations across multiple
+// restored panes in the same space so no two panes resume the same session ID.
+func (r BaseSessionResolver) ResolveRestoreSessions(
+	ctx context.Context,
+	panes []SessionPaneRef,
+	lookup SessionLookupFunc,
+) SessionResolution {
+	if r.DisableRestoreDedup {
+		return SessionResolution{}
+	}
+	res := SessionResolution{
+		SessionIDs: map[string]string{},
+		SkipResume: map[string]bool{},
+	}
+	if len(panes) == 0 {
+		return res
+	}
+
+	claimed := map[string]bool{}
+	var pending []SessionPaneRef
+	for _, p := range panes {
+		sid := strings.TrimSpace(p.SessionID)
+		if sid == "" {
+			sid = r.ExtractSessionIDFromArgs(p.FullCommand)
+		}
+		if sid != "" {
+			claimed[sid] = true
+			continue
+		}
+		if p.Profile == "" {
+			p.Profile = HarnessProfileFromArgv(p.FullCommand)
+		}
+		pending = append(pending, p)
+	}
+	if len(pending) == 0 || lookup == nil {
+		return res
+	}
+
+	for _, p := range pending {
+		agentID := strings.TrimSpace(r.AgentID)
+		if agentID == "" {
+			agentID = strings.TrimSpace(p.Agent)
+		}
+		if agentID == "" {
+			agentID = strings.TrimSpace(panes[0].Agent)
+		}
+		sid, ok := lookup(ctx, agentID, p.CWD, p.Profile, p.Title, claimed)
+		if sid != "" {
+			res.SessionIDs[p.Key] = sid
+			claimed[sid] = true
+		} else if ok && len(claimed) > 0 {
+			res.SkipResume[p.Key] = true
+		}
+	}
+	return res
 }
 
 // BaseLauncher provides standard binary and harness-management resolution.
