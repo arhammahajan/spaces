@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func stubExec(t *testing.T, fn ExecFunc) {
@@ -26,8 +27,48 @@ func TestSpacesBinaryHonorsEnv(t *testing.T) {
 func TestSpacesBinaryFallbackWithoutSpacesOnPath(t *testing.T) {
 	t.Setenv("SPACES_BIN", "")
 	t.Setenv("PATH", t.TempDir()) // no spaces here
-	if got := SpacesBinary(); len(got) != 2 || got[0] != "harness" || got[1] != "spaces" {
-		t.Errorf("got %v want [harness spaces]", got)
+	if got := SpacesBinary(); len(got) != 1 || got[0] != "tmux-spaces" {
+		t.Errorf("got %v want [tmux-spaces]", got)
+	}
+}
+
+func TestInProcessHooksRoundTrip(t *testing.T) {
+	t.Setenv("SPACES_HOOKS_RUNTIME", t.TempDir())
+	old := ExecFn
+	ExecFn = nil
+	t.Cleanup(func() { ExecFn = old })
+
+	ctx := context.Background()
+	entry := OutcomeEntry{
+		Session:   "dev",
+		Pane:      "3",
+		Agent:     "claude",
+		App:       "claude-code",
+		Outcome:   "done",
+		Text:      "all tests passed",
+		SessionID: "sess-inproc-1",
+		CWD:       "/repo/spaces",
+		TsMs:      time.Now().UnixMilli(),
+	}
+	if err := RecordOutcome(ctx, entry); err != nil {
+		t.Fatalf("RecordOutcome err = %v", err)
+	}
+	snap, err := FetchHooks(ctx)
+	if err != nil {
+		t.Fatalf("FetchHooks err = %v", err)
+	}
+	if !snap.OK || len(snap.Outcomes) != 1 || snap.Outcomes[0].SessionID != "sess-inproc-1" {
+		t.Fatalf("unexpected snap = %+v", snap)
+	}
+	if err := RemoveOutcome(ctx, OutcomeEntry{Session: "dev", Agent: "claude", SessionID: "sess-inproc-1"}); err != nil {
+		t.Fatalf("RemoveOutcome err = %v", err)
+	}
+	snap, err = FetchHooks(ctx)
+	if err != nil {
+		t.Fatalf("FetchHooks after remove err = %v", err)
+	}
+	if len(snap.Outcomes) != 0 {
+		t.Fatalf("expected 0 outcomes after remove, got %+v", snap.Outcomes)
 	}
 }
 

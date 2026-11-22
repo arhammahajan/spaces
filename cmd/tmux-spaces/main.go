@@ -33,6 +33,10 @@ const (
 )
 
 func main() {
+	if code, handled := maybeRunHookCommand(os.Args[0], os.Args[1:]); handled {
+		os.Exit(code)
+	}
+	bindHookSeams()
 	client := tmux.DefaultClient()
 	env := buildEnv(client)
 	os.Exit(cli.Run(os.Args[1:], env))

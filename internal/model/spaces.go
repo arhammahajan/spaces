@@ -9,19 +9,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	hookcore "github.com/arhammahajan/spaces/internal/hooks/core"
 )
 
 // ExecFunc runs a helper binary and returns its stdout.
 type ExecFunc func(ctx context.Context, name string, args ...string) ([]byte, error)
 
-// ExecFn is the injectable process runner used by the Fetch helpers.
-// Tests may stub it; it defaults to exec.CommandContext output.
-var ExecFn ExecFunc = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).Output()
-}
+// ExecFn is an optional injectable process runner for tests. When nil
+// (production default), FetchHooks, FetchHookDetail, RecordOutcome, and
+// RemoveOutcome call internal/hooks/core directly in-process.
+var ExecFn ExecFunc
 
-// SpacesBinary resolves the helper argv prefix for `spaces` space helpers:
-// $SPACES_BIN when set, else "zj" from PATH, else "harness spaces".
+// SpacesBinary resolves the helper argv prefix for `spaces` helpers:
+// $SPACES_BIN when set, else "spaces" from PATH, else "tmux-spaces" from PATH.
 func SpacesBinary() []string {
 	if bin := strings.TrimSpace(os.Getenv("SPACES_BIN")); bin != "" {
 		if fields := strings.Fields(bin); len(fields) > 0 {
@@ -31,17 +32,23 @@ func SpacesBinary() []string {
 	if _, err := exec.LookPath("spaces"); err == nil {
 		return []string{"spaces"}
 	}
-	return []string{"harness", "spaces"}
+	return []string{"tmux-spaces"}
 }
 
-// runSpaces invokes `zj <args...>` (or the SpacesBinary fallback) and returns stdout.
+// runSpaces invokes the spaces helper binary via ExecFn (or exec.CommandContext).
 func runSpaces(ctx context.Context, args ...string) ([]byte, error) {
 	bin := SpacesBinary()
 	name := bin[0]
 	full := make([]string, 0, len(bin)-1+len(args))
 	full = append(full, bin[1:]...)
 	full = append(full, args...)
-	out, err := ExecFn(ctx, name, full...)
+	fn := ExecFn
+	if fn == nil {
+		fn = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			return exec.CommandContext(ctx, name, args...).Output()
+		}
+	}
+	out, err := fn(ctx, name, full...)
 	if err != nil {
 		return nil, fmt.Errorf("model: %s %s: %w", name, strings.Join(full, " "), err)
 	}
@@ -58,29 +65,166 @@ func decodeJSON(out []byte, cmd string, v any) error {
 	return nil
 }
 
-// FetchHooks runs `spaces __space-hooks` and parses the HookSnapshot.
-func FetchHooks(ctx context.Context) (HookSnapshot, error) {
-	var snap HookSnapshot
-	out, err := runSpaces(ctx, "__space-hooks")
-	if err != nil {
-		return HookSnapshot{}, err
+// OutcomeEnricher optionally enriches missing outcome fields (session, pane,
+// profile, session_id, title) before RecordOutcome writes to hooks.store.json.
+// Wired by cmd/tmux-spaces to hookclient.EnrichOutcomeMap; nil in unit tests.
+var OutcomeEnricher func(*OutcomeEntry)
+
+func convertHookChildren(in []hookcore.Child) []HookChild {
+	if len(in) == 0 {
+		return nil
 	}
-	if err := decodeJSON(out, "__space-hooks", &snap); err != nil {
-		return HookSnapshot{}, err
+	out := make([]HookChild, len(in))
+	for i, c := range in {
+		out[i] = HookChild{
+			ID:       c.ID,
+			Kind:     c.Kind,
+			Role:     c.Role,
+			Category: c.Category,
+			State:    c.State,
+			Outcome:  c.Outcome,
+			Command:  c.Command,
+			Schedule: c.Schedule,
+			SinceMs:  c.SinceMs,
+			TsMs:     c.TsMs,
+			EndedMs:  c.EndedMs,
+			Text:     c.Text,
+		}
 	}
-	return snap, nil
+	return out
 }
 
-// FetchHookDetail runs `spaces __space-hooks --detail <session> <paneNum>` and
-// parses the HookDetailSnapshot.
-func FetchHookDetail(ctx context.Context, session string, paneNum int) (HookDetailSnapshot, error) {
-	var snap HookDetailSnapshot
-	out, err := runSpaces(ctx, "__space-hooks", "--detail", session, strconv.Itoa(paneNum))
-	if err != nil {
-		return HookDetailSnapshot{}, err
+func convertHookSummary(s hookcore.PaneSummary) HookSummary {
+	return HookSummary{
+		Agent:           s.Agent,
+		App:             s.App,
+		State:           s.State,
+		Kind:            s.Kind,
+		Event:           s.Event,
+		TsMs:            s.TsMs,
+		StateSinceMs:    s.StateSinceMs,
+		TurnStartedMs:   s.TurnStartedMs,
+		Text:            s.Text,
+		Title:           s.Title,
+		Model:           s.Model,
+		SessionID:       s.SessionID,
+		CWD:             s.CWD,
+		ChildCount:      s.ChildCount,
+		Background:      s.Background,
+		FiniteActive:    s.FiniteActive,
+		ServiceActive:   s.ServiceActive,
+		WaitingOn:       s.WaitingOn,
+		Children:        convertHookChildren(s.Children),
+		BackgroundTasks: convertHookChildren(s.BackgroundTasks),
+		HasDetail:       s.HasDetail,
 	}
-	if err := decodeJSON(out, "__space-hooks --detail", &snap); err != nil {
-		return HookDetailSnapshot{}, err
+}
+
+func convertOutcomeToCore(o OutcomeEntry) hookcore.Outcome {
+	return hookcore.Outcome{
+		Session:   o.Session,
+		Pane:      o.Pane,
+		Agent:     o.Agent,
+		App:       o.App,
+		Profile:   o.Profile,
+		Outcome:   o.Outcome,
+		Text:      o.Text,
+		Title:     o.Title,
+		Model:     o.Model,
+		SessionID: o.SessionID,
+		CWD:       o.CWD,
+		TsMs:      o.TsMs,
+	}
+}
+
+// FetchHooks reads the hook store summary in-process (or via ExecFn when stubbed).
+func FetchHooks(ctx context.Context) (HookSnapshot, error) {
+	if ExecFn != nil {
+		var snap HookSnapshot
+		out, err := runSpaces(ctx, "__space-hooks")
+		if err != nil {
+			return HookSnapshot{}, err
+		}
+		if err := decodeJSON(out, "__space-hooks", &snap); err != nil {
+			return HookSnapshot{}, err
+		}
+		return snap, nil
+	}
+	raw := hookcore.Summary()
+	panes := make(map[string]map[string]HookSummary, len(raw.Panes))
+	for sess, pm := range raw.Panes {
+		flat := make(map[string]HookSummary, len(pm))
+		for paneID, sum := range pm {
+			flat[paneID] = convertHookSummary(sum)
+		}
+		panes[sess] = flat
+	}
+	var outcomes []OutcomeEntry
+	if len(raw.Outcomes) > 0 {
+		outcomes = make([]OutcomeEntry, len(raw.Outcomes))
+		for i, o := range raw.Outcomes {
+			outcomes[i] = OutcomeEntry{
+				Session:   o.Session,
+				Pane:      o.Pane,
+				Agent:     o.Agent,
+				App:       o.App,
+				Profile:   o.Profile,
+				Outcome:   o.Outcome,
+				Text:      o.Text,
+				Title:     o.Title,
+				Model:     o.Model,
+				SessionID: o.SessionID,
+				CWD:       o.CWD,
+				TsMs:      o.TsMs,
+			}
+		}
+	}
+	return HookSnapshot{
+		OK:           raw.OK,
+		Version:      raw.Version,
+		NowMs:        raw.NowMs,
+		SpoolPending: raw.SpoolPending,
+		Panes:        panes,
+		Outcomes:     outcomes,
+	}, nil
+}
+
+// FetchHookDetail reads one pane's detailed hook record in-process (or via ExecFn when stubbed).
+func FetchHookDetail(ctx context.Context, session string, paneNum int) (HookDetailSnapshot, error) {
+	if ExecFn != nil {
+		var snap HookDetailSnapshot
+		out, err := runSpaces(ctx, "__space-hooks", "--detail", session, strconv.Itoa(paneNum))
+		if err != nil {
+			return HookDetailSnapshot{}, err
+		}
+		if err := decodeJSON(out, "__space-hooks --detail", &snap); err != nil {
+			return HookDetailSnapshot{}, err
+		}
+		return snap, nil
+	}
+	raw := hookcore.Detail(session, paneNum)
+	snap := HookDetailSnapshot{
+		OK:      raw.OK,
+		Version: raw.Version,
+	}
+	if raw.Record != nil {
+		sum := convertHookSummary(raw.Record.PaneSummary)
+		det := &HookDetail{
+			HookSummary:     sum,
+			Prompt:          raw.Record.Prompt,
+			Reply:           raw.Record.Reply,
+			Children:        sum.Children,
+			BackgroundTasks: sum.BackgroundTasks,
+			Background:      sum.Background,
+		}
+		if raw.Record.Tool != nil {
+			det.Tool = &HookTool{
+				Name:   raw.Record.Tool.Name,
+				Input:  raw.Record.Tool.Input,
+				Output: raw.Record.Tool.Output,
+			}
+		}
+		snap.Record = det
 	}
 	return snap, nil
 }
@@ -177,24 +321,33 @@ func FetchConversationTitles(ctx context.Context, queries []TitleQuery) (map[str
 	return snap.Titles, nil
 }
 
-// RecordOutcome sends one recent completion or failure entry to
-// `spaces __space-hooks --record-outcome <json>` so it persists in hooks.store.json.
+// RecordOutcome persists one recent completion or failure entry into hooks.store.json
+// in-process (or via ExecFn when stubbed).
 func RecordOutcome(ctx context.Context, o OutcomeEntry) error {
-	raw, err := json.Marshal(o)
-	if err != nil {
+	if ExecFn != nil {
+		raw, err := json.Marshal(o)
+		if err != nil {
+			return err
+		}
+		_, err = runSpaces(ctx, "__space-hooks", "--record-outcome", string(raw))
 		return err
 	}
-	_, err = runSpaces(ctx, "__space-hooks", "--record-outcome", string(raw))
-	return err
+	if OutcomeEnricher != nil {
+		OutcomeEnricher(&o)
+	}
+	return hookcore.RecordTypedOutcome(convertOutcomeToCore(o))
 }
 
 // RemoveOutcome deletes matching recent outcome entries from hooks.store.json
-// when a user reopens that conversation into a live tab.
+// in-process (or via ExecFn when stubbed).
 func RemoveOutcome(ctx context.Context, o OutcomeEntry) error {
-	raw, err := json.Marshal(o)
-	if err != nil {
+	if ExecFn != nil {
+		raw, err := json.Marshal(o)
+		if err != nil {
+			return err
+		}
+		_, err = runSpaces(ctx, "__space-hooks", "--remove-outcome", string(raw))
 		return err
 	}
-	_, err = runSpaces(ctx, "__space-hooks", "--remove-outcome", string(raw))
-	return err
+	return hookcore.RemoveTypedOutcome(convertOutcomeToCore(o))
 }

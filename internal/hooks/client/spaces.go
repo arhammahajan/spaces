@@ -88,18 +88,12 @@ func SpaceHookTitles(args []string) int {
 	return 0
 }
 
-// SpaceHookRecordOutcome records one recent completion or failure outcome JSON
-// object into the hook store, enriching missing session/pane/session_id/title
-// from the tmux environment and DiscoverProfile/DiscoverTitleFunc.
-func SpaceHookRecordOutcome(args []string) int {
-	if RecordOutcome == nil || len(args) == 0 || strings.TrimSpace(args[0]) == "" {
-		out(marshalPython(map[string]any{"ok": false}, false))
-		return 0
-	}
-	var entry map[string]any
-	if err := json.Unmarshal([]byte(args[0]), &entry); err != nil || entry == nil {
-		out(marshalPython(map[string]any{"ok": false}, false))
-		return 0
+// EnrichOutcomeMap enriches a mutable outcome record map in place, filling
+// missing session, pane, CWD, profile, session_id, title, agent, and app from
+// tmux and local harness resolvers, and reconciling prior failure markers.
+func EnrichOutcomeMap(entry map[string]any) {
+	if entry == nil {
+		return
 	}
 	session, _ := entry["session"].(string)
 	paneStr := ""
@@ -247,7 +241,22 @@ func SpaceHookRecordOutcome(args []string) int {
 			_, _, _ = TmuxFunc([]string{"set-option", "-p", "-u", "-t", paneRef, "@spaces_prior_outcome"}, 2*time.Second)
 		}
 	}
+}
 
+// SpaceHookRecordOutcome records one recent completion or failure outcome JSON
+// object into the hook store, enriching missing session/pane/session_id/title
+// from the tmux environment and DiscoverProfile/DiscoverTitleFunc.
+func SpaceHookRecordOutcome(args []string) int {
+	if RecordOutcome == nil || len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		out(marshalPython(map[string]any{"ok": false}, false))
+		return 0
+	}
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(args[0]), &entry); err != nil || entry == nil {
+		out(marshalPython(map[string]any{"ok": false}, false))
+		return 0
+	}
+	EnrichOutcomeMap(entry)
 	if err := RecordOutcome(entry); err != nil {
 		out(marshalPython(map[string]any{"ok": false}, false))
 		return 0
