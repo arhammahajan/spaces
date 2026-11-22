@@ -5,7 +5,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -1008,9 +1007,13 @@ func (b *tuiBackend) LaunchAgent(ctx context.Context, session, cwd, agentName, p
 		if profile != "default" {
 			label = profile
 		}
-		zjArgv := model.SpacesBinary()
-		cmd = append([]string{b.selfPath, "__shim", "--profile", profile, agentName}, zjArgv...)
-		cmd = append(cmd, "__shim-profile", agentName+"/"+profile)
+		harnessBin := "harness"
+		if b.lookPath != nil {
+			if p, err := b.lookPath("harness"); err == nil && p != "" {
+				harnessBin = p
+			}
+		}
+		cmd = []string{b.selfPath, "__shim", "--profile", profile, agentName, harnessBin, agentName, "profile", profile}
 	} else {
 		bin := agent.DefaultRegistry().BinaryName(agentName)
 		cmd = []string{b.selfPath, "__shim", agentName, bin}
@@ -1294,35 +1297,39 @@ func (b *tuiBackend) OpenSharedFile(ctx context.Context, path string) error {
 // then clears pane status and drops into an interactive shell on exit so
 // closing the harness does not close the tmux tab.
 //
-// For harness-managed agents (when `harness` is available), it wraps
-// `harness <agent> profile <profile|default>` inside `spaces __resume-wrap` so
-// the exact profile binary, shadow home, and resume flags (`--conversation`,
-// `--resume`, `resume`, `--session`, etc.) are applied natively without double
-// shimming. For non-harness agents, it falls back to `resurrect.BuildPaneCommand`.
+// For harness-managed agents (when `harness` is available), it launches
+// `harness <agent> profile <profile|default>` with native plugin resume flags
+// directly under `__shim`. For standalone or non-harness agents, it launches
+// the plugin's resolved binary with native resume flags under `__shim`.
 func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOutcome, selfPath, harnessPath string) []string {
+	_, _ = cwd, title
+	reg := agent.DefaultRegistry()
+	resumeArgs := reg.ResumeArgs(agentName, sessionID)
+	appLabel := reg.CLIDisplayApp(agentName)
+	if appLabel == "" {
+		appLabel = agentName
+	}
+
 	var inner []string
-	if harnessPath != "" && agent.DefaultRegistry().IsHarnessManaged(agentName) {
-		prof := profile
+	if harnessPath != "" && reg.IsHarnessManaged(agentName) {
+		trimmedProfile := strings.TrimSpace(profile)
+		prof := trimmedProfile
 		if prof == "" {
 			prof = "default"
 		}
-		baseCmd := shellQuoteWord(harnessPath) + " " + shellQuoteWord(agentName) + " profile " + shellQuoteWord(prof)
-		encoded := base64.StdEncoding.EncodeToString([]byte(baseCmd))
-		zj := model.SpacesBinary()
-		inner = append(append([]string(nil), zj...), "__resume-wrap", encoded)
-		if sessionID != "" {
-			inner = append(inner, sessionID)
+		inner = []string{selfPath, "__shim"}
+		if trimmedProfile != "" {
+			inner = append(inner, "--profile", trimmedProfile)
 		}
+		inner = append(inner, appLabel, harnessPath, agentName, "profile", prof)
+		inner = append(inner, resumeArgs...)
 	} else {
-		inner = resurrect.BuildPaneCommand(resurrect.PaneSnapshot{
-			Agent:     agentName,
-			SessionID: sessionID,
-			Profile:   profile,
-			CWD:       cwd,
-			Title:     title,
-		}, resurrect.RestoreOptions{
-			SelfPath: selfPath,
-		})
+		bin := reg.BinaryName(agentName)
+		if bin == "" {
+			bin = agentName
+		}
+		inner = []string{selfPath, "__shim", appLabel, bin}
+		inner = append(inner, resumeArgs...)
 	}
 	return wrapOutcomeInShell(inner, priorOutcome, selfPath)
 }

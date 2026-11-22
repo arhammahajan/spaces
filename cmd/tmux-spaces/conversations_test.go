@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -26,36 +25,52 @@ func TestParseConversationsOptions(t *testing.T) {
 }
 
 func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
-	t.Setenv("SPACES_BIN", "/usr/local/bin/spaces")
-
-	// Harness-managed agent with explicit profile.
+	// Harness-managed agent with explicit profile uses native resume flags under __shim.
 	cmd := buildConversationOpenCommand("claude", "work", "sess-123", "/repo", "Fix retries", "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
 	joined := strings.Join(cmd, " ")
-	wantB64 := base64.StdEncoding.EncodeToString([]byte("/usr/local/bin/harness claude profile work"))
-	for _, want := range []string{"/bin/sh -c", "/usr/local/bin/spaces __resume-wrap", wantB64, "sess-123", "status clear", `exec "${SHELL:-/bin/sh}"`} {
+	for _, want := range []string{
+		"/bin/sh -c",
+		"/usr/local/bin/tmux-spaces __shim --profile work claude-code /usr/local/bin/harness claude profile work --resume sess-123",
+		"status clear",
+		`exec "${SHELL:-/bin/sh}"`,
+	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("harness cmd missing %q: %s", want, joined)
 		}
 	}
+	if strings.Contains(joined, "__resume-wrap") {
+		t.Errorf("harness cmd should not use __resume-wrap: %s", joined)
+	}
 
-	// Non-harness agent (omp) falls back to resurrect.BuildPaneCommand.
+	// Standalone fallback when harness is unavailable uses direct binary + native resume args.
+	cmdStandalone := buildConversationOpenCommand("claude", "", "sess-456", "/repo", "Fix retries", "/usr/local/bin/tmux-spaces", "")
+	joinedStandalone := strings.Join(cmdStandalone, " ")
+	if !strings.Contains(joinedStandalone, "/usr/local/bin/tmux-spaces __shim claude-code claude --resume sess-456") {
+		t.Errorf("standalone claude cmd = %s", joinedStandalone)
+	}
+
+	// Non-harness agent (omp) launches directly under __shim without __resume-wrap.
 	cmdOmp := buildConversationOpenCommand("omp", "", "omp-sess-7", "/repo", "Omp chat", "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
 	joinedOmp := strings.Join(cmdOmp, " ")
-	wantOmpB64 := base64.StdEncoding.EncodeToString([]byte("omp"))
-	for _, want := range []string{"/usr/local/bin/tmux-spaces __shim omp", "__resume-wrap", wantOmpB64, "omp-sess-7"} {
+	for _, want := range []string{"/usr/local/bin/tmux-spaces __shim omp omp", "status clear", `exec "${SHELL:-/bin/sh}"`} {
 		if !strings.Contains(joinedOmp, want) {
 			t.Errorf("omp fallback cmd missing %q: %s", want, joinedOmp)
 		}
 	}
+	if strings.Contains(joinedOmp, "__resume-wrap") {
+		t.Errorf("omp cmd should not use __resume-wrap: %s", joinedOmp)
+	}
 
-	// Non-harness agent (crush) falls back cleanly too.
+	// Non-harness agent (crush) launches directly under __shim without __resume-wrap.
 	cmdCrush := buildConversationOpenCommand("crush", "", "crush-9", "/repo", "Crush chat", "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
 	joinedCrush := strings.Join(cmdCrush, " ")
-	wantCrushB64 := base64.StdEncoding.EncodeToString([]byte("crush"))
-	for _, want := range []string{"/usr/local/bin/tmux-spaces __shim crush", "__resume-wrap", wantCrushB64, "crush-9"} {
+	for _, want := range []string{"/usr/local/bin/tmux-spaces __shim crush crush", "status clear", `exec "${SHELL:-/bin/sh}"`} {
 		if !strings.Contains(joinedCrush, want) {
 			t.Errorf("crush fallback cmd missing %q: %s", want, joinedCrush)
 		}
+	}
+	if strings.Contains(joinedCrush, "__resume-wrap") {
+		t.Errorf("crush cmd should not use __resume-wrap: %s", joinedCrush)
 	}
 }
 
@@ -166,8 +181,8 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 		t.Fatalf("expected 2 new-window calls, got %d", len(newWindows))
 	}
 	joined2 := strings.Join(newWindows[1], " ")
-	wantDefaultB64 := base64.StdEncoding.EncodeToString([]byte("/usr/local/bin/harness codex profile default"))
-	if !strings.Contains(joined2, "-t beta:") || !strings.Contains(joined2, "-n codex") || strings.Contains(joined2, "-c /missing/dir") || !strings.Contains(joined2, wantDefaultB64) || !strings.Contains(joined2, "conv-id-2") {
+	wantDefaultCmd := "/usr/local/bin/tmux-spaces __shim codex /usr/local/bin/harness codex profile default resume conv-id-2"
+	if !strings.Contains(joined2, "-t beta:") || !strings.Contains(joined2, "-n codex") || strings.Contains(joined2, "-c /missing/dir") || !strings.Contains(joined2, wantDefaultCmd) || strings.Contains(joined2, "__resume-wrap") {
 		t.Errorf("fallback new-window args = %v", newWindows[1])
 	}
 	if len(switchedTo) != 1 || switchedTo[0] != "beta" {
@@ -190,7 +205,8 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 		t.Fatalf("expected 3 new-window calls, got %d", len(newWindows))
 	}
 	joined3 := strings.Join(newWindows[2], " ")
-	if !strings.Contains(joined3, "-n codex") || strings.Contains(joined3, "-n default") || !strings.Contains(joined3, wantDefaultB64) {
+	wantExplicitDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex /usr/local/bin/harness codex profile default resume conv-id-3"
+	if !strings.Contains(joined3, "-n codex") || strings.Contains(joined3, "-n default") || !strings.Contains(joined3, wantExplicitDefaultCmd) || strings.Contains(joined3, "__resume-wrap") {
 		t.Errorf("default profile new-window args = %v", newWindows[2])
 	}
 }
