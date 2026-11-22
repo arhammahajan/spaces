@@ -41,11 +41,6 @@ type RestoreOptions struct {
 	SelfPath string
 	// Switch switches/attaches the client to the restored space when true.
 	Switch bool
-	// HarnessBinary is the optional path/name of the `harness` CLI used to
-	// launch profiled agents (defaults to "harness").
-	HarnessBinary string
-	// SpacesBinary is deprecated and unused; kept for backwards compatibility.
-	SpacesBinary func() []string
 	// ResolveSession resolves an unclaimed session/conversation ID for
 	// (agent, cwd, profile, title) while excluding already-claimed IDs.
 	// Returns (id, ok) where ok=false means resolution was unavailable.
@@ -116,12 +111,8 @@ func buildPaneCommand(p PaneSnapshot, opts RestoreOptions, skipResume bool) []st
 		if !skipResume && strings.TrimSpace(p.SessionID) != "" {
 			resumeArgs = agent.DefaultRegistry().ResumeArgs(p.Agent, p.SessionID)
 		}
-		harnessBin := opts.HarnessBinary
-		if harnessBin == "" {
-			harnessBin = "harness"
-		}
 
-		// Case 1: Harness launcher (e.g. `harness agy profile saucerf166`).
+		// Case 1: Harness launcher (e.g. `spaces agy profile saucerf166` or legacy `harness agy profile saucerf166`).
 		if len(p.FullCommand) > 0 && isHarnessLauncher(p.FullCommand) {
 			cmdWithResume := appendResumeArgs(p.FullCommand, p.Agent, p.SessionID, skipResume)
 			cmd := []string{self, "__shim"}
@@ -132,10 +123,14 @@ func buildPaneCommand(p PaneSnapshot, opts RestoreOptions, skipResume bool) []st
 			return append(cmd, cmdWithResume...)
 		}
 
-		// Case 2: Profiled agent pane.
+		// Case 2: Profiled agent pane (in-process __shim launch).
 		if p.Profile != "" {
-			cmd := []string{self, "__shim", "--profile", p.Profile, p.Agent, harnessBin, p.Agent, "profile", p.Profile}
-			return append(cmd, resumeArgs...)
+			cmd := []string{self, "__shim", "--profile", p.Profile, p.Agent}
+			if len(resumeArgs) > 0 {
+				cmd = append(cmd, "--")
+				cmd = append(cmd, resumeArgs...)
+			}
+			return cmd
 		}
 
 		// Case 3: Direct agent invocation captured in FullCommand.
@@ -167,7 +162,15 @@ func isHarnessLauncher(argv []string) bool {
 	if len(argv) < 2 {
 		return false
 	}
-	return filepath.Base(argv[0]) == "harness" && argv[1] != "spaces"
+	base := filepath.Base(argv[0])
+	switch base {
+	case "harness":
+		return argv[1] != "spaces"
+	case "spaces", "tmux-spaces":
+		return argv[1] == "profile" || argv[1] == "launch" || CanonicalAgent(argv[1]) != ""
+	default:
+		return false
+	}
 }
 
 // resolveRestoreCWD resolves a pane or space CWD for resurrection when the

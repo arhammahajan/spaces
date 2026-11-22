@@ -259,11 +259,14 @@ func TestFetchHarnesses(t *testing.T) {
 			}
 		]
 	}`
-	if err := os.WriteFile(filepath.Join(mrDir, "harnesses.json"), []byte(payload), 0o600); err != nil {
+	harnessesFile := filepath.Join(mrDir, "harnesses.json")
+	if err := os.WriteFile(harnessesFile, []byte(payload), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
-	t.Setenv("TMUX_SPACES_HARNESSES_FILE", "")
+	// Explicit override reads the JSON file and filters non-launchable entries.
+	t.Setenv("TMUX_SPACES_HARNESSES_FILE", harnessesFile)
+	t.Setenv("SPACES_HARNESSES_PATH", "")
 	t.Setenv("HOME", home)
 
 	file, err := FetchHarnesses(context.Background())
@@ -287,18 +290,25 @@ func TestFetchHarnesses(t *testing.T) {
 		t.Errorf("agent[2] = %+v", file.Agents[2])
 	}
 
-	// Shadow profile HOME under ~/.harness/profiles/.../home falls back to real ~/.harness/harnesses.json.
+	// Without an env override, FetchHarnesses ignores stale ~/.harness/harnesses.json
+	// and always builds directly in-process (including from a shadow HOME).
 	shadowHome := filepath.Join(mrDir, "profiles", "antigravity", "work", "home")
 	if err := os.MkdirAll(shadowHome, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("TMUX_SPACES_HARNESSES_FILE", "")
 	t.Setenv("HOME", shadowHome)
 	file, err = FetchHarnesses(context.Background())
 	if err != nil {
-		t.Fatalf("shadow home fallback failed: %v", err)
+		t.Fatalf("in-process shadow home FetchHarnesses failed: %v", err)
 	}
-	if len(file.Agents) != 3 {
-		t.Fatalf("shadow home agents = %+v", file.Agents)
+	if file.Version != 1 {
+		t.Fatalf("in-process version = %d, want 1", file.Version)
+	}
+	for _, a := range file.Agents {
+		if a.Name == "antigravity-native" {
+			t.Fatalf("stale harnesses.json should not be preferred over in-process build: %+v", file.Agents)
+		}
 	}
 
 	// Explicit override and legacy snake_case schema compatibility.

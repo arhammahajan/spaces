@@ -421,7 +421,6 @@ func TestListEntryAgent(t *testing.T) {
 	paths := testPaths(t)
 	s, _ := Open(paths)
 	mustCreate(t, s, "mine", Profile{Agent: "codex", Enabled: true, Router: true}, CreateOptions{NoSeed: true})
-	writeNativeCredential(t, paths, "work", validCred())
 
 	entries, err := ListAll(paths)
 	if err != nil {
@@ -433,9 +432,6 @@ func TestListEntryAgent(t *testing.T) {
 	}
 	if byName["mine"].Agent != "codex" {
 		t.Fatalf("store agent = %q, want codex", byName["mine"].Agent)
-	}
-	if byName["work"].Agent != "antigravity" {
-		t.Fatalf("native agent = %q, want antigravity", byName["work"].Agent)
 	}
 	// JSON carries agent
 	raw, _ := json.Marshal(entries)

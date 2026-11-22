@@ -4,9 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/arhammahajan/spaces/internal/agent"
+	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
+	"github.com/arhammahajan/spaces/internal/harness/profiles"
 )
 
 // Normalize canonicalizes an executable or command name to a known agent,
@@ -152,17 +153,36 @@ func DetectAgent(argv []string) string {
 			return ProfileAgent(argv[2])
 		}
 		if len(argv) >= 3 && argv[1] == "__shim" {
-			hold := argv[2] == "--hold"
 			offset := 2
-			if hold {
-				offset = 3
+			for offset < len(argv) {
+				tok := argv[offset]
+				if tok == "--hold" {
+					offset++
+					continue
+				}
+				if tok == "--profile" && offset+1 < len(argv) {
+					offset += 2
+					continue
+				}
+				if strings.HasPrefix(tok, "--profile=") {
+					offset++
+					continue
+				}
+				if tok == "--" {
+					offset++
+					break
+				}
+				break
 			}
 			if len(argv) > offset+1 {
-				return InferAgent(argv[offset+1])
+				if a := InferAgent(argv[offset+1]); a != "" {
+					return a
+				}
 			}
 			if len(argv) > offset {
 				return InferAgent(argv[offset])
 			}
+			return ""
 		}
 		if len(argv) >= 3 && argv[1] == "profile" && !strings.HasPrefix(argv[2], "-") {
 			if a, _, ok := strings.Cut(argv[2], "/"); ok {
@@ -216,22 +236,17 @@ func DetectAgent(argv []string) string {
 	return ""
 }
 
-// ProfileAgent resolves a harness profile instance to its agent.
+// ProfileAgent resolves a harness profile instance to its agent in-process.
 func ProfileAgent(instance string) string {
-	harness, err := LookPathFunc("harness")
-	if err != nil || harness == "" {
+	instance = strings.TrimSpace(instance)
+	if instance == "" {
 		return ""
 	}
-	stdout, code, err := RunBinFunc(harness,
-		[]string{"profile", "--describe", instance}, homeDir(), 8*time.Second)
-	if err != nil || code != 0 {
+	res, err := profiles.Resolve(instance, harnessenv.DefaultPaths())
+	if err != nil {
 		return ""
 	}
-	described, err := shlexSplit(strings.TrimSpace(stdout))
-	if err != nil || len(described) == 0 {
-		return ""
-	}
-	return DetectAgent(described)
+	return Normalize(res.Profile.Agent)
 }
 
 // processAncestorCommands returns ancestor command lines, nearest first.
@@ -379,7 +394,7 @@ func DiscoverProfile(agentName, cwd, sessionID string) string {
 			}
 		}
 	}
-	profilesRoot := filepath.Join(home, ".harness", "profiles", "antigravity")
+	profilesRoot := filepath.Join(harnessenv.RealHomeDir(home), ".harness", "profiles", "antigravity")
 	entries, err := os.ReadDir(profilesRoot)
 	if err != nil {
 		return ""

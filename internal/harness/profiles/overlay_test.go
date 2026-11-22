@@ -384,44 +384,6 @@ func TestAntigravityLaunchDetachesLegacyCredentialOverlay(t *testing.T) {
 	}
 }
 
-func TestNativeAntigravityImportsIntoPrivateHomeOnce(t *testing.T) {
-	paths := testPaths(t)
-	credential := validCred()
-	writeNativeCredential(t, paths, "work", credential)
-	res, err := Resolve("antigravity/work", paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeForLaunch(res, paths); err != nil {
-		t.Fatal(err)
-	}
-	spec := LaunchSpecFromPaths(res, paths)
-	token := filepath.Join(spec.ShadowHome, ".gemini", "antigravity-cli", "antigravity-oauth-token")
-	got, err := os.ReadFile(token)
-	if err != nil || string(got) != credential {
-		t.Fatalf("private credential import failed: %v", err)
-	}
-	stat, err := os.Stat(token)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stat.Mode().Perm() != 0o600 {
-		t.Errorf("credential file mode = %o, want 0600", stat.Mode().Perm())
-	}
-	if err := os.Remove(token); err != nil {
-		t.Fatal(err)
-	}
-	if err := MaterializeForLaunch(res, paths); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(token); !os.IsNotExist(err) {
-		t.Errorf("an old credential was restored after logout: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(NativeCredentialDir(paths), "work.json")); err != nil {
-		t.Errorf("original export was modified: %v", err)
-	}
-}
-
 func TestAntigravitySharedSkillsAcrossProfiles(t *testing.T) {
 	t.Run("store profile with overlay off links resolved shared skills", func(t *testing.T) {
 		paths := testPaths(t)
@@ -518,20 +480,6 @@ func TestAntigravitySharedSkillsAcrossProfiles(t *testing.T) {
 		routerSkills := filepath.Join(paths.Home, ".harness", "antigravity-router-cli", ".gemini", "config", "skills")
 		if got := readLinkTarget(t, routerSkills); got != dotsSkills {
 			t.Fatalf("router default skills link = %q, want %q", got, dotsSkills)
-		}
-
-		// Native Antigravity imports credential and links skills.
-		writeNativeCredential(t, paths, "acct", validCred())
-		res, err := Resolve("antigravity/acct", paths)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := MaterializeForLaunch(res, paths); err != nil {
-			t.Fatal(err)
-		}
-		nativeSkills := filepath.Join(res.Profile.ShadowHome, ".gemini", "config", "skills")
-		if got := readLinkTarget(t, nativeSkills); got != dotsSkills {
-			t.Fatalf("native skills link = %q, want %q", got, dotsSkills)
 		}
 	})
 

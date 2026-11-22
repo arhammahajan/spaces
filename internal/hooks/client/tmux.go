@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	"github.com/arhammahajan/spaces/internal/model"
 )
 
@@ -24,18 +25,6 @@ func parseLaunchCmdJSON(raw string) []string {
 		return nil
 	}
 	return cmd
-}
-
-func extractProfileFromLaunchCmd(cmd []string) string {
-	for i := 1; i+1 < len(cmd); i++ {
-		if cmd[i] == "profile" {
-			prof := strings.TrimSpace(cmd[i+1])
-			if prof != "" && !strings.HasPrefix(prof, "-") {
-				return prof
-			}
-		}
-	}
-	return ""
 }
 
 // TmuxBinary returns the tmux binary path ($TMUX_BIN or "tmux").
@@ -136,8 +125,6 @@ func emitTmuxProgramStatus(state, app, msg, kind string) {
 	set("@spaces_app", app)
 	if prof := strings.TrimSpace(os.Getenv("HARNESS_PROFILE")); prof != "" {
 		set("@spaces_profile", prof)
-	} else {
-		unset("@spaces_profile")
 	}
 	if kind != "" {
 		set("@spaces_kind", kind)
@@ -194,8 +181,8 @@ func recordTmuxResumeTarget(agent, sessionID string) {
 // recordPaneLaunchCmd reads @spaces_launch_cmd, @spaces_profile, session name,
 // and pane CWD from the tmux pane and records the invoking command and/or
 // profile in the conversation overlay as a best-effort non-fatal call.
-func recordPaneLaunchCmd(pane, agent, sessionID string) {
-	if TmuxFunc == nil || RecordConversationLaunchFunc == nil || pane == "" || agent == "" || sessionID == "" {
+func recordPaneLaunchCmd(pane, agentName, sessionID string) {
+	if TmuxFunc == nil || RecordConversationLaunchFunc == nil || pane == "" || agentName == "" || sessionID == "" {
 		return
 	}
 	stdout, code, err := TmuxFunc([]string{
@@ -223,7 +210,7 @@ func recordPaneLaunchCmd(pane, agent, sessionID string) {
 		profile = strings.TrimSpace(os.Getenv("HARNESS_PROFILE"))
 	}
 	if profile == "" && len(launchCmd) > 0 {
-		profile = extractProfileFromLaunchCmd(launchCmd)
+		profile = agent.HarnessProfileFromArgv(launchCmd)
 	}
 	if len(launchCmd) == 0 && profile == "" {
 		return
@@ -233,7 +220,7 @@ func recordPaneLaunchCmd(pane, agent, sessionID string) {
 	}
 	ctx, cancel := contextWithTimeout(2 * time.Second)
 	defer cancel()
-	_ = RecordConversationLaunchFunc(ctx, agent, sessionID, profile, cwd, "", launchCmd, space, tmuxNowMs())
+	_ = RecordConversationLaunchFunc(ctx, agentName, sessionID, profile, cwd, "", launchCmd, space, tmuxNowMs())
 }
 
 // SetTmuxPaneOption sets a per-pane tmux option on paneRef (or $TMUX_PANE when empty).

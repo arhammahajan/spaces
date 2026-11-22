@@ -290,3 +290,32 @@ func TestShimSetsLaunchCmdAndStripsResumeArgs(t *testing.T) {
 		})
 	}
 }
+
+func TestShimDirectInProcessProfileLaunch(t *testing.T) {
+	fc := &FakeClient{Up: true}
+	env := shimEnv(fc, 0)
+	var gotAgent, gotProfile string
+	var gotArgs []string
+	env.RunHarnessChild = func(agentName, profile string, args []string) int {
+		gotAgent, gotProfile, gotArgs = agentName, profile, append([]string(nil), args...)
+		return 0
+	}
+	if code := Run([]string{"__shim", "--profile", "work", "claude-code", "--", "--model", "opus", "--resume", "old-1"}, env); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if gotAgent != "claude-code" || gotProfile != "work" || strings.Join(gotArgs, " ") != "--model opus --resume old-1" {
+		t.Fatalf("RunHarnessChild = (%q, %q, %v)", gotAgent, gotProfile, gotArgs)
+	}
+	raw, ok := findSet(fc.SetCalls, "@spaces_launch_cmd")
+	if !ok {
+		t.Fatalf("expected @spaces_launch_cmd to be set")
+	}
+	var launchCmd []string
+	if err := json.Unmarshal([]byte(raw), &launchCmd); err != nil {
+		t.Fatalf("unmarshal @spaces_launch_cmd: %v", err)
+	}
+	wantLaunch := []string{"tmux-spaces", "claude", "profile", "work", "--model", "opus"}
+	if !reflect.DeepEqual(launchCmd, wantLaunch) {
+		t.Errorf("@spaces_launch_cmd = %v, want %v", launchCmd, wantLaunch)
+	}
+}

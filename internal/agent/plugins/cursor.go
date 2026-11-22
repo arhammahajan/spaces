@@ -20,7 +20,6 @@ func NewCursor() agent.Plugin {
 			Binary:                  "cursor-agent",
 			ResumeFlag:              "--resume",
 			ScreenManifestID:        "cursor",
-			HarnessManaged:          false,
 			OSCAuthority:            false,
 			RecognizesVersionBanner: true,
 			TitlePrefixes:           []string{"Cursor - ", "Cursor: ", "Cursor Agent - "},

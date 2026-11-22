@@ -1,12 +1,9 @@
-package spacelaunch
+package agents
 
 // Launch-time access-level selection. Before launching a harness that has
 // known sandbox/approval flags, offer the supported levels on the terminal.
 // T3 Code invocations (detected via HARNESS_AGENT, the variable its provider
 // instances set) are never offered a choice: T3 passes its own flags.
-//
-// Moved here from cmd/harness so the profile shim (which resolves and
-// launches outside the main package) shares the exact offering behavior.
 
 import (
 	"bufio"
@@ -17,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/arhammahajan/spaces/internal/harness/agents"
 	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 )
 
@@ -63,12 +59,12 @@ func PreselectAccessLevel(spec *harnessenv.LaunchSpec) error {
 		// T3 passes its own flags; leave the invocation untouched.
 		return nil
 	}
-	levels := agents.AccessLevels(spec.Agent)
+	levels := AccessLevels(spec.Agent)
 	if len(levels) == 0 {
 		return nil
 	}
 	if id := strings.TrimSpace(os.Getenv("HARNESS_ACCESS")); id != "" {
-		level, ok := agents.FindAccessLevel(spec.Agent, id)
+		level, ok := FindAccessLevel(spec.Agent, id)
 		if !ok {
 			return fmt.Errorf("unknown access level %q for %s (available: %s)",
 				id, spec.Agent, levelIDs(levels))
@@ -78,7 +74,7 @@ func PreselectAccessLevel(spec *harnessenv.LaunchSpec) error {
 	return nil
 }
 
-// promptAccessLevelForLaunch offers the interactive picker. It is a no-op
+// PromptAccessLevelForLaunch offers the interactive picker. It is a no-op
 // unless the agent has levels and stdin is a terminal; HARNESS_AGENT (T3)
 // invocations never reach it, and an explicit HARNESS_ACCESS preselect has
 // already decided the level.
@@ -89,7 +85,7 @@ func PromptAccessLevelForLaunch(spec *harnessenv.LaunchSpec) error {
 	if strings.TrimSpace(os.Getenv("HARNESS_ACCESS")) != "" {
 		return nil
 	}
-	levels := agents.AccessLevels(spec.Agent)
+	levels := AccessLevels(spec.Agent)
 	if len(levels) == 0 || !stdinIsTerminal() {
 		return nil
 	}
@@ -103,7 +99,7 @@ func PromptAccessLevelForLaunch(spec *harnessenv.LaunchSpec) error {
 
 // layerAccessLevel prepends the level's flags ahead of every other
 // argument so they land before any subcommand the caller passes.
-func layerAccessLevel(spec *harnessenv.LaunchSpec, level agents.AccessLevel) {
+func layerAccessLevel(spec *harnessenv.LaunchSpec, level AccessLevel) {
 	if len(level.Args) > 0 {
 		spec.PrependArgs = append(append([]string{}, level.Args...), spec.PrependArgs...)
 	}
@@ -120,7 +116,7 @@ func layerAccessLevel(spec *harnessenv.LaunchSpec, level agents.AccessLevel) {
 // promptAccessLevel renders the numbered option list and reads the choice
 // from accessIn. Enter selects the default level; "q" cancels; unknown
 // input re-prompts.
-func promptAccessLevel(agent string, levels []agents.AccessLevel) (agents.AccessLevel, bool) {
+func promptAccessLevel(agent string, levels []AccessLevel) (AccessLevel, bool) {
 	defaultIndex := 0
 	for i, level := range levels {
 		if level.ID == "default" {
@@ -143,13 +139,13 @@ func promptAccessLevel(agent string, levels []agents.AccessLevel) (agents.Access
 		input := strings.TrimSpace(line)
 		if input == "" {
 			if readErr != nil && line == "" {
-				return agents.AccessLevel{}, false // EOF: cancel instead of guessing
+				return AccessLevel{}, false // EOF: cancel instead of guessing
 			}
 			return levels[defaultIndex], true
 		}
 		switch strings.ToLower(input) {
 		case "q", "quit", "cancel":
-			return agents.AccessLevel{}, false
+			return AccessLevel{}, false
 		}
 		if n, err := strconv.Atoi(input); err == nil && n >= 1 && n <= len(levels) {
 			return levels[n-1], true
@@ -163,7 +159,7 @@ func promptAccessLevel(agent string, levels []agents.AccessLevel) (agents.Access
 	}
 }
 
-func levelIDs(levels []agents.AccessLevel) string {
+func levelIDs(levels []AccessLevel) string {
 	ids := make([]string, len(levels))
 	for i, level := range levels {
 		ids[i] = level.ID

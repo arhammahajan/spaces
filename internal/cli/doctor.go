@@ -54,17 +54,6 @@ func cmdDoctor(args []string, env Env) int {
 		checks = append(checks, doctorCheck{"session", true, "outside tmux"})
 	}
 
-	if _, serr := env.LookPath("spaces"); serr != nil {
-		checks = append(checks, doctorCheck{"spaces", false, "not found on PATH"})
-	} else {
-		checks = append(checks, doctorCheck{"spaces", true, "available"})
-	}
-	if _, herr := env.LookPath("harness"); herr != nil {
-		checks = append(checks, doctorCheck{"harness", false, "not found on PATH"})
-	} else {
-		checks = append(checks, doctorCheck{"harness", true, "available"})
-	}
-
 	if env.HookHealth == nil {
 		checks = append(checks, doctorCheck{"hooks", true, "unknown (hook check not wired)"})
 	} else if detail, herr := env.HookHealth(); herr != nil {
@@ -77,8 +66,7 @@ func cmdDoctor(args []string, env Env) int {
 
 	ok := true
 	for _, c := range checks {
-		// The session-context row is informational; missing zj/harness
-		// helpers only warn. tmux + server gate the exit code.
+		// The session-context row is informational; tmux + server gate the exit code.
 		if (c.Name == "tmux" || c.Name == "server") && !c.OK {
 			ok = false
 		}

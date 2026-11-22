@@ -53,6 +53,7 @@ func buildEnv(client *tmux.Client) cli.Env {
 	adapter := &tmuxCLIAdapter{client: client, backend: backend}
 
 	env := cli.DefaultEnv(adapter)
+	env.RunHarnessChild = runHarnessChild
 	env.LoadSpaces = func() (tmux.ServerSnapshot, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), defaultTmuxTimeout)
 		defer cancel()
@@ -1043,7 +1044,7 @@ func (b *tuiBackend) LaunchAgent(ctx context.Context, session, cwd, agentName, p
 		if profile != "default" {
 			label = profile
 		}
-		cmd = []string{b.selfPath, "__shim", "--profile", profile, agentName, b.selfPath, agentName, "profile", profile}
+		cmd = []string{b.selfPath, "__shim", "--profile", profile, agentName}
 	} else {
 		bin := agent.DefaultRegistry().BinaryName(agentName)
 		cmd = []string{b.selfPath, "__shim", agentName, bin}
@@ -1123,7 +1124,7 @@ func (b *tuiBackend) OpenOutcome(ctx context.Context, outcome model.OutcomeEntry
 
 	profile := strings.TrimSpace(outcome.Profile)
 	sessionID := strings.TrimSpace(outcome.SessionID)
-	cmd := buildOutcomeOpenCommand(agent, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), nil, b.selfPath, b.selfPath)
+	cmd := buildOutcomeOpenCommand(agent, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), nil, b.selfPath)
 	if len(cmd) == 0 {
 		return fmt.Errorf("could not build resume command for %s", agent)
 	}
@@ -1233,7 +1234,7 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 	sessionID := conv.ResumeSessionID()
 	launcherPath := b.selfPath
 
-	cmd := buildConversationOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(conv.Title), conv.LaunchCmd, b.selfPath, launcherPath)
+	cmd := buildConversationOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(conv.Title), conv.LaunchCmd, b.selfPath)
 	if len(cmd) == 0 {
 		return fmt.Errorf("could not build resume command for %s", agentName)
 	}
@@ -1246,7 +1247,7 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 			}
 			conv.LaunchCmd = []string{launcherPath, agentName, "profile", prof}
 		} else if profile != "" {
-			if launchProf := extractProfileFromLaunchCmd(conv.LaunchCmd); launchProf != "" && launchProf != profile {
+			if launchProf := agent.HarnessProfileFromArgv(conv.LaunchCmd); launchProf != "" && launchProf != profile {
 				conv.LaunchCmd = []string{launcherPath, agentName, "profile", profile}
 			}
 		}
@@ -1273,8 +1274,8 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 	return nil
 }
 
-func buildConversationOpenCommand(agent, profile, sessionID, cwd, title string, launchCmd []string, selfPath, harnessPath string) []string {
-	return buildOutcomeOpenCommand(agent, profile, sessionID, cwd, title, "", launchCmd, selfPath, harnessPath)
+func buildConversationOpenCommand(agent, profile, sessionID, cwd, title string, launchCmd []string, selfPath string) []string {
+	return buildOutcomeOpenCommand(agent, profile, sessionID, cwd, title, "", launchCmd, selfPath)
 }
 
 var _ tui.SharedBackend = (*tuiBackend)(nil)
@@ -1334,11 +1335,11 @@ func (b *tuiBackend) OpenSharedFile(ctx context.Context, path string) error {
 // then clears pane status and drops into an interactive shell on exit so
 // closing the harness does not close the tmux tab.
 //
-// For harness-managed agents (when `harness` is available), it launches
-// `harness <agent> profile <profile|default>` with native plugin resume flags
-// directly under `__shim`. For standalone or non-harness agents, it launches
-// the plugin's resolved binary with native resume flags under `__shim`.
-func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOutcome string, launchCmd []string, selfPath, harnessPath string) []string {
+// For harness-managed agents, it launches directly in-process via
+// `tmux-spaces __shim --profile <profile|default> <app> [-- <resumeArgs...>]`
+// (or replays a stored custom LaunchCmd when present). For non-harness agents,
+// it launches the plugin's resolved binary with native resume flags under `__shim`.
+func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOutcome string, launchCmd []string, selfPath string) []string {
 	_, _ = cwd, title
 	reg := agent.DefaultRegistry()
 	resumeArgs := reg.ResumeArgs(agentName, sessionID)
@@ -1348,18 +1349,18 @@ func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOut
 	}
 
 	var inner []string
-	if harnessPath != "" && reg.IsHarnessManaged(agentName) {
+	if reg.IsHarnessManaged(agentName) {
 		trimmedProfile := strings.TrimSpace(profile)
 		useLaunchCmd := len(launchCmd) > 0
 		if useLaunchCmd && trimmedProfile != "" {
-			if launchProf := extractProfileFromLaunchCmd(launchCmd); launchProf != "" && launchProf != trimmedProfile {
+			if launchProf := agent.HarnessProfileFromArgv(launchCmd); launchProf != "" && launchProf != trimmedProfile {
 				useLaunchCmd = false
 			}
 		}
 		if useLaunchCmd {
 			baseCmd := cli.StripResumeArgs(agentName, launchCmd)
 			if trimmedProfile == "" {
-				trimmedProfile = extractProfileFromLaunchCmd(baseCmd)
+				trimmedProfile = agent.HarnessProfileFromArgv(baseCmd)
 			}
 			inner = []string{selfPath, "__shim"}
 			if trimmedProfile != "" {
@@ -1373,12 +1374,11 @@ func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOut
 			if prof == "" {
 				prof = "default"
 			}
-			inner = []string{selfPath, "__shim"}
-			if trimmedProfile != "" {
-				inner = append(inner, "--profile", trimmedProfile)
+			inner = []string{selfPath, "__shim", "--profile", prof, appLabel}
+			if len(resumeArgs) > 0 {
+				inner = append(inner, "--")
+				inner = append(inner, resumeArgs...)
 			}
-			inner = append(inner, appLabel, harnessPath, agentName, "profile", prof)
-			inner = append(inner, resumeArgs...)
 		}
 	} else {
 		bin := reg.BinaryName(agentName)
@@ -1389,18 +1389,6 @@ func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOut
 		inner = append(inner, resumeArgs...)
 	}
 	return wrapOutcomeInShell(inner, priorOutcome, selfPath)
-}
-
-func extractProfileFromLaunchCmd(cmd []string) string {
-	for i := 1; i+1 < len(cmd); i++ {
-		if cmd[i] == "profile" {
-			prof := strings.TrimSpace(cmd[i+1])
-			if prof != "" && !strings.HasPrefix(prof, "-") {
-				return prof
-			}
-		}
-	}
-	return ""
 }
 
 func wrapOutcomeInShell(cmd []string, priorOutcome, selfPath string) []string {

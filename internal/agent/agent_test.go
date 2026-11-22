@@ -176,6 +176,10 @@ func TestHarnessProfileFromArgv(t *testing.T) {
 		{[]string{"harness", "profile", "work"}, "work"},
 		{[]string{"/usr/bin/harness", "antigravity", "profile", "personal"}, "personal"},
 		{[]string{"harness", "spaces", "__shim-profile", "antigravity/pro"}, "pro"},
+		{[]string{"spaces", "antigravity", "profile", "personal"}, "personal"},
+		{[]string{"/usr/local/bin/spaces", "profile", "work"}, "work"},
+		{[]string{"tmux-spaces", "__shim", "--profile", "pratham", "antigravity"}, "pratham"},
+		{[]string{"tmux-spaces", "__shim", "--profile=pratham", "antigravity"}, "pratham"},
 		{[]string{"claude", "--resume", "abc"}, ""},
 	}
 	for _, tc := range cases {

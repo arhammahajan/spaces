@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	harnessagents "github.com/arhammahajan/spaces/internal/harness/agents"
 	"github.com/arhammahajan/spaces/internal/screen"
 )
 
@@ -251,7 +252,11 @@ func (l BaseLauncher) BinaryName() string {
 }
 
 func (l BaseLauncher) IsHarnessManaged() bool {
-	return l.Spec.HarnessManaged
+	if l.Spec.HarnessManaged {
+		return true
+	}
+	_, ok := harnessagents.Normalize(l.Spec.ID)
+	return ok
 }
 
 func (l BaseLauncher) ResumeArgs(sessionID string) []string {
@@ -364,22 +369,34 @@ func ExtractSessionIDFromArgs(argv []string, positionalResume bool) string {
 	return ""
 }
 
-// HarnessProfileFromArgv extracts the profile name from a `harness` launcher
-// command line (e.g. `harness profile work`, `harness antigravity profile work`,
-// or `harness spaces __shim-profile antigravity/work`).
+// HarnessProfileFromArgv extracts the profile name from a `spaces`,
+// `tmux-spaces`, or legacy `harness` launcher command line (e.g.
+// `spaces profile work`, `spaces antigravity profile work`,
+// `tmux-spaces __shim --profile work claude`, or
+// `harness spaces __shim-profile antigravity/work`).
 func HarnessProfileFromArgv(argv []string) string {
 	if len(argv) < 2 {
 		return ""
 	}
 	base := strings.ToLower(filepath.Base(argv[0]))
-	if base != "harness" {
+	if base != "harness" && base != "spaces" && base != "tmux-spaces" {
 		return ""
 	}
-	for i := 1; i+1 < len(argv); i++ {
-		if argv[i] == "profile" {
-			return strings.TrimSpace(argv[i+1])
+	for i := 1; i < len(argv); i++ {
+		tok := argv[i]
+		if (tok == "profile" || tok == "--profile") && i+1 < len(argv) {
+			prof := strings.TrimSpace(argv[i+1])
+			if prof != "" && !strings.HasPrefix(prof, "-") {
+				return prof
+			}
 		}
-		if argv[i] == "__shim-profile" {
+		if strings.HasPrefix(tok, "--profile=") {
+			prof := strings.TrimSpace(strings.TrimPrefix(tok, "--profile="))
+			if prof != "" {
+				return prof
+			}
+		}
+		if tok == "__shim-profile" && i+1 < len(argv) {
 			if _, prof, ok := strings.Cut(argv[i+1], "/"); ok {
 				return strings.TrimSpace(prof)
 			}

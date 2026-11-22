@@ -7,19 +7,18 @@ import (
 	"github.com/arhammahajan/spaces/internal/screen"
 )
 
-// NewKimi returns the coding-agent plugin for Kimi CLI / Kimi Code.
+// NewKimi returns the coding-agent plugin for Kimi Code.
 func NewKimi() agent.Plugin {
 	return &agent.BasePlugin{
 		PluginSpec: agent.Spec{
 			ID:                      "kimi",
-			Aliases:                 []string{"kimi-cli", "kimi-code", "kimi code"},
+			Aliases:                 []string{"kimi-code", "kimi code"},
 			DisplayApp:              "kimi",
 			CLIDisplayApp:           "kimi",
 			ConversationID:          "kimi",
 			ShortName:               "kimi",
 			ResumeFlag:              "--session",
 			ScreenManifestID:        "kimi",
-			HarnessManaged:          true,
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
 			TitlePrefixes:           []string{"Kimi - ", "Kimi: ", "Kimi Code - "},
@@ -30,10 +29,30 @@ func NewKimi() agent.Plugin {
 			BoilerplateTitles: []string{"kimi", "kimi cli", "kimi code"},
 		},
 		MCPTargets: []agent.MCPConfigTarget{
-			{HarnessLabel: "kimi-cli", RelPath: ".kimi/mcp.json"},
-			{HarnessLabel: "kimi-cli", RelPath: ".kimi/config.toml"},
 			{HarnessLabel: "kimi-code", RelPath: ".kimi-code/mcp.json"},
 			{HarnessLabel: "kimi-code", RelPath: ".kimi-code/config.toml"},
+		},
+		CustomTitleExtractor: agent.TitleExtractorFunc(extractKimiTitle),
+	}
+}
+
+// NewKimiCLI returns the coding-agent plugin for Kimi CLI.
+func NewKimiCLI() agent.Plugin {
+	return &agent.BasePlugin{
+		PluginSpec: agent.Spec{
+			ID:                      "kimi-cli",
+			DisplayApp:              "kimi-cli",
+			CLIDisplayApp:           "kimi-cli",
+			ConversationID:          "kimi",
+			ShortName:               "kimi",
+			ResumeFlag:              "--session",
+			ScreenManifestID:        "kimi",
+			OSCAuthority:            true,
+			RecognizesVersionBanner: true,
+		},
+		MCPTargets: []agent.MCPConfigTarget{
+			{HarnessLabel: "kimi-cli", RelPath: ".kimi/mcp.json"},
+			{HarnessLabel: "kimi-cli", RelPath: ".kimi/config.toml"},
 		},
 		CustomTitleExtractor: agent.TitleExtractorFunc(extractKimiTitle),
 	}

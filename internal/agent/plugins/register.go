@@ -21,6 +21,7 @@ func All() []agent.Plugin {
 		NewDeepSeek(),
 		NewKilo(),
 		NewKimi(),
+		NewKimiCLI(),
 		NewMuse(),
 		NewOpenCode(),
 	}

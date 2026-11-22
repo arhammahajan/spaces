@@ -148,7 +148,7 @@ func dotsAgentDir(agent string) string {
 	case "kimi":
 		return "kimi-code"
 	default:
-		return mapWantAgent(agent)
+		return agent
 	}
 }
 
@@ -198,7 +198,7 @@ func ProfilesDir(paths harnessenv.Paths) string {
 // each agent's "default" profile):
 // $HOME/.harness/profiles/<agent>/<name>/profile.json.
 func ProfileFilePath(paths harnessenv.Paths, agent, name string) string {
-	return filepath.Join(ProfilesDir(paths), mapWantAgent(agent), name, "profile.json")
+	return filepath.Join(ProfilesDir(paths), agent, name, "profile.json")
 }
 
 // StorePath returns the legacy/global store file location for paths
@@ -309,15 +309,13 @@ func Open(paths harnessenv.Paths) (*Store, error) {
 			if err := json.Unmarshal(data, &p); err != nil {
 				return nil, fmt.Errorf("profiles: parse %s: %w", pFile, err)
 			}
-			// The directory identifies the owning agent. Keep a profile-only
-			// driver name when it belongs to that same agent.
-			if p.Agent == "" || mapWantAgent(p.Agent) != mapWantAgent(agentName) {
+			if p.Agent == "" || p.Agent != agentName {
 				p.Agent = agentName
 			}
 			p.Env = nonNilMap(p.Env)
 			p.PrependArgs = nonNilSlice(p.PrependArgs)
 			if profName == DefaultProfileName {
-				s.defaults[mapWantAgent(p.Agent)] = p
+				s.defaults[p.Agent] = p
 			} else {
 				s.profiles[newProfileKey(p.Agent, profName)] = p
 			}
@@ -332,7 +330,7 @@ type profileKey struct {
 }
 
 func newProfileKey(agent, name string) profileKey {
-	return profileKey{agent: mapWantAgent(agent), name: name}
+	return profileKey{agent: agent, name: name}
 }
 
 func (key profileKey) String() string {
@@ -366,7 +364,7 @@ func ambiguousProfile(name string, keys []profileKey) error {
 }
 
 func (s *Store) selectKey(ref string) (profileKey, error) {
-	keys := s.profileCandidates(ref)
+	keys := s.matchingKeys(ref)
 	switch len(keys) {
 	case 0:
 		return profileKey{}, fmt.Errorf("unknown profile: %s", ref)
@@ -561,30 +559,28 @@ func builtinDefaultProfile(agent string) Profile {
 // GetDefault returns the effective default profile for canonical agent and
 // reports whether it has a stored override.
 func (s *Store) GetDefault(agent string) (Profile, bool) {
-	want := mapWantAgent(agent)
-	if p, ok := s.defaults[want]; ok {
-		p.Agent = want
+	if p, ok := s.defaults[agent]; ok {
+		p.Agent = agent
 		p.Env = copyMap(nonNilMap(p.Env))
 		p.PrependArgs = copySlice(nonNilSlice(p.PrependArgs))
 		return p, true
 	}
-	return builtinDefaultProfile(want), false
+	return builtinDefaultProfile(agent), false
 }
 
 // EditDefault applies a partial update to an agent's built-in "default"
 // profile and persists it in its per-agent profile file.
 func (s *Store) EditDefault(agent string, patch EditPatch) error {
-	want := mapWantAgent(agent)
-	if !isKnownAgent(want) {
+	if !isKnownAgent(agent) {
 		return fmt.Errorf("unknown agent: %s", agent)
 	}
-	cur, _ := s.GetDefault(want)
+	cur, _ := s.GetDefault(agent)
 	updated, err := applyEditPatch(cur, patch, s.paths)
 	if err != nil {
 		return err
 	}
-	updated.Agent = want
-	s.defaults[want] = updated
+	updated.Agent = agent
+	s.defaults[agent] = updated
 	return s.Save()
 }
 
@@ -611,11 +607,10 @@ func (s *Store) EnsureDefaults(defaultBinaryFn func(agent string) string) error 
 // ResetDefault removes any stored default profile JSON for an agent,
 // restoring the built-in unmodified default.
 func (s *Store) ResetDefault(agent string) error {
-	want := mapWantAgent(agent)
-	if !isKnownAgent(want) {
+	if !isKnownAgent(agent) {
 		return fmt.Errorf("unknown agent: %s", agent)
 	}
-	pFile := ProfileFilePath(s.paths, want, DefaultProfileName)
+	pFile := ProfileFilePath(s.paths, agent, DefaultProfileName)
 	if err := os.Remove(pFile); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("profiles: remove default profile json: %w", err)
 	}
@@ -625,7 +620,7 @@ func (s *Store) ResetDefault(agent string) error {
 			break
 		}
 	}
-	delete(s.defaults, want)
+	delete(s.defaults, agent)
 	return s.Save()
 }
 
@@ -633,7 +628,7 @@ func (s *Store) ResetDefault(agent string) error {
 // atomically.
 func (s *Store) SetEnabled(name string, enabled bool) error {
 	if name == DefaultProfileName {
-		return fmt.Errorf("cannot disable built-in %q profile; use \"harness profile edit default --agent <agent>\" to customize it", DefaultProfileName)
+		return fmt.Errorf("cannot disable built-in %q profile; use \"spaces profile edit default --agent <agent>\" to customize it", DefaultProfileName)
 	}
 	key, err := s.selectKey(name)
 	if err != nil {

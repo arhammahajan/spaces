@@ -52,7 +52,7 @@ func TestAccessLevelsOrderAndIDs(t *testing.T) {
 }
 
 func TestAccessLevelsUnknownAgents(t *testing.T) {
-	for _, agent := range []string{"pi", "deepseek", "vibe", "mcode", "antigravity-native", "no-such-agent"} {
+	for _, agent := range []string{"pi", "deepseek", "vibe", "mcode", "no-such-agent"} {
 		if levels := AccessLevels(agent); len(levels) != 0 {
 			t.Errorf("%s unexpectedly has access levels: %v", agent, levels)
 		}

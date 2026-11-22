@@ -8,8 +8,8 @@ import (
 )
 
 // cmdAgent opens an agent in a new tmux window under `__shim`. With
-// --profile the pane-side `harness <name> profile <profile>` launch is wrapped
-// by __shim so tmux status reporting behaves identically.
+// --profile the pane-side launch is wrapped by __shim so tmux status reporting
+// behaves identically.
 func cmdAgent(args []string, env Env) int {
 	// Split extra agent args at "--" before flag parsing so values with
 	// leading dashes pass through untouched.
@@ -71,14 +71,14 @@ func cmdAgent(args []string, env Env) int {
 	label := name
 	var cmd []string
 	if profile != "" {
-		if _, lerr := env.LookPath("harness"); lerr != nil {
-			env.errf("tmux-spaces agent: harness not found on PATH (needed for --profile)\n")
-			return ExitError
-		}
 		if profile != "default" {
 			label = profile
 		}
-		cmd = append([]string{env.Self, "__shim", "--profile", profile, canonicalApp(name), "harness", name, "profile", profile}, extra...)
+		cmd = []string{env.Self, "__shim", "--profile", profile, canonicalApp(name)}
+		if len(extra) > 0 {
+			cmd = append(cmd, "--")
+			cmd = append(cmd, extra...)
+		}
 	} else {
 		bin := agent.DefaultRegistry().BinaryName(name)
 		if _, lerr := env.LookPath(bin); lerr != nil {

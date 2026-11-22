@@ -30,7 +30,6 @@ func TestShadowVarMapping(t *testing.T) {
 		"muse":               "MUSE_AUTH_PATH",
 		"fx":                 "FX_HOME",
 		"vibe":               "VIBE_HOME",
-		"antigravity-native": "",
 		"bogus":              "",
 	} {
 		got, ok := ShadowVar(agent)
@@ -44,11 +43,8 @@ func TestShadowVarMapping(t *testing.T) {
 			t.Errorf("ShadowVar(%q) = %q, %v; want %q", agent, got, ok, want)
 		}
 	}
-	// Verify every known agent except antigravity-native has a ShadowVar mapping.
+	// Verify every known agent has a ShadowVar mapping.
 	for _, agent := range Known() {
-		if agent == "antigravity-native" {
-			continue
-		}
 		if _, ok := ShadowVar(agent); !ok {
 			t.Errorf("known agent %q is missing a ShadowVar mapping", agent)
 		}
@@ -131,15 +127,6 @@ func TestShadowHomeIsolation(t *testing.T) {
 			t.Fatalf("BASH_ENV = %q, want %q", m["BASH_ENV"], RestoreEnvScriptPath(paths))
 		}
 	})
-	t.Run("unmapped agent ignores shadow", func(t *testing.T) {
-		paths := testPaths(t)
-		r := mustResolve(t, harnessenv.LaunchSpec{Agent: "antigravity-native", Binary: "/bin/native.sh", ShadowHome: "/sh/native"}, paths, nil)
-		for _, kv := range r.Env {
-			if strings.Contains(kv, "/sh/native") {
-				t.Fatalf("unmapped agent must ignore ShadowHome: %q", kv)
-			}
-		}
-	})
 	t.Run("explicit env wins over shadow", func(t *testing.T) {
 		paths := testPaths(t)
 		r := mustResolve(t, harnessenv.LaunchSpec{
@@ -155,9 +142,9 @@ func TestShadowHomeIsolation(t *testing.T) {
 
 func TestAntigravityAmbientScrub(t *testing.T) {
 	scrub := []string{"GOOGLE_API_KEY", "GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_CLOUD_PROJECT", "GEMINI_API_KEY"}
-	t.Run("native scrubs all four", func(t *testing.T) {
+	t.Run("no-router scrubs all four", func(t *testing.T) {
 		paths := testPaths(t)
-		r := mustResolve(t, harnessenv.LaunchSpec{Agent: "antigravity-native", Binary: "/s/native.sh"}, paths, nil)
+		r := mustResolve(t, harnessenv.LaunchSpec{Agent: "antigravity", NoRouter: true}, paths, nil)
 		unset := unsetSet(r)
 		for _, k := range scrub {
 			if !unset[k] {
@@ -181,8 +168,8 @@ func TestAntigravityAmbientScrub(t *testing.T) {
 	t.Run("spec env overrides survive scrub", func(t *testing.T) {
 		paths := testPaths(t)
 		r := mustResolve(t, harnessenv.LaunchSpec{
-			Agent:  "antigravity-native",
-			Binary: "/s/native.sh",
+			Agent:    "antigravity",
+			NoRouter: true,
 			Env: map[string]string{
 				"GOOGLE_API_KEY":       "user-key",
 				"GEMINI_API_KEY":       "user-gemini",

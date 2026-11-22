@@ -7,18 +7,19 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	"github.com/arhammahajan/spaces/internal/harness/agents"
 	"github.com/arhammahajan/spaces/internal/harness/doctor"
 	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 	"github.com/arhammahajan/spaces/internal/harness/modelpick"
 	"github.com/arhammahajan/spaces/internal/harness/profiles"
 	"github.com/arhammahajan/spaces/internal/harness/routerctl"
-	"github.com/arhammahajan/spaces/internal/harness/spacelaunch"
 	usageagg "github.com/arhammahajan/spaces/internal/harness/usage"
 )
 
@@ -286,8 +287,8 @@ func runHarnessBareAgent(canonical string, paths harnessenv.Paths, agentArgs []s
 			return 1
 		}
 	}
-	if err := spacelaunch.ApplyAccessLevel(&spec); err != nil {
-		if errors.Is(err, spacelaunch.ErrAccessCancelled) {
+	if err := agents.ApplyAccessLevel(&spec); err != nil {
+		if errors.Is(err, agents.ErrAccessCancelled) {
 			fmt.Fprintln(os.Stderr, "spaces: launch cancelled")
 			return 0
 		}
@@ -333,7 +334,7 @@ func launchHarnessDefaultProfile(resolution profiles.Resolution, paths harnessen
 	spec := profiles.LaunchSpecFromPaths(resolution, paths)
 	router := harnessenv.RouterEnv(paths)
 	if describe {
-		if err := spacelaunch.PreselectAccessLevel(&spec); err != nil {
+		if err := agents.PreselectAccessLevel(&spec); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 			return 2
 		}
@@ -349,8 +350,8 @@ func launchHarnessDefaultProfile(resolution profiles.Resolution, paths harnessen
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
 	}
-	if err := spacelaunch.ApplyAccessLevel(&spec); err != nil {
-		if errors.Is(err, spacelaunch.ErrAccessCancelled) {
+	if err := agents.ApplyAccessLevel(&spec); err != nil {
+		if errors.Is(err, agents.ErrAccessCancelled) {
 			fmt.Fprintln(os.Stderr, "spaces: launch cancelled")
 			return 0
 		}
@@ -368,17 +369,11 @@ func launchHarnessDefaultProfile(resolution profiles.Resolution, paths harnessen
 func launchHarnessResolvedProfile(resolution profiles.Resolution, paths harnessenv.Paths, rest []string, describe bool) int {
 	spec := profiles.LaunchSpecFromPaths(resolution, paths)
 	router := harnessenv.RouterEnv(paths)
-	if err := spacelaunch.PreselectAccessLevel(&spec); err != nil {
+	if err := agents.PreselectAccessLevel(&spec); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 2
 	}
-	var resolved agents.Resolved
-	var err error
-	if resolution.NativeAntigravity {
-		resolved, err = agents.Resolve(spec, paths, router, rest)
-	} else {
-		resolved, err = agents.ResolveProfile(spec, paths, router, rest)
-	}
+	resolved, err := agents.ResolveProfile(spec, paths, router, rest)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
@@ -391,19 +386,15 @@ func launchHarnessResolvedProfile(resolution profiles.Resolution, paths harnesse
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
 	}
-	if err := spacelaunch.PromptAccessLevelForLaunch(&spec); err != nil {
-		if errors.Is(err, spacelaunch.ErrAccessCancelled) {
+	if err := agents.PromptAccessLevelForLaunch(&spec); err != nil {
+		if errors.Is(err, agents.ErrAccessCancelled) {
 			fmt.Fprintln(os.Stderr, "spaces: launch cancelled")
 			return 0
 		}
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 2
 	}
-	if resolution.NativeAntigravity {
-		resolved, err = agents.Resolve(spec, paths, router, rest)
-	} else {
-		resolved, err = agents.ResolveProfile(spec, paths, router, rest)
-	}
+	resolved, err = agents.ResolveProfile(spec, paths, router, rest)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
@@ -418,6 +409,91 @@ func launchHarnessAgent(resolved agents.Resolved, _, profile string) int {
 		resolved.UnsetEnv = append(resolved.UnsetEnv, "HARNESS_PROFILE")
 	}
 	if err := agents.Launch(resolved); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
+		return 1
+	}
+	return 0
+}
+
+// runHarnessChild resolves a harness profile in-process, materializes overlays,
+// builds the child environment via agents.BuildChildEnv (without mutating the
+// current process environment), and runs the agent directly as a child process
+// of `__shim`, eliminating the extra Go process hop.
+func runHarnessChild(agentName, profile string, extraArgs []string) int {
+	canonical, ok := agents.Normalize(agentName)
+	if !ok {
+		if cid := agent.DefaultRegistry().CanonicalID(agentName); cid != "" {
+			canonical, ok = agents.Normalize(cid)
+		}
+	}
+	if !ok {
+		fmt.Fprintf(os.Stderr, "%s: unknown agent: %s\n", harnessProgName, agentName)
+		return 2
+	}
+	paths := harnessDefaultPaths()
+	if profile == "" {
+		profile = profiles.DefaultProfileName
+	}
+	ref, err := qualifyProfileName(profile, canonical)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
+		return 2
+	}
+	resolution, err := profiles.Resolve(ref, paths)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: profile %q for agent %s: %v\n", harnessProgName, profile, canonical, err)
+		return 2
+	}
+	spec := profiles.LaunchSpecFromPaths(resolution, paths)
+	router := harnessenv.RouterEnv(paths)
+	if resolution.Source == profiles.SourceDefault && !resolution.Customized {
+		if canonical == "antigravity" || canonical == "grok" {
+			if err := profiles.MaterializeForLaunch(profiles.DefaultResolution(canonical), paths); err != nil {
+				fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
+				return 1
+			}
+		}
+	} else {
+		if err := profiles.MaterializeForLaunch(resolution, paths); err != nil {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
+			return 1
+		}
+	}
+	if err := agents.ApplyAccessLevel(&spec); err != nil {
+		if errors.Is(err, agents.ErrAccessCancelled) {
+			fmt.Fprintln(os.Stderr, "spaces: launch cancelled")
+			return 0
+		}
+		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
+		return 2
+	}
+	var resolved agents.Resolved
+	if resolution.Source == profiles.SourceDefault {
+		resolved, err = agents.Resolve(spec, paths, router, extraArgs)
+	} else {
+		resolved, err = agents.ResolveProfile(spec, paths, router, extraArgs)
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
+		return 1
+	}
+	resolved.Env = withProfileEnv(resolved.Env, strings.TrimSpace(resolution.Name))
+	childEnv := agents.BuildChildEnv(os.Environ(), resolved)
+	bin, err := agents.ResolveBinary(resolved.Binary, resolved.PathPrepend)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
+		return 1
+	}
+	cmd := exec.Command(bin, resolved.Args...)
+	cmd.Env = childEnv
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			return ee.ExitCode()
+		}
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
 	}
@@ -732,14 +808,7 @@ func runHarnessProfileCreate(args []string) int {
 	} else {
 		fmt.Printf("created profile %s (agent %s)\n", name, canonical)
 	}
-	refreshHarnessesCache()
 	return 0
-}
-
-func refreshHarnessesCache() {
-	if err := spacelaunch.RefreshCache(); err != nil {
-		fmt.Fprintf(os.Stderr, "spaces: warning: %s\n", err)
-	}
 }
 
 func runHarnessProfileRemove(args []string) int {
@@ -778,7 +847,6 @@ func runHarnessProfileRemove(args []string) int {
 		return 1
 	}
 	fmt.Printf("removed profile %s\n", name)
-	refreshHarnessesCache()
 	return 0
 }
 
@@ -866,7 +934,7 @@ func buildProfileSnapshot(resolution profiles.Resolution, paths harnessenv.Paths
 	router := harnessenv.RouterEnv(paths)
 	var resolved agents.Resolved
 	var rerr error
-	if resolution.Source == profiles.SourceDefault || resolution.NativeAntigravity {
+	if resolution.Source == profiles.SourceDefault {
 		resolved, rerr = agents.Resolve(spec, paths, router, nil)
 	} else {
 		resolved, rerr = agents.ResolveProfile(spec, paths, router, nil)
@@ -1040,9 +1108,6 @@ func runHarnessProfileShow(args []string) int {
 		}
 	}
 	fmt.Printf("config file:  %s\n", snap.ConfigFile)
-	if resolution.NativeAntigravity {
-		fmt.Printf("credential:    native antigravity\n")
-	}
 	return 0
 }
 
@@ -1291,7 +1356,6 @@ func runHarnessProfileEdit(args []string) int {
 		return 1
 	}
 	fmt.Printf("edited profile %s\n", name)
-	refreshHarnessesCache()
 	return 0
 }
 
@@ -1321,7 +1385,6 @@ func runHarnessProfileSetEnabled(args []string, enabled bool) int {
 		return 1
 	}
 	fmt.Printf("%sd profile %s\n", action, ref)
-	refreshHarnessesCache()
 	return 0
 }
 
@@ -1363,7 +1426,6 @@ func runHarnessProfileClone(args []string) int {
 		return 1
 	}
 	fmt.Printf("cloned profile %s to %s\n", positional[0], positional[1])
-	refreshHarnessesCache()
 	return 0
 }
 
@@ -1390,7 +1452,6 @@ func runHarnessProfileRename(args []string) int {
 		return 1
 	}
 	fmt.Printf("renamed profile %s to %s\n", args[0], args[1])
-	refreshHarnessesCache()
 	return 0
 }
 
@@ -1536,8 +1597,9 @@ func runHarnessModels(args []string) int {
 	for _, a := range args {
 		return failHarnessUsage("unknown models flag: %s", a)
 	}
-	opts, _, _ := harnessRouterOptions()
-	models, err := modelpick.Fetch(opts)
+	paths := harnessDefaultPaths()
+	router := harnessenv.RouterEnv(paths)
+	models, err := modelpick.Fetch(router, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1

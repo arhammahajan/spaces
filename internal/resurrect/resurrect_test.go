@@ -168,13 +168,13 @@ func TestBuildPaneCommandAndRestore(t *testing.T) {
 		t.Fatalf("skipResume cmd = %v", skipCmd)
 	}
 
-	// 2. Agent with profile launches directly via `harness <agent> profile <profile>`.
+	// 2. Agent with profile launches directly in-process via `__shim --profile <profile> <agent>`.
 	profCmd := BuildPaneCommand(PaneSnapshot{Agent: "codex", Profile: "codex-work"}, opts)
-	if strings.Join(profCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex harness codex profile codex-work" {
+	if strings.Join(profCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex" {
 		t.Fatalf("profile resume cmd = %v", profCmd)
 	}
 	profResumeCmd := BuildPaneCommand(PaneSnapshot{Agent: "codex", Profile: "codex-work", SessionID: "c-9"}, opts)
-	if strings.Join(profResumeCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex harness codex profile codex-work resume c-9" {
+	if strings.Join(profResumeCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex -- resume c-9" {
 		t.Fatalf("profile resume cmd with session = %v", profResumeCmd)
 	}
 

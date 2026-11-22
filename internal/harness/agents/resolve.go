@@ -174,8 +174,6 @@ func Resolve(spec harnessenv.LaunchSpec, paths harnessenv.Paths, router harnesse
 		}
 	case "pi", "qwen", "kimi", "mcode", "kilo":
 		// Plain exec; these agents configure their own providers.
-	case "antigravity-native":
-		// Plain exec of the profile-provided binary (native.sh).
 	}
 
 	binary := defaultBin
@@ -199,7 +197,7 @@ func Resolve(spec harnessenv.LaunchSpec, paths harnessenv.Paths, router harnesse
 		}
 	}
 	switch agent {
-	case "antigravity", "antigravity-native":
+	case "antigravity":
 		addUnsets(
 			"GOOGLE_API_KEY",
 			"GOOGLE_APPLICATION_CREDENTIALS",
@@ -308,39 +306,74 @@ func Describe(r Resolved) string {
 	return strings.Join(quoted, " ")
 }
 
+// BuildChildEnv constructs a child process environment slice by applying
+// r.Env, removing r.UnsetEnv, and prepending r.PathPrepend to PATH on top of
+// base (typically os.Environ()), without mutating the current process
+// environment.
+func BuildChildEnv(base []string, r Resolved) []string {
+	envMap := make(map[string]string, len(base)+len(r.Env))
+	order := make([]string, 0, len(base)+len(r.Env))
+	set := func(k, v string) {
+		if _, exists := envMap[k]; !exists {
+			order = append(order, k)
+		}
+		envMap[k] = v
+	}
+	for _, kv := range base {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			set(k, v)
+		}
+	}
+	for _, kv := range r.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			set(k, v)
+		}
+	}
+	for _, name := range r.UnsetEnv {
+		delete(envMap, name)
+	}
+	if len(r.PathPrepend) > 0 {
+		curPath := envMap["PATH"]
+		parts := append(append([]string{}, r.PathPrepend...), curPath)
+		set("PATH", strings.Join(parts, ":"))
+	}
+	out := make([]string, 0, len(envMap))
+	for _, k := range order {
+		if v, ok := envMap[k]; ok {
+			out = append(out, k+"="+v)
+		}
+	}
+	return out
+}
+
+// ResolveBinary resolves r.Binary to an executable path, searching
+// r.PathPrepend before the current process PATH when r.Binary has no slash.
+func ResolveBinary(bin string, pathPrepend []string) (string, error) {
+	if strings.Contains(bin, "/") {
+		return bin, nil
+	}
+	for _, dir := range pathPrepend {
+		if dir == "" {
+			continue
+		}
+		cand := filepath.Join(dir, bin)
+		if isExecutable(cand) {
+			return cand, nil
+		}
+	}
+	return exec.LookPath(bin)
+}
+
 // Launch applies the resolved env, unsets, and PATH, then replaces the
 // process via exec. It never returns on success and is never invoked in
 // tests.
 func Launch(r Resolved) error {
-	for _, kv := range r.Env {
-		k, v, ok := strings.Cut(kv, "=")
-		if !ok {
-			continue
-		}
-		if err := os.Setenv(k, v); err != nil {
-			return err
-		}
+	childEnv := BuildChildEnv(os.Environ(), r)
+	bin, err := ResolveBinary(r.Binary, r.PathPrepend)
+	if err != nil {
+		return err
 	}
-	for _, name := range r.UnsetEnv {
-		if err := os.Unsetenv(name); err != nil {
-			return err
-		}
-	}
-	if len(r.PathPrepend) > 0 {
-		path := strings.Join(append(append([]string{}, r.PathPrepend...), os.Getenv("PATH")), ":")
-		if err := os.Setenv("PATH", path); err != nil {
-			return err
-		}
-	}
-	bin := r.Binary
-	if !strings.Contains(bin, "/") {
-		resolved, err := exec.LookPath(bin)
-		if err != nil {
-			return err
-		}
-		bin = resolved
-	}
-	return syscall.Exec(bin, append([]string{r.Binary}, r.Args...), os.Environ())
+	return syscall.Exec(bin, append([]string{r.Binary}, r.Args...), childEnv)
 }
 
 // isRegularFile reports whether path is an existing non-directory file.

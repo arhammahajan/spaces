@@ -9,24 +9,14 @@ import (
 	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 )
 
-// mapWantAgent maps a requested agent to the same comparison domain:
-// "antigravity-native" is profile-only and launches through "antigravity".
-func mapWantAgent(agent string) string {
-	if agent == "antigravity-native" {
-		return "antigravity"
-	}
-	return agent
-}
-
 // ForAgent returns every active profile belonging to the canonical agent:
 // always starting with the built-in unmodified "default" profile, followed
-// by all enabled/resolvable custom and native profiles sorted by Name.
+// by all enabled/resolvable custom profiles sorted by Name.
 //
 // Thus an agent with no user-created profiles has len == 1 (just "default"),
 // and adding a custom profile yields len == 2 ("default" + the custom profile).
 func ForAgent(agent string, paths harnessenv.Paths) ([]Resolution, error) {
-	want := mapWantAgent(agent)
-	if !isKnownAgent(want) {
+	if !isKnownAgent(agent) {
 		return nil, nil
 	}
 	store, err := Open(paths)
@@ -34,7 +24,7 @@ func ForAgent(agent string, paths harnessenv.Paths) ([]Resolution, error) {
 		return nil, err
 	}
 	var out []Resolution
-	for _, entry := range store.listEntries(want) {
+	for _, entry := range store.listEntries(agent) {
 		res, err := store.resolve(newProfileKey(entry.Agent, entry.Name).String())
 		if err == nil {
 			out = append(out, res)
@@ -53,14 +43,6 @@ func LaunchSpecFromPaths(r Resolution, paths harnessenv.Paths) harnessenv.Launch
 	p := r.Profile
 	if r.Source == SourceDefault && !r.Customized {
 		return harnessenv.LaunchSpec{Agent: p.Agent, DisplayName: p.DisplayName}
-	}
-	if r.NativeAntigravity {
-		return harnessenv.LaunchSpec{
-			Agent:       "antigravity",
-			DisplayName: p.DisplayName,
-			ShadowHome:  p.ShadowHome,
-			NoRouter:    true,
-		}
 	}
 	homePath := expandTildePath(p.HomePath, paths.Home)
 	if homePath == DefaultSharedConfigHome(p.Agent, paths) || homePath == DefaultSharedHome(p.Agent, paths) {

@@ -7,32 +7,34 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
-	"github.com/arhammahajan/spaces/internal/harness/routerctl"
+	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 )
+
+// defaultFetchTimeout applies when Fetch is called with a non-positive timeout.
+const defaultFetchTimeout = 5 * time.Second
 
 // fetchBodyLimit caps the listing download, like routerctl's queries.
 const fetchBodyLimit = 8 << 20
 
-// Fetch performs the picker's own GET {opts.Router.URL}/v1/models with
-// Authorization: Bearer <opts.Router.APIKey> when the key is non-empty,
-// and parses every optional metadata.router fact tolerantly: nulls,
-// missing keys, and unknown shapes leave the corresponding Model field
-// at its zero value instead of failing the listing.
-func Fetch(opts routerctl.Options) ([]Model, error) {
-	base := strings.TrimRight(strings.TrimSpace(opts.Router.URL), "/")
+// Fetch performs GET {router.URL}/v1/models with Authorization: Bearer <router.APIKey>
+// when the key is non-empty, and parses every optional metadata.router fact tolerantly:
+// nulls, missing keys, and unknown shapes leave the corresponding Model field at its
+// zero value instead of failing the listing.
+func Fetch(router harnessenv.RouterSettings, timeout time.Duration) ([]Model, error) {
+	base := strings.TrimRight(strings.TrimSpace(router.URL), "/")
 	if base == "" {
 		return nil, fmt.Errorf("no router URL configured")
 	}
-	timeout := opts.HTTPTimeout
 	if timeout <= 0 {
-		timeout = routerctl.DefaultHTTPTimeout
+		timeout = defaultFetchTimeout
 	}
 	req, err := http.NewRequest(http.MethodGet, base+"/v1/models", nil)
 	if err != nil {
-		return nil, fmt.Errorf("invalid router URL %q: %w", opts.Router.URL, err)
+		return nil, fmt.Errorf("invalid router URL %q: %w", router.URL, err)
 	}
-	if key := opts.Router.APIKey; key != "" {
+	if key := router.APIKey; key != "" {
 		req.Header.Set("Authorization", "Bearer "+key)
 	}
 	resp, err := (&http.Client{Timeout: timeout}).Do(req)

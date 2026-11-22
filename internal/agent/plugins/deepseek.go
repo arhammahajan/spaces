@@ -19,7 +19,6 @@ func NewDeepSeek() agent.Plugin {
 			ConversationID:          "deepseek",
 			ShortName:               "deepseek",
 			ScreenManifestID:        "deepseek",
-			HarnessManaged:          true,
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
 			TitlePrefixes:           []string{"DeepSeek - ", "DeepSeek: "},

@@ -81,7 +81,7 @@ func cmdShim(args []string, env Env) int {
 		case strings.HasPrefix(a, "--profile="):
 			profile = strings.TrimSpace(strings.TrimPrefix(a, "--profile="))
 		case a == "-h" || a == "--help":
-			env.outf("usage: tmux-spaces __shim [--hold] [--profile P] <app> <bin> [args...]\n")
+			env.outf("usage: tmux-spaces __shim [--hold] [--profile P] <app> [<bin> [args...] | -- [args...]]\n")
 			return ExitOK
 		case len(a) > 1 && a[0] == '-':
 			env.errf("tmux-spaces __shim: unknown flag %s\n", a)
@@ -91,13 +91,27 @@ func cmdShim(args []string, env Env) int {
 			onlyPos = true
 		}
 	}
-	if len(pos) < 2 {
-		env.errf("usage: tmux-spaces __shim [--hold] [--profile P] <app> <bin> [args...]\n")
+	// Direct in-process harness profile launch:
+	//   tmux-spaces __shim [--hold] --profile <P> <agent> [-- <args...>]
+	// Backward-compatible explicit command launch:
+	//   tmux-spaces __shim [--hold] [--profile <P>] <app> <bin> [args...]
+	isDirectProfile := profile != "" && (len(pos) == 1 || (len(pos) >= 2 && pos[1] == "--"))
+	if !isDirectProfile && len(pos) < 2 {
+		env.errf("usage: tmux-spaces __shim [--hold] [--profile P] <app> [<bin> [args...] | -- [args...]]\n")
 		return ExitUsage
 	}
-	app := agent.DefaultRegistry().CLIDisplayApp(pos[0])
-	bin := pos[1]
-	childArgs := pos[2:]
+	rawAgent := pos[0]
+	app := agent.DefaultRegistry().CLIDisplayApp(rawAgent)
+	var bin string
+	var childArgs []string
+	if isDirectProfile {
+		if len(pos) >= 2 && pos[1] == "--" {
+			childArgs = pos[2:]
+		}
+	} else {
+		bin = pos[1]
+		childArgs = pos[2:]
+	}
 
 	oscEnabled := func() bool {
 		inZellij := env.Getenv("ZELLIJ_SESSION_NAME") != ""
@@ -142,7 +156,17 @@ func cmdShim(args []string, env Env) int {
 
 	// Prime the pane so it stays visible while idle, then run the child.
 	if pane := env.Getenv("TMUX_PANE"); pane != "" && env.Client != nil {
-		baseCmd := StripResumeArgs(app, append([]string{bin}, childArgs...))
+		var launchBase []string
+		if isDirectProfile {
+			canon := agent.DefaultRegistry().CanonicalID(rawAgent)
+			if canon == "" {
+				canon = rawAgent
+			}
+			launchBase = append([]string{env.Self, canon, "profile", profile}, childArgs...)
+		} else {
+			launchBase = append([]string{bin}, childArgs...)
+		}
+		baseCmd := StripResumeArgs(app, launchBase)
 		if len(baseCmd) > 0 {
 			if raw, err := json.Marshal(baseCmd); err == nil {
 				_ = env.Client.SetPaneOption(pane, "@spaces_launch_cmd", string(raw))
@@ -157,7 +181,16 @@ func cmdShim(args []string, env Env) int {
 	if oscEnabled {
 		osc.BeginWithProfile(app, profile)
 	}
-	code := env.RunChild(bin, childArgs)
+	var code int
+	if isDirectProfile {
+		if env.RunHarnessChild != nil {
+			code = env.RunHarnessChild(rawAgent, profile, childArgs)
+		} else {
+			code = env.RunChild(env.Self, append([]string{rawAgent, "profile", profile}, childArgs...))
+		}
+	} else {
+		code = env.RunChild(bin, childArgs)
+	}
 	outcome := "done"
 	msg := "finished"
 	if code == 0 {

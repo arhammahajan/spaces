@@ -305,21 +305,18 @@ func LoadHarnessesFile(path string) (HarnessFile, error) {
 // directly from internal/harness/agents and internal/harness/profiles without
 // requiring an external `harness` binary or pre-generated cache file.
 func BuildHarnessesInProcess(paths harnessenv.Paths) (HarnessFile, error) {
-	marker := string(filepath.Separator) + ".harness" + string(filepath.Separator)
-	if idx := strings.Index(paths.Home, marker); idx > 0 {
-		paths.Home = paths.Home[:idx]
-	}
+	paths.Home = harnessenv.RealHomeDir(paths.Home)
 	infos := agents.Infos(paths)
-	entries, err := profiles.ListAll(paths)
+	store, err := profiles.Open(paths)
 	if err != nil {
-		return HarnessFile{}, fmt.Errorf("model: list profiles: %w", err)
+		return HarnessFile{}, fmt.Errorf("model: open profiles: %w", err)
 	}
 	byAgent := map[string][]HarnessProfile{}
-	for _, entry := range entries {
+	for _, entry := range store.ListAll() {
 		if entry.Source == profiles.SourceDefault {
 			continue
 		}
-		if _, err := profiles.ResolveForAgent(entry.Agent, entry.Name, paths); err != nil {
+		if _, err := store.ResolveForAgent(entry.Agent, entry.Name); err != nil {
 			continue
 		}
 		byAgent[entry.Agent] = append(byAgent[entry.Agent], HarnessProfile{
@@ -352,18 +349,12 @@ func BuildHarnessesInProcess(paths harnessenv.Paths) (HarnessFile, error) {
 }
 
 // FetchHarnesses returns the launchable agent/profile inventory. When
-// TMUX_SPACES_HARNESSES_FILE or SPACES_HARNESSES_PATH is set (or when
-// ~/.harness/harnesses.json exists on disk), it reads that file; otherwise it
-// builds the inventory directly in-process from internal/harness.
+// TMUX_SPACES_HARNESSES_FILE or SPACES_HARNESSES_PATH is explicitly set in the
+// environment, it reads that file; otherwise it always builds the inventory
+// directly in-process from internal/harness.
 func FetchHarnesses(_ context.Context) (HarnessFile, error) {
 	if harnessesPathOverride() != "" {
 		return LoadHarnessesFile(HarnessesPath(""))
-	}
-	path := HarnessesPath("")
-	if isRegularFile(path) {
-		if file, err := LoadHarnessesFile(path); err == nil {
-			return file, nil
-		}
 	}
 	return BuildHarnessesInProcess(harnessenv.DefaultPaths())
 }

@@ -14,8 +14,7 @@ import (
 // ShadowVar maps every configured canonical agent to the primary environment
 // variable that redirects its isolated shadow home or credential store. Claude
 // uses CLAUDE_CONFIG_DIR and never overrides HOME, keeping the macOS login
-// keychain reachable. Only verified agents are mapped; unknown agents and
-// antigravity-native return false.
+// keychain reachable. Only verified agents are mapped; unknown agents return false.
 func ShadowVar(agent string) (string, bool) {
 	switch agent {
 	case "codex":

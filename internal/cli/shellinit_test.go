@@ -164,14 +164,18 @@ _tmux_spaces_preexec "claude -p 'hello'"
 # 2. Empty line / second precmd must NOT re-fire
 (exit 0); _tmux_spaces_precmd
 
-# 3. Profiled harness launch failing (exit 42)
+# 3. Profiled harness/spaces launches failing (exit 42 / exit 0)
 _tmux_spaces_preexec "FOO=1 harness agy profile saucerf166 --resume abc"
 (exit 42); _tmux_spaces_precmd
+_tmux_spaces_preexec "spaces claude profile work --resume xyz"
+(exit 0); _tmux_spaces_precmd
+_tmux_spaces_preexec "tmux-spaces codex profile fast"
+(exit 0); _tmux_spaces_precmd
 
-# 4. Ignored harness subcommands & non-agent commands
+# 4. Ignored harness/spaces subcommands & non-agent commands
 _tmux_spaces_preexec "harness router status"
 (exit 0); _tmux_spaces_precmd
-_tmux_spaces_preexec "harness profile list"
+_tmux_spaces_preexec "spaces profile list"
 (exit 0); _tmux_spaces_precmd
 _tmux_spaces_preexec "git status"
 (exit 0); _tmux_spaces_precmd
@@ -200,16 +204,22 @@ sleep 0.2
 				t.Fatalf("read outcome log: %v", err)
 			}
 			lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
-			if len(lines) != 2 {
-				t.Fatalf("expected 2 recorded outcomes, got %d:\n%s", len(lines), string(raw))
+			if len(lines) != 4 {
+				t.Fatalf("expected 4 recorded outcomes, got %d:\n%s", len(lines), string(raw))
 			}
 
-			var p1, p2 shellOutcomePayload
+			var p1, p2, p3, p4 shellOutcomePayload
 			if err := json.Unmarshal([]byte(lines[0]), &p1); err != nil {
 				t.Fatalf("unmarshal outcome 1 (%q): %v", lines[0], err)
 			}
 			if err := json.Unmarshal([]byte(lines[1]), &p2); err != nil {
 				t.Fatalf("unmarshal outcome 2 (%q): %v", lines[1], err)
+			}
+			if err := json.Unmarshal([]byte(lines[2]), &p3); err != nil {
+				t.Fatalf("unmarshal outcome 3 (%q): %v", lines[2], err)
+			}
+			if err := json.Unmarshal([]byte(lines[3]), &p4); err != nil {
+				t.Fatalf("unmarshal outcome 4 (%q): %v", lines[3], err)
 			}
 
 			if p1.Pane != "%7" || p1.App != "claude" || p1.Profile != "" || p1.Outcome != "done" || p1.Text != "finished" || p1.TsMs <= 0 {
@@ -217,6 +227,12 @@ sleep 0.2
 			}
 			if p2.Pane != "%7" || p2.App != "agy" || p2.Profile != "saucerf166" || p2.Outcome != "failed" || p2.Text != "exited with status 42" || p2.TsMs <= 0 {
 				t.Errorf("unexpected outcome 2: %+v", p2)
+			}
+			if p3.Pane != "%7" || p3.App != "claude" || p3.Profile != "work" || p3.Outcome != "done" || p3.TsMs <= 0 {
+				t.Errorf("unexpected outcome 3: %+v", p3)
+			}
+			if p4.Pane != "%7" || p4.App != "codex" || p4.Profile != "fast" || p4.Outcome != "done" || p4.TsMs <= 0 {
+				t.Errorf("unexpected outcome 4: %+v", p4)
 			}
 		})
 	}

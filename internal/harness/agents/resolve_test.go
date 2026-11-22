@@ -2,8 +2,6 @@ package agents
 
 import (
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +25,7 @@ func mustResolve(t *testing.T, spec harnessenv.LaunchSpec, paths harnessenv.Path
 		"GOOGLE_APPLICATION_CREDENTIALS": true,
 		"GOOGLE_CLOUD_PROJECT":           true,
 		"GEMINI_API_KEY":                 true,
+		"GOOGLE_GEMINI_BASE_URL":         true,
 		"ANTIGRAVITY_APP_DATA_DIR":       true,
 		"ANTIGRAVITY_CONFIG_REL_DIR":     true,
 	}
@@ -451,17 +450,6 @@ func TestResolveAntigravity(t *testing.T) {
 	})
 }
 
-func TestResolveAntigravityNative(t *testing.T) {
-	paths := testPaths(t)
-	r := mustResolve(t, harnessenv.LaunchSpec{Agent: "antigravity-native", Binary: "/s/native.sh"}, paths, []string{"prof", "--x"})
-	if r.Binary != "/s/native.sh" || strings.Join(r.Args, ",") != "prof,--x" {
-		t.Fatalf("resolved = %+v", r)
-	}
-	if _, err := Resolve(harnessenv.LaunchSpec{Agent: "antigravity-native"}, paths, testRouter(), nil); err == nil {
-		t.Error("empty spec Binary for native: want error")
-	}
-}
-
 func TestResolveBinaryOverrideRescuesDefault(t *testing.T) {
 	paths := testPaths(t)
 	stubRunner(t, func(string, ...string) (string, error) {
@@ -534,43 +522,21 @@ func TestResolveProfileAugmentation(t *testing.T) {
 	}
 }
 
-func TestDefaultFetchModelIDs(t *testing.T) {
-	t.Run("object shape", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/v1/models" {
-				t.Errorf("path = %s", r.URL.Path)
-			}
-			w.Write([]byte(`{"data":[{"id":"b"},{"id":"a"}]}`))
-		}))
-		defer srv.Close()
-		ids, err := defaultFetchModelIDs(srv.URL + "/v1/models")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Join(ids, ",") != "b,a" {
-			t.Fatalf("ids = %v", ids)
-		}
-	})
-	t.Run("bare array shape", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Write([]byte(`[{"id":"x"}]`))
-		}))
-		defer srv.Close()
-		ids, err := defaultFetchModelIDs(srv.URL + "/v1/models")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if strings.Join(ids, ",") != "x" {
-			t.Fatalf("ids = %v", ids)
-		}
-	})
-	t.Run("non-200 errors", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusForbidden)
-		}))
-		defer srv.Close()
-		if _, err := defaultFetchModelIDs(srv.URL + "/v1/models"); err == nil {
-			t.Fatal("want error on 403")
-		}
-	})
+func TestBuildChildEnv(t *testing.T) {
+	base := []string{"PATH=/usr/bin", "KEEP=1", "DROP=old", "OVERRIDE=old"}
+	r := Resolved{
+		Env:         []string{"OVERRIDE=new", "ADDED=yes"},
+		UnsetEnv:    []string{"DROP"},
+		PathPrepend: []string{"/opt/bin", "/local/bin"},
+	}
+	got := envMap(t, BuildChildEnv(base, r))
+	if got["KEEP"] != "1" || got["OVERRIDE"] != "new" || got["ADDED"] != "yes" {
+		t.Fatalf("unexpected env: %v", got)
+	}
+	if _, ok := got["DROP"]; ok {
+		t.Fatalf("DROP should be unset: %v", got)
+	}
+	if got["PATH"] != "/opt/bin:/local/bin:/usr/bin" {
+		t.Fatalf("PATH = %q, want /opt/bin:/local/bin:/usr/bin", got["PATH"])
+	}
 }

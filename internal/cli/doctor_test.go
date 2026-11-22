@@ -58,7 +58,7 @@ func TestDoctorJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdoutOf(t, env))), &report); err != nil {
 		t.Fatal(err)
 	}
-	if !report.OK || len(report.Checks) != 6 {
+	if !report.OK || len(report.Checks) != 4 {
 		t.Errorf("report = %+v", report)
 	}
 }

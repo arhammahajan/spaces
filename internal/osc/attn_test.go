@@ -38,7 +38,7 @@ func TestCanonicalApp(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"claude", "claude-code"},
 		{"Claude", "claude-code"},
-		{"kimi-cli", "kimi"},
+		{"kimi-cli", "kimi-cli"},
 		{"dsh", "deepseek"},
 		{"dsh-tui", "deepseek"},
 		{"cursor", "cursor-agent"},

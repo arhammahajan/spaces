@@ -17,7 +17,6 @@ func NewClaude() agent.Plugin {
 			ShortName:               "claude",
 			ResumeFlag:              "--resume",
 			ScreenManifestID:        "claude",
-			HarnessManaged:          true,
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
 			MatchesBareVersion:      true,

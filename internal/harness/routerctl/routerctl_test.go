@@ -1,11 +1,9 @@
 package routerctl
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -90,17 +88,14 @@ func TestDetectDefaults(t *testing.T) {
 	if opts.Unit != "model-router.service" {
 		t.Fatalf("unit = %q", opts.Unit)
 	}
-	if want := filepath.Join(p.StateHome, "harness", "router.log"); opts.LogPath != want {
-		t.Fatalf("log = %q want %q", opts.LogPath, want)
-	}
 	if want := filepath.Join(p.StateHome, "harness", "router.pid"); opts.PidPath != want {
 		t.Fatalf("pid = %q want %q", opts.PidPath, want)
 	}
 	if opts.HTTPTimeout != 5*time.Second {
 		t.Fatalf("timeout = %v", opts.HTTPTimeout)
 	}
-	if opts.Systemctl == "" || opts.Journalctl == "" {
-		t.Fatalf("systemctl = %q journalctl = %q", opts.Systemctl, opts.Journalctl)
+	if opts.Systemctl == "" {
+		t.Fatalf("systemctl = %q", opts.Systemctl)
 	}
 }
 
@@ -254,140 +249,17 @@ func TestSystemdSelection(t *testing.T) {
 	}
 }
 
-func livezServer(t *testing.T, code int) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/livez" {
-			w.WriteHeader(code)
-			_, _ = w.Write([]byte(`{"status":"ok"}`))
-			return
-		}
-		w.WriteHeader(404)
-	}))
-}
-
 func directOpts(p harnessenv.Paths, url string) Options {
 	return Options{
 		Paths:        p,
 		Router:       testRouter(url),
 		Unit:         "model-router.service",
 		Systemctl:    "systemctl",
-		Journalctl:   "journalctl",
 		Exec:         failingExec,
-		LogPath:      filepath.Join(p.StateHome, "harness", "router.log"),
 		PidPath:      filepath.Join(p.StateHome, "harness", "router.pid"),
 		HTTPTimeout:  2 * time.Second,
 		Kill:         syscall.Kill,
 		RouterConfig: filepath.Join(p.ConfigHome, "router.toml"),
-	}
-}
-
-func TestStartDirect(t *testing.T) {
-	p := testPaths(t)
-	srv := livezServer(t, 200)
-	defer srv.Close()
-
-	var gotBin string
-	var gotArgs []string
-	var gotLog string
-	opts := directOpts(p, srv.URL)
-	opts.RouterBin = "/fake/model-router-go"
-	opts.Spawn = func(bin string, args []string, logPath string) (int, error) {
-		gotBin, gotArgs, gotLog = bin, append([]string(nil), args...), logPath
-		return 4242, nil
-	}
-	if err := Start(context.Background(), opts, 5*time.Second); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	if gotBin != "/fake/model-router-go" {
-		t.Fatalf("spawn bin = %q", gotBin)
-	}
-	wantArgs := []string{"--config", opts.RouterConfig}
-	if fmt.Sprint(gotArgs) != fmt.Sprint(wantArgs) {
-		t.Fatalf("spawn args = %v want %v", gotArgs, wantArgs)
-	}
-	if gotLog != opts.LogPath {
-		t.Fatalf("spawn log = %q want %q", gotLog, opts.LogPath)
-	}
-	raw, err := os.ReadFile(opts.PidPath)
-	if err != nil {
-		t.Fatalf("read pidfile: %v", err)
-	}
-	if strings.TrimSpace(string(raw)) != "4242" {
-		t.Fatalf("pidfile = %q", raw)
-	}
-}
-
-func TestStartDirectSpawnError(t *testing.T) {
-	p := testPaths(t)
-	opts := directOpts(p, "http://127.0.0.1:1")
-	opts.RouterBin = "/fake/model-router-go"
-	opts.Spawn = func(string, []string, string) (int, error) {
-		return 0, errors.New("exec failed")
-	}
-	if err := Start(context.Background(), opts, time.Second); err == nil {
-		t.Fatal("expected spawn error")
-	}
-}
-
-func TestStartDirectNoBin(t *testing.T) {
-	p := testPaths(t)
-	opts := directOpts(p, "http://127.0.0.1:1")
-	opts.RouterBin = ""
-	if err := Start(context.Background(), opts, time.Second); err == nil {
-		t.Fatal("expected missing-binary error")
-	}
-}
-
-func TestStartDirectLivezTimeout(t *testing.T) {
-	p := testPaths(t)
-	srv := livezServer(t, 500)
-	defer srv.Close()
-	opts := directOpts(p, srv.URL)
-	opts.RouterBin = "/fake/model-router-go"
-	opts.Spawn = func(string, []string, string) (int, error) { return 4242, nil }
-	if err := Start(context.Background(), opts, 300*time.Millisecond); err == nil {
-		t.Fatal("expected livez timeout error")
-	}
-}
-
-func TestStartSystemd(t *testing.T) {
-	p := testPaths(t)
-	srv := livezServer(t, 200)
-	defer srv.Close()
-	f := &execFake{handler: systemdStub("model-router.service enabled\n", nil, nil)}
-	opts := directOpts(p, srv.URL)
-	opts.Exec = f.exec
-	if err := Start(context.Background(), opts, 5*time.Second); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-	found := false
-	for _, c := range f.argStrings() {
-		if strings.Contains(c, "--user start model-router.service") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("no systemctl start call in %v", f.argStrings())
-	}
-}
-
-func TestStartSystemdStartError(t *testing.T) {
-	f := &execFake{handler: func(_ string, args []string) ([]byte, error) {
-		for _, a := range args {
-			if a == "list-unit-files" {
-				return []byte("model-router.service enabled\n"), nil
-			}
-			if a == "start" {
-				return []byte("failed"), errors.New("exit 1")
-			}
-		}
-		return nil, errors.New("unexpected")
-	}}
-	opts := directOpts(testPaths(t), "http://127.0.0.1:1")
-	opts.Exec = f.exec
-	if err := Start(context.Background(), opts, time.Second); err == nil {
-		t.Fatal("expected start error")
 	}
 }
 
@@ -418,101 +290,6 @@ func writePid(t *testing.T, path string, pid int) {
 	}
 	if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", pid)), 0o644); err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestStopDirectSIGTERM(t *testing.T) {
-	p := testPaths(t)
-	rec := &signalRecorder{alive: true}
-	opts := directOpts(p, "http://127.0.0.1:1")
-	opts.Kill = rec.kill
-	writePid(t, opts.PidPath, 4242)
-	if err := Stop(context.Background(), opts, 5*time.Second); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	if len(rec.signals) == 0 || rec.signals[0] != syscall.SIGTERM {
-		t.Fatalf("signals = %v want [SIGTERM ...]", rec.signals)
-	}
-	for _, s := range rec.signals {
-		if s == syscall.SIGKILL {
-			t.Fatalf("unexpected SIGKILL, signals = %v", rec.signals)
-		}
-	}
-	if _, err := os.Stat(opts.PidPath); !os.IsNotExist(err) {
-		t.Fatalf("pidfile not removed")
-	}
-}
-
-func TestStopDirectStalePidfile(t *testing.T) {
-	p := testPaths(t)
-	rec := &signalRecorder{alive: false}
-	opts := directOpts(p, "http://127.0.0.1:1")
-	opts.Kill = rec.kill
-	writePid(t, opts.PidPath, 999999)
-	if err := Stop(context.Background(), opts, 5*time.Second); err != nil {
-		t.Fatalf("stale pidfile must not error: %v", err)
-	}
-	if len(rec.signals) != 0 {
-		t.Fatalf("no signals expected, got %v", rec.signals)
-	}
-	if _, err := os.Stat(opts.PidPath); !os.IsNotExist(err) {
-		t.Fatalf("stale pidfile not cleaned")
-	}
-}
-
-func TestStopDirectMissingPidfile(t *testing.T) {
-	opts := directOpts(testPaths(t), "http://127.0.0.1:1")
-	if err := Stop(context.Background(), opts, time.Second); err != nil {
-		t.Fatalf("missing pidfile must not error: %v", err)
-	}
-}
-
-func TestStopDirectEscalatesToSIGKILL(t *testing.T) {
-	p := testPaths(t)
-	rec := &signalRecorder{alive: true}
-	// Never die: SIGTERM/SIGKILL leave the process "alive".
-	ignoreDeath := func(_ int, sig syscall.Signal) error {
-		if sig == syscall.Signal(0) {
-			return nil // always alive
-		}
-		rec.signals = append(rec.signals, sig)
-		return nil
-	}
-	opts := directOpts(p, "http://127.0.0.1:1")
-	opts.Kill = ignoreDeath
-	writePid(t, opts.PidPath, 4242)
-	if err := Stop(context.Background(), opts, 150*time.Millisecond); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	seenTerm, seenKill := false, false
-	for _, s := range rec.signals {
-		if s == syscall.SIGTERM {
-			seenTerm = true
-		}
-		if s == syscall.SIGKILL {
-			seenKill = true
-		}
-	}
-	if !seenTerm || !seenKill {
-		t.Fatalf("expected SIGTERM then SIGKILL, got %v", rec.signals)
-	}
-}
-
-func TestStopSystemd(t *testing.T) {
-	f := &execFake{handler: systemdStub("model-router.service enabled\n", nil, nil)}
-	opts := directOpts(testPaths(t), "http://127.0.0.1:1")
-	opts.Exec = f.exec
-	if err := Stop(context.Background(), opts, time.Second); err != nil {
-		t.Fatalf("stop: %v", err)
-	}
-	found := false
-	for _, c := range f.argStrings() {
-		if strings.Contains(c, "--user stop model-router.service") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("no systemctl stop call in %v", f.argStrings())
 	}
 }
 
@@ -750,7 +527,7 @@ func TestListModelsNoKeySendsNoAuth(t *testing.T) {
 	}
 }
 
-func TestValidateConfig(t *testing.T) {
+func TestValidateConfigWithOptions(t *testing.T) {
 	// Keep default credential loading off the real home.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -778,147 +555,18 @@ model = "claude-haiku-4-5"
 	if err := os.WriteFile(good, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateConfig(good); err != nil {
+	opts := Options{}
+	if err := ValidateConfigWithOptions(context.Background(), opts, good); err != nil {
 		t.Fatalf("valid config rejected: %v", err)
 	}
 	bad := filepath.Join(dir, "bad.toml")
 	if err := os.WriteFile(bad, []byte("[server\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateConfig(bad); err == nil {
+	if err := ValidateConfigWithOptions(context.Background(), opts, bad); err == nil {
 		t.Fatal("expected error for invalid config")
 	}
-	if err := ValidateConfig(filepath.Join(dir, "missing.toml")); err == nil {
+	if err := ValidateConfigWithOptions(context.Background(), opts, filepath.Join(dir, "missing.toml")); err == nil {
 		t.Fatal("expected error for missing config")
-	}
-}
-
-func TestLogsDirectTail(t *testing.T) {
-	p := testPaths(t)
-	logPath := filepath.Join(p.StateHome, "harness", "router.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	var sb strings.Builder
-	for i := 1; i <= 10; i++ {
-		fmt.Fprintf(&sb, "line %d\n", i)
-	}
-	if err := os.WriteFile(logPath, []byte(sb.String()), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	opts := directOpts(p, "http://127.0.0.1:1")
-	opts.Exec = failingExec
-	opts.Stdout = &out
-	opts.LogPath = logPath
-	if err := Logs(context.Background(), opts, false, 3); err != nil {
-		t.Fatalf("logs: %v", err)
-	}
-	if out.String() != "line 8\nline 9\nline 10\n" {
-		t.Fatalf("tail = %q", out.String())
-	}
-}
-
-func TestLogsDirectWholeFile(t *testing.T) {
-	p := testPaths(t)
-	logPath := filepath.Join(p.StateHome, "harness", "router.log")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte("a\nb\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	var out bytes.Buffer
-	opts := directOpts(p, "http://127.0.0.1:1")
-	opts.Exec = failingExec
-	opts.Stdout = &out
-	opts.LogPath = logPath
-	if err := Logs(context.Background(), opts, false, 0); err != nil {
-		t.Fatalf("logs: %v", err)
-	}
-	if out.String() != "a\nb\n" {
-		t.Fatalf("body = %q", out.String())
-	}
-}
-
-func TestLogsDirectFollowUnsupported(t *testing.T) {
-	opts := directOpts(testPaths(t), "http://127.0.0.1:1")
-	opts.Exec = failingExec
-	opts.Stdout = &bytes.Buffer{}
-	err := Logs(context.Background(), opts, true, 10)
-	if err == nil {
-		t.Fatal("expected follow-unsupported error")
-	}
-	if !strings.Contains(err.Error(), "follow") {
-		t.Fatalf("error must mention follow: %v", err)
-	}
-}
-
-func TestLogsDirectMissingFile(t *testing.T) {
-	p := testPaths(t)
-	opts := directOpts(p, "http://127.0.0.1:1")
-	opts.Exec = failingExec
-	opts.Stdout = &bytes.Buffer{}
-	if err := Logs(context.Background(), opts, false, 10); err == nil {
-		t.Fatal("expected missing-file error")
-	}
-}
-
-func TestLogsSystemdArgs(t *testing.T) {
-	cases := []struct {
-		name   string
-		follow bool
-		lines  int
-		want   []string
-	}{
-		{"with lines", false, 25, []string{"journalctl", "--user", "-u", "model-router.service", "-n", "25"}},
-		{"follow appends -f", true, 10, []string{"journalctl", "--user", "-u", "model-router.service", "-n", "10", "-f"}},
-		{"no lines omits -n", false, 0, []string{"journalctl", "--user", "-u", "model-router.service"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var got []string
-			execFake := &execFake{handler: systemdStub("model-router.service enabled\n", nil, nil)}
-			var out bytes.Buffer
-			opts := directOpts(testPaths(t), "http://127.0.0.1:1")
-			opts.Exec = execFake.exec
-			opts.Stdout = &out
-			opts.RunOut = func(_ context.Context, _ io.Writer, name string, args ...string) error {
-				got = append([]string{name}, args...)
-				return nil
-			}
-			if err := Logs(context.Background(), opts, tc.follow, tc.lines); err != nil {
-				t.Fatalf("logs: %v", err)
-			}
-			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
-				t.Fatalf("journalctl = %v want %v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestRestartDirect(t *testing.T) {
-	p := testPaths(t)
-	srv := livezServer(t, 200)
-	defer srv.Close()
-	rec := &signalRecorder{alive: true}
-	var spawned int
-	opts := directOpts(p, srv.URL)
-	opts.Exec = failingExec
-	opts.Kill = rec.kill
-	opts.RouterBin = "/fake/model-router-go"
-	opts.Spawn = func(string, []string, string) (int, error) {
-		spawned++
-		return 4242, nil
-	}
-	writePid(t, opts.PidPath, 4242)
-	if err := Restart(context.Background(), opts, 5*time.Second); err != nil {
-		t.Fatalf("restart: %v", err)
-	}
-	if spawned != 1 {
-		t.Fatalf("spawned = %d", spawned)
-	}
-	if rec.signals[0] != syscall.SIGTERM {
-		t.Fatalf("signals = %v", rec.signals)
 	}
 }

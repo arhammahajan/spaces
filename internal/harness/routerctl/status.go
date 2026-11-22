@@ -12,9 +12,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -200,14 +198,6 @@ func hasRouterFact(meta json.RawMessage) bool {
 	return ok
 }
 
-// ValidateConfig validates the router config at path offline: no network,
-// no cache. When a model-router binary is detected, it delegates semantic
-// validation to `<router-bin> --validate-config --config <path>`.
-func ValidateConfig(path string) error {
-	opts := Detect(harnessenv.DefaultPaths(), harnessenv.RouterSettings{})
-	return ValidateConfigWithOptions(context.Background(), opts, path)
-}
-
 // ValidateConfigWithOptions validates the router config at path offline.
 // It always verifies that path is readable valid TOML, and when opts.RouterBin
 // resolves to an executable binary it runs `<RouterBin> --validate-config --config <path>`
@@ -252,25 +242,4 @@ func resolveRouterBin(opts Options) string {
 		return resolved
 	}
 	return ""
-}
-
-// waitLivez polls GET /livez until 200 or the waitReady budget elapses.
-// A non-positive budget still attempts one probe.
-func waitLivez(ctx context.Context, opts Options, waitReady time.Duration) error {
-	base := baseURL(opts)
-	client := httpClient(opts)
-	deadline := time.Now().Add(waitReady)
-	for {
-		if code, _, err := doGet(ctx, client, base+"/livez", ""); err == nil && code == 200 {
-			return nil
-		}
-		if time.Now().After(deadline) {
-			return fmt.Errorf("router at %s not live within %s", base, waitReady)
-		}
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("wait for router liveness: %w", ctx.Err())
-		case <-time.After(100 * time.Millisecond):
-		}
-	}
 }

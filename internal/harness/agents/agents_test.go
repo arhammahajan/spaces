@@ -37,14 +37,6 @@ func stubRunner(t *testing.T, fn func(name string, args ...string) (string, erro
 	t.Cleanup(func() { CommandRunner = old })
 }
 
-// stubFetch replaces FetchModelIDs for the test, restoring the default.
-func stubFetch(t *testing.T, fn func(modelsURL string) ([]string, error)) {
-	t.Helper()
-	old := FetchModelIDs
-	FetchModelIDs = fn
-	t.Cleanup(func() { FetchModelIDs = old })
-}
-
 func writeExec(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
@@ -74,7 +66,7 @@ func TestKnownSortedAndComplete(t *testing.T) {
 		t.Fatalf("Known() not sorted: %v", got)
 	}
 	want := []string{
-		"antigravity", "antigravity-native",
+		"antigravity",
 		"claude", "cline", "codex", "copilot", "deepseek", "fx",
 		"gemini", "grok", "kilo", "kimi", "kimi-cli", "mcode",
 		"muse", "opencode", "pi", "qwen", "vibe",
@@ -97,7 +89,6 @@ func TestNormalize(t *testing.T) {
 	}{
 		{"claude", "claude", true},
 		{"codex", "codex", true},
-		{"antigravity-native", "antigravity-native", true},
 		{"agy", "antigravity", true},
 		{"dsh", "deepseek", true},
 		{"kimi-code", "kimi", true},
@@ -151,7 +142,7 @@ func TestInfosStates(t *testing.T) {
 		t.Errorf("cline info = %+v (want fnm-resolved binary)", byName["cline"])
 	}
 	// Nothing installed for these: absolute paths must report missing.
-	for _, name := range []string{"grok", "muse", "deepseek", "antigravity-native"} {
+	for _, name := range []string{"grok", "muse", "deepseek"} {
 		if byName[name].BinaryState != "missing" {
 			t.Errorf("%s info = %+v, want missing", name, byName[name])
 		}

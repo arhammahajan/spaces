@@ -29,12 +29,12 @@ func TestParseConversationsOptions(t *testing.T) {
 }
 
 func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
-	// Harness-managed agent with explicit profile uses native resume flags under __shim.
-	cmd := buildConversationOpenCommand("claude", "work", "sess-123", "/repo", "Fix retries", nil, "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	// Harness-managed agent with explicit profile launches directly in-process via __shim.
+	cmd := buildConversationOpenCommand("claude", "work", "sess-123", "/repo", "Fix retries", nil, "/usr/local/bin/tmux-spaces")
 	joined := strings.Join(cmd, " ")
 	for _, want := range []string{
 		"/bin/sh -c",
-		"/usr/local/bin/tmux-spaces __shim --profile work claude-code /usr/local/bin/harness claude profile work --resume sess-123",
+		"/usr/local/bin/tmux-spaces __shim --profile work claude-code -- --resume sess-123",
 		"status clear",
 		`exec "${SHELL:-/bin/sh}"`,
 	} {
@@ -46,15 +46,15 @@ func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
 		t.Errorf("harness cmd should not use __resume-wrap: %s", joined)
 	}
 
-	// Standalone fallback when harness is unavailable uses direct binary + native resume args.
-	cmdStandalone := buildConversationOpenCommand("claude", "", "sess-456", "/repo", "Fix retries", nil, "/usr/local/bin/tmux-spaces", "")
-	joinedStandalone := strings.Join(cmdStandalone, " ")
-	if !strings.Contains(joinedStandalone, "/usr/local/bin/tmux-spaces __shim claude-code claude --resume sess-456") {
-		t.Errorf("standalone claude cmd = %s", joinedStandalone)
+	// Harness-managed agent with empty profile defaults to --profile default.
+	cmdDefault := buildConversationOpenCommand("claude", "", "sess-456", "/repo", "Fix retries", nil, "/usr/local/bin/tmux-spaces")
+	joinedDefault := strings.Join(cmdDefault, " ")
+	if !strings.Contains(joinedDefault, "/usr/local/bin/tmux-spaces __shim --profile default claude-code -- --resume sess-456") {
+		t.Errorf("default claude cmd = %s", joinedDefault)
 	}
 
 	// Non-harness agent (omp) launches directly under __shim without __resume-wrap.
-	cmdOmp := buildConversationOpenCommand("omp", "", "omp-sess-7", "/repo", "Omp chat", nil, "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	cmdOmp := buildConversationOpenCommand("omp", "", "omp-sess-7", "/repo", "Omp chat", nil, "/usr/local/bin/tmux-spaces")
 	joinedOmp := strings.Join(cmdOmp, " ")
 	for _, want := range []string{"/usr/local/bin/tmux-spaces __shim omp omp", "status clear", `exec "${SHELL:-/bin/sh}"`} {
 		if !strings.Contains(joinedOmp, want) {
@@ -66,7 +66,7 @@ func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
 	}
 
 	// Non-harness agent (crush) launches directly under __shim without __resume-wrap.
-	cmdCrush := buildConversationOpenCommand("crush", "", "crush-9", "/repo", "Crush chat", nil, "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	cmdCrush := buildConversationOpenCommand("crush", "", "crush-9", "/repo", "Crush chat", nil, "/usr/local/bin/tmux-spaces")
 	joinedCrush := strings.Join(cmdCrush, " ")
 	for _, want := range []string{"/usr/local/bin/tmux-spaces __shim crush crush", "status clear", `exec "${SHELL:-/bin/sh}"`} {
 		if !strings.Contains(joinedCrush, want) {
@@ -79,10 +79,10 @@ func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
 }
 
 func TestBuildConversationOpenCommandReplayLaunchCmd(t *testing.T) {
-	// Replays stored LaunchCmd when harness exists, strips old resume flags,
+	// Replays stored LaunchCmd, strips old resume flags,
 	// extracts profile from LaunchCmd when profile is empty, and appends the new session ID.
 	stored := []string{"/opt/bin/harness", "claude", "profile", "work", "--model", "opus", "--resume", "old-sess"}
-	cmd := buildConversationOpenCommand("claude", "", "new-sess-99", "/repo", "Title", stored, "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	cmd := buildConversationOpenCommand("claude", "", "new-sess-99", "/repo", "Title", stored, "/usr/local/bin/tmux-spaces")
 	joined := strings.Join(cmd, " ")
 	want := "/usr/local/bin/tmux-spaces __shim --profile work claude-code /opt/bin/harness claude profile work --model opus --resume new-sess-99"
 	if !strings.Contains(joined, want) {
@@ -94,7 +94,7 @@ func TestBuildConversationOpenCommandReplayLaunchCmd(t *testing.T) {
 
 	// Codex subcommand resume flag stripping on replay.
 	storedCodex := []string{"/opt/bin/harness", "codex", "profile", "dev", "resume", "old-codex"}
-	cmdCodex := buildConversationOpenCommand("codex", "dev", "new-codex", "/repo", "Title", storedCodex, "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	cmdCodex := buildConversationOpenCommand("codex", "dev", "new-codex", "/repo", "Title", storedCodex, "/usr/local/bin/tmux-spaces")
 	joinedCodex := strings.Join(cmdCodex, " ")
 	wantCodex := "/usr/local/bin/tmux-spaces __shim --profile dev codex /opt/bin/harness codex profile dev resume new-codex"
 	if !strings.Contains(joinedCodex, wantCodex) {
@@ -102,18 +102,6 @@ func TestBuildConversationOpenCommandReplayLaunchCmd(t *testing.T) {
 	}
 	if strings.Contains(joinedCodex, "old-codex") {
 		t.Errorf("replay codex launch cmd should strip old session id: %s", joinedCodex)
-	}
-
-	// Falls back to raw binary <bin> <resumeArgs...> when harness does NOT exist,
-	// even if LaunchCmd held a harness command.
-	cmdNoHarness := buildConversationOpenCommand("claude", "work", "new-sess-99", "/repo", "Title", stored, "/usr/local/bin/tmux-spaces", "")
-	joinedNoHarness := strings.Join(cmdNoHarness, " ")
-	wantNoHarness := "/usr/local/bin/tmux-spaces __shim claude-code claude --resume new-sess-99"
-	if !strings.Contains(joinedNoHarness, wantNoHarness) {
-		t.Errorf("no-harness fallback cmd = %s, want substring %q", joinedNoHarness, wantNoHarness)
-	}
-	if strings.Contains(joinedNoHarness, "harness") || strings.Contains(joinedNoHarness, "--profile") {
-		t.Errorf("no-harness fallback must not depend on harness or profiles: %s", joinedNoHarness)
 	}
 }
 
@@ -244,7 +232,7 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 		t.Fatalf("expected 2 new-window calls, got %d", len(newWindows))
 	}
 	joined2 := strings.Join(newWindows[1], " ")
-	wantDefaultCmd := "/usr/local/bin/tmux-spaces __shim codex /usr/local/bin/tmux-spaces codex profile default resume conv-id-2"
+	wantDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex -- resume conv-id-2"
 	if !strings.Contains(joined2, "-t beta:") || !strings.Contains(joined2, "-n codex") || strings.Contains(joined2, "-c /missing/dir") || !strings.Contains(joined2, wantDefaultCmd) || strings.Contains(joined2, "__resume-wrap") {
 		t.Errorf("fallback new-window args = %v", newWindows[1])
 	}
@@ -268,7 +256,7 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 		t.Fatalf("expected 3 new-window calls, got %d", len(newWindows))
 	}
 	joined3 := strings.Join(newWindows[2], " ")
-	wantExplicitDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex /usr/local/bin/tmux-spaces codex profile default resume conv-id-3"
+	wantExplicitDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex -- resume conv-id-3"
 	if !strings.Contains(joined3, "-n codex") || strings.Contains(joined3, "-n default") || !strings.Contains(joined3, wantExplicitDefaultCmd) || strings.Contains(joined3, "__resume-wrap") {
 		t.Errorf("default profile new-window args = %v", newWindows[2])
 	}
@@ -378,7 +366,7 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 		t.Fatalf("recorded[3].LaunchCmd = %v, want %v", recorded[3].LaunchCmd, want4)
 	}
 	joined4 := strings.Join(newWindows[3], " ")
-	wantCmd4 := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code /usr/local/bin/tmux-spaces claude profile pratham --resume conv-4"
+	wantCmd4 := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code -- --resume conv-4"
 	if !strings.Contains(joined4, wantCmd4) || strings.Contains(joined4, "oldprof") {
 		t.Errorf("override new-window args = %v, want %q without oldprof", newWindows[3], wantCmd4)
 	}
@@ -386,9 +374,9 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 
 func TestBuildConversationOpenCommandExplicitProfileOverridesStaleLaunchCmd(t *testing.T) {
 	stale := []string{"/opt/bin/harness", "claude", "profile", "work", "--model", "opus", "--resume", "old-sess"}
-	cmd := buildConversationOpenCommand("claude", "pratham", "new-sess-1", "/repo", "Title", stale, "/usr/local/bin/tmux-spaces", "/usr/local/bin/harness")
+	cmd := buildConversationOpenCommand("claude", "pratham", "new-sess-1", "/repo", "Title", stale, "/usr/local/bin/tmux-spaces")
 	joined := strings.Join(cmd, " ")
-	want := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code /usr/local/bin/harness claude profile pratham --resume new-sess-1"
+	want := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code -- --resume new-sess-1"
 	if !strings.Contains(joined, want) {
 		t.Errorf("override cmd = %s, want substring %q", joined, want)
 	}

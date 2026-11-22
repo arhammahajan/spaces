@@ -10,7 +10,6 @@ func harnessManagedPlugins() []agent.Plugin {
 			PluginSpec: agent.Spec{
 				ID:                      "cline",
 				ScreenManifestID:        "cline",
-				HarnessManaged:          true,
 				OSCAuthority:            false,
 				RecognizesVersionBanner: true,
 			},
@@ -23,7 +22,6 @@ func harnessManagedPlugins() []agent.Plugin {
 				ID:                      "copilot",
 				Aliases:                 []string{"github-copilot", "ghcs"},
 				ScreenManifestID:        "copilot",
-				HarnessManaged:          true,
 				OSCAuthority:            true,
 				RecognizesVersionBanner: true,
 			},
@@ -35,7 +33,6 @@ func harnessManagedPlugins() []agent.Plugin {
 			PluginSpec: agent.Spec{
 				ID:                      "fx",
 				Aliases:                 []string{"fx-router"},
-				HarnessManaged:          true,
 				OSCAuthority:            true,
 				RecognizesVersionBanner: true,
 			},
@@ -48,7 +45,6 @@ func harnessManagedPlugins() []agent.Plugin {
 				ID:                      "gemini",
 				Aliases:                 []string{"gemini-cli"},
 				ScreenManifestID:        "gemini",
-				HarnessManaged:          true,
 				OSCAuthority:            false,
 				RecognizesVersionBanner: true,
 				WorktreeTitlePrefixes:   []string{"gemini - ", "gemini: ", "gemini | "},
@@ -62,7 +58,6 @@ func harnessManagedPlugins() []agent.Plugin {
 				ID:                      "grok",
 				Aliases:                 []string{"grok-build"},
 				ScreenManifestID:        "grok",
-				HarnessManaged:          true,
 				OSCAuthority:            true,
 				RecognizesVersionBanner: true,
 			},
@@ -73,7 +68,6 @@ func harnessManagedPlugins() []agent.Plugin {
 		&agent.BasePlugin{
 			PluginSpec: agent.Spec{
 				ID:                      "mcode",
-				HarnessManaged:          true,
 				OSCAuthority:            true,
 				RecognizesVersionBanner: true,
 			},
@@ -86,7 +80,6 @@ func harnessManagedPlugins() []agent.Plugin {
 				ID:                      "pi",
 				Aliases:                 []string{"herdr:pi"},
 				ScreenManifestID:        "pi",
-				HarnessManaged:          true,
 				OSCAuthority:            true,
 				RecognizesVersionBanner: true,
 			},
@@ -99,7 +92,6 @@ func harnessManagedPlugins() []agent.Plugin {
 				ID:                      "qwen",
 				Aliases:                 []string{"qwen-code", "qwen code"},
 				ScreenManifestID:        "qwen",
-				HarnessManaged:          true,
 				OSCAuthority:            false,
 				RecognizesVersionBanner: true,
 			},
@@ -111,7 +103,6 @@ func harnessManagedPlugins() []agent.Plugin {
 			PluginSpec: agent.Spec{
 				ID:                      "vibe",
 				Aliases:                 []string{"vibe-acp"},
-				HarnessManaged:          true,
 				OSCAuthority:            true,
 				RecognizesVersionBanner: true,
 			},
@@ -122,7 +113,6 @@ func harnessManagedPlugins() []agent.Plugin {
 		&agent.BasePlugin{
 			PluginSpec: agent.Spec{
 				ID:                      "crush",
-				HarnessManaged:          false,
 				OSCAuthority:            true,
 				RecognizesVersionBanner: true,
 			},
@@ -130,7 +120,6 @@ func harnessManagedPlugins() []agent.Plugin {
 		&agent.BasePlugin{
 			PluginSpec: agent.Spec{
 				ID:                      "omp",
-				HarnessManaged:          false,
 				OSCAuthority:            true,
 				RecognizesVersionBanner: true,
 			},

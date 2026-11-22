@@ -18,7 +18,6 @@ func NewMuse() agent.Plugin {
 			Aliases:                 []string{"muse-code", "muse-cli"},
 			ResumeSubcommand:        "resume",
 			ScreenManifestID:        "muse",
-			HarnessManaged:          true,
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
 			TitlePrefixes:           []string{"Muse - ", "Muse: "},

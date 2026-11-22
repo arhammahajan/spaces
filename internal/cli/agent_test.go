@@ -67,7 +67,7 @@ func TestAgentCursorMapping(t *testing.T) {
 
 func TestAgentProfile(t *testing.T) {
 	fc := &FakeClient{Up: true, Cur: "s1", CurOK: true}
-	env := agentEnv(fc, "harness")
+	env := agentEnv(fc)
 	env.Getenv = func(string) string { return t.TempDir() }
 	args := []string{"agent", "codex", "--profile", "codex_router", "--session", "s2", "--", "--extra", "1"}
 	if code := Run(args, env); code != ExitOK {
@@ -80,7 +80,7 @@ func TestAgentProfile(t *testing.T) {
 	if w.Session != "s2" || w.Label != "codex_router" {
 		t.Errorf("window = %+v", w)
 	}
-	want := "tmux-spaces __shim --profile codex_router codex harness codex profile codex_router --extra 1"
+	want := "tmux-spaces __shim --profile codex_router codex -- --extra 1"
 	if strings.Join(w.Cmd, " ") != want {
 		t.Errorf("cmd = %q want %q", strings.Join(w.Cmd, " "), want)
 	}
@@ -106,11 +106,6 @@ func TestAgentErrors(t *testing.T) {
 	env3.Getenv = func(string) string { return "" }
 	if code := Run([]string{"agent", "codex", "--cwd", "/nonexistent-xyz"}, env3); code != ExitError {
 		t.Errorf("bad cwd = %d", code)
-	}
-	env4 := agentEnv(&FakeClient{Up: true, Cur: "s1", CurOK: true})
-	env4.Getenv = func(string) string { return t.TempDir() }
-	if code := Run([]string{"agent", "codex", "--profile", "p"}, env4); code != ExitError {
-		t.Errorf("missing harness = %d", code)
 	}
 	fc5 := &FakeClient{Up: true, Cur: "s1", CurOK: true, NewWinErr: errTestBoom}
 	env5 := agentEnv(fc5, "codex")

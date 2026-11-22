@@ -151,15 +151,19 @@ _tmux_spaces_preexec() {
     _TMUX_SPACES_ACTIVE_APP="$cmd"
     return
   fi
-  if [[ "$cmd" == "harness" && $(( idx + 1 )) -le n ]]; then
-    local sub="${(Q)words[$(( idx + 1 ))]}"
-    if _tmux_spaces_is_agent "$sub"; then
-      _TMUX_SPACES_ACTIVE_APP="$sub"
-      if (( idx + 3 <= n )) && [[ "${(Q)words[$(( idx + 2 ))]}" == "profile" ]]; then
-        _TMUX_SPACES_ACTIVE_PROFILE="${(Q)words[$(( idx + 3 ))]}"
+  case "$cmd" in
+    harness|spaces|tmux-spaces)
+      if (( idx + 1 <= n )); then
+        local sub="${(Q)words[$(( idx + 1 ))]}"
+        if _tmux_spaces_is_agent "$sub"; then
+          _TMUX_SPACES_ACTIVE_APP="$sub"
+          if (( idx + 3 <= n )) && [[ "${(Q)words[$(( idx + 2 ))]}" == "profile" ]]; then
+            _TMUX_SPACES_ACTIVE_PROFILE="${(Q)words[$(( idx + 3 ))]}"
+          fi
+        fi
       fi
-    fi
-  fi
+      ;;
+  esac
 }
 
 _tmux_spaces_precmd() {
@@ -266,17 +270,21 @@ _tmux_spaces_preexec() {
     _TMUX_SPACES_ACTIVE_PROFILE=""
     return
   fi
-  if [ "$cmd" = "harness" ] && [ $((idx + 1)) -lt "$n" ]; then
-    local sub
-    sub="$(_tmux_spaces_strip_quotes "${words[$((idx + 1))]}")"
-    if _tmux_spaces_is_agent "$sub"; then
-      _TMUX_SPACES_ACTIVE_APP="$sub"
-      _TMUX_SPACES_ACTIVE_PROFILE=""
-      if [ $((idx + 3)) -lt "$n" ] && [ "$(_tmux_spaces_strip_quotes "${words[$((idx + 2))]}")" = "profile" ]; then
-        _TMUX_SPACES_ACTIVE_PROFILE="$(_tmux_spaces_strip_quotes "${words[$((idx + 3))]}")"
+  case "$cmd" in
+    harness|spaces|tmux-spaces)
+      if [ $((idx + 1)) -lt "$n" ]; then
+        local sub
+        sub="$(_tmux_spaces_strip_quotes "${words[$((idx + 1))]}")"
+        if _tmux_spaces_is_agent "$sub"; then
+          _TMUX_SPACES_ACTIVE_APP="$sub"
+          _TMUX_SPACES_ACTIVE_PROFILE=""
+          if [ $((idx + 3)) -lt "$n" ] && [ "$(_tmux_spaces_strip_quotes "${words[$((idx + 2))]}")" = "profile" ]; then
+            _TMUX_SPACES_ACTIVE_PROFILE="$(_tmux_spaces_strip_quotes "${words[$((idx + 3))]}")"
+          fi
+        fi
       fi
-    fi
-  fi
+      ;;
+  esac
 }
 
 _tmux_spaces_precmd() {
@@ -379,7 +387,7 @@ function _tmux_spaces_postexec --on-event fish_postexec
     set -l profile ""
     if _tmux_spaces_is_agent "$cmd"
         set app "$cmd"
-    else if test "$cmd" = "harness"; and test (math $idx + 1) -le $n
+    else if contains -- "$cmd" harness spaces tmux-spaces; and test (math $idx + 1) -le $n
         set -l sub (string trim -c "\"'" -- $words[(math $idx + 1)])
         if _tmux_spaces_is_agent "$sub"
             set app "$sub"

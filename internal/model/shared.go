@@ -126,10 +126,10 @@ func DefaultSharedDir(explicit, homeDir string) string {
 }
 
 func realHomeDir(homeDir string) string {
-	if idx := strings.Index(homeDir, string(filepath.Separator)+".harness"+string(filepath.Separator)); idx > 0 {
-		return homeDir[:idx]
+	if homeDir == "" {
+		return ""
 	}
-	return homeDir
+	return agent.RealHomeDir(homeDir)
 }
 
 func candidateHomes(homeDir string) []string {

@@ -120,38 +120,6 @@ func TestForAgentDisabledExcluded(t *testing.T) {
 	}
 }
 
-func TestForAgentNativeMappedToAntigravity(t *testing.T) {
-	paths := forAgentPaths(t)
-	writeNativeCredential(t, paths, "work1", validCred())
-	res, err := ForAgent("antigravity", paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res) != 2 || res[0].Name != DefaultProfileName || res[1].Name != "work1" || !res[1].NativeAntigravity {
-		t.Fatalf("native credential must map to antigravity after default, got %+v", res)
-	}
-	// Natives must not attach to unrelated agents.
-	res, err = ForAgent("codex", paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res) != 1 || res[0].Name != DefaultProfileName {
-		t.Fatalf("native must not belong to codex, got %v", forAgentNames(res))
-	}
-}
-
-func TestForAgentBrokenNativeExcluded(t *testing.T) {
-	paths := forAgentPaths(t)
-	writeNativeCredential(t, paths, "broken", `{}`)
-	res, err := ForAgent("antigravity", paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res) != 1 || res[0].Name != DefaultProfileName {
-		t.Fatalf("invalid credential must be excluded, got %v", forAgentNames(res))
-	}
-}
-
 func TestLaunchSpecFromPathsUsesPaths(t *testing.T) {
 	t.Run("default spec is unmodified", func(t *testing.T) {
 		paths := forAgentPaths(t)
@@ -159,20 +127,6 @@ func TestLaunchSpecFromPathsUsesPaths(t *testing.T) {
 		spec := LaunchSpecFromPaths(r, paths)
 		if spec.Agent != "codex" || spec.ShadowHome != "" || spec.Binary != "" || len(spec.Env) != 0 || len(spec.PrependArgs) != 0 {
 			t.Fatalf("default spec must be unmodified, got %+v", spec)
-		}
-	})
-
-	t.Run("native launch uses a private home", func(t *testing.T) {
-		paths := forAgentPaths(t)
-		writeNativeCredential(t, paths, "work1", validCred())
-		r, err := Resolve("work1", paths)
-		if err != nil {
-			t.Fatal(err)
-		}
-		spec := LaunchSpecFromPaths(r, paths)
-		want := filepath.Join(harnessenv.HarnessDir(paths), "antigravity-native", "work1")
-		if spec.Agent != "antigravity" || spec.Binary != "" || spec.ShadowHome != want || !spec.NoRouter {
-			t.Fatalf("native launch spec = %+v, want private home %q", spec, want)
 		}
 	})
 

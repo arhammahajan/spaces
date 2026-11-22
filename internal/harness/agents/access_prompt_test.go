@@ -1,11 +1,10 @@
-package spacelaunch
+package agents
 
 import (
 	"errors"
 	"strings"
 	"testing"
 
-	"github.com/arhammahajan/spaces/internal/harness/agents"
 	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 )
 
@@ -174,7 +173,7 @@ func TestPromptLayeringKeepsProfileArgs(t *testing.T) {
 		t.Fatal("selection must not clobber existing env")
 	}
 	// The chosen level must exist in the agent's table.
-	if _, ok := agents.FindAccessLevel("kimi", "full"); !ok {
+	if _, ok := FindAccessLevel("kimi", "full"); !ok {
 		t.Fatal("kimi full level must exist")
 	}
 }

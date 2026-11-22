@@ -5,24 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 )
-
-func validCred() string {
-	return `{"token":{"refresh_token":"super-secret-refresh-token"}}`
-}
-
-func writeNativeCredential(t *testing.T, paths harnessenv.Paths, name, content string) {
-	t.Helper()
-	dir := NativeCredentialDir(paths)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, name+".json"), []byte(content), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
 
 func TestResolveIndependentOfT3Settings(t *testing.T) {
 	paths := testPaths(t)
@@ -60,46 +43,6 @@ func TestResolveIndependentOfT3Settings(t *testing.T) {
 	}
 	if len(res) != 1 || res[0].Name != DefaultProfileName || res[0].Source != SourceDefault {
 		t.Fatalf("ForAgent(codex) = %+v, want only built-in default", res)
-	}
-}
-
-func TestResolveNativeAntigravity(t *testing.T) {
-	paths := testPaths(t)
-	writeNativeCredential(t, paths, "antigravity", validCred())
-
-	r, err := Resolve("antigravity", paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if r.Source != SourceNativeAntigravity || !r.NativeAntigravity {
-		t.Fatalf("resolution = %+v, want native-antigravity", r)
-	}
-	if r.Profile.DisplayName != NativeAntigravityLabel {
-		t.Fatalf("displayName = %q, want %q", r.Profile.DisplayName, NativeAntigravityLabel)
-	}
-	// Missing special native name gives profile creation hint.
-	_, err = Resolve("antigravity_mahajanarham", paths)
-	if err == nil || !strings.Contains(err.Error(), "harness profile create") {
-		t.Fatalf("missing special native err = %v, want profile create hint", err)
-	}
-}
-
-func TestNativeAndStoredProfilesCanShareName(t *testing.T) {
-	paths := testPaths(t)
-	writeNativeCredential(t, paths, "work", validCred())
-	store, err := Open(paths)
-	if err != nil {
-		t.Fatal(err)
-	}
-	mustCreate(t, store, "work", Profile{Agent: "codex", Enabled: true}, CreateOptions{NoSeed: true})
-	if _, err := Resolve("work", paths); err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("bare work = %v, want ambiguity", err)
-	}
-	for agent, source := range map[string]string{"antigravity": SourceNativeAntigravity, "codex": SourceStore} {
-		res, err := ResolveForAgent(agent, "work", paths)
-		if err != nil || res.Source != source {
-			t.Errorf("%s/work = (%+v, %v), want source %s", agent, res, err, source)
-		}
 	}
 }
 

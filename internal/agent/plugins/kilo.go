@@ -10,7 +10,6 @@ func NewKilo() agent.Plugin {
 			Aliases:                 []string{"kilo-code", "kilo code", "herdr:kilo"},
 			ResumeFlag:              "--session",
 			ScreenManifestID:        "kilo",
-			HarnessManaged:          true,
 			OSCAuthority:            false,
 			RecognizesVersionBanner: true,
 			TitlePrefixes:           []string{"Kilo - ", "Kilo: ", "Kilo Code - "},

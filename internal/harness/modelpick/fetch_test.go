@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
-	"github.com/arhammahajan/spaces/internal/harness/routerctl"
 )
 
 // fixtureModels is the canned GET /v1/models body, written from the
@@ -161,8 +160,7 @@ func TestFetchParsesLiveShapes(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	opts := routerctl.Options{Router: harnessenv.RouterSettings{URL: srv.URL, APIKey: "test-key"}}
-	models, err := Fetch(opts)
+	models, err := Fetch(harnessenv.RouterSettings{URL: srv.URL, APIKey: "test-key"}, 0)
 	if err != nil {
 		t.Fatalf("fetch fixture: %v", err)
 	}
@@ -207,7 +205,7 @@ func TestFetchOmitsAuthWithoutKey(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	if _, err := Fetch(routerctl.Options{Router: harnessenv.RouterSettings{URL: srv.URL}}); err != nil {
+	if _, err := Fetch(harnessenv.RouterSettings{URL: srv.URL}, 0); err != nil {
 		t.Fatalf("fetch without key: %v", err)
 	}
 	mu.Lock()
@@ -223,7 +221,7 @@ func TestFetchToleratesBareArrayEnvelope(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	models, err := Fetch(routerctl.Options{Router: harnessenv.RouterSettings{URL: srv.URL, APIKey: "k"}})
+	models, err := Fetch(harnessenv.RouterSettings{URL: srv.URL, APIKey: "k"}, 0)
 	if err != nil {
 		t.Fatalf("bare array: %v", err)
 	}
@@ -235,13 +233,12 @@ func TestFetchToleratesBareArrayEnvelope(t *testing.T) {
 
 func TestFetchErrors(t *testing.T) {
 	t.Run("no URL", func(t *testing.T) {
-		if _, err := Fetch(routerctl.Options{}); err == nil || !strings.Contains(err.Error(), "no router URL") {
+		if _, err := Fetch(harnessenv.RouterSettings{}, 0); err == nil || !strings.Contains(err.Error(), "no router URL") {
 			t.Fatalf("want no-URL error, got %v", err)
 		}
 	})
 	t.Run("invalid URL", func(t *testing.T) {
-		opts := routerctl.Options{Router: harnessenv.RouterSettings{URL: "://not-a-url"}}
-		if _, err := Fetch(opts); err == nil || !strings.Contains(err.Error(), "invalid router URL") {
+		if _, err := Fetch(harnessenv.RouterSettings{URL: "://not-a-url"}, 0); err == nil || !strings.Contains(err.Error(), "invalid router URL") {
 			t.Fatalf("want invalid-URL error, got %v", err)
 		}
 	})
@@ -250,8 +247,7 @@ func TestFetchErrors(t *testing.T) {
 			http.Error(w, "unavailable", http.StatusServiceUnavailable)
 		}))
 		defer srv.Close()
-		opts := routerctl.Options{Router: harnessenv.RouterSettings{URL: srv.URL}}
-		if _, err := Fetch(opts); err == nil || !strings.Contains(err.Error(), "status 503") {
+		if _, err := Fetch(harnessenv.RouterSettings{URL: srv.URL}, 0); err == nil || !strings.Contains(err.Error(), "status 503") {
 			t.Fatalf("want status error, got %v", err)
 		}
 	})
@@ -259,8 +255,7 @@ func TestFetchErrors(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
 		url := srv.URL
 		srv.Close()
-		opts := routerctl.Options{Router: harnessenv.RouterSettings{URL: url}}
-		if _, err := Fetch(opts); err == nil || !strings.Contains(err.Error(), "/v1/models") {
+		if _, err := Fetch(harnessenv.RouterSettings{URL: url}, 0); err == nil || !strings.Contains(err.Error(), "/v1/models") {
 			t.Fatalf("want transport error naming the endpoint, got %v", err)
 		}
 	})
@@ -269,8 +264,7 @@ func TestFetchErrors(t *testing.T) {
 			fmt.Fprint(w, "not-json")
 		}))
 		defer srv.Close()
-		opts := routerctl.Options{Router: harnessenv.RouterSettings{URL: srv.URL}}
-		if _, err := Fetch(opts); err == nil || !strings.Contains(err.Error(), "parse models listing") {
+		if _, err := Fetch(harnessenv.RouterSettings{URL: srv.URL}, 0); err == nil || !strings.Contains(err.Error(), "parse models listing") {
 			t.Fatalf("want parse error, got %v", err)
 		}
 	})

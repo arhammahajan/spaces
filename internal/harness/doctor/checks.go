@@ -73,17 +73,12 @@ func checkProfiles(opts CheckOptions) (string, string) {
 }
 
 // checkAgents inventories the agent binaries through agents.Infos and
-// lists the missing ones. antigravity-native is skipped: it is
-// profile-only and has no default binary, so it is never a
-// missing-install signal and must not keep the row permanently warn.
+// lists the missing ones.
 func checkAgents(opts CheckOptions) (string, string) {
 	infos := agents.Infos(opts.Paths)
 	checked := 0
 	var missing []string
 	for _, info := range infos {
-		if info.Name == "antigravity-native" {
-			continue
-		}
 		checked++
 		if info.BinaryState != "ok" {
 			missing = append(missing, info.Name)
@@ -184,11 +179,11 @@ func pidAlive(kill func(int, syscall.Signal) error, pid int) bool {
 }
 
 // entryNames are the launcher entry points this check verifies.
-var entryNames = []string{"harness", "spaces"}
+var entryNames = []string{"spaces"}
 
 // checkEntries verifies the ~/.local/bin entry points: each must resolve
 // through a symlink (or stand as a regular file) to an existing file. A
-// missing or dangling entry is a fail: the shell and zellij integrations
+// missing or dangling entry is a fail: the shell and tmux integrations
 // dispatch through these names.
 func checkEntries(opts CheckOptions) (string, string) {
 	dir := filepath.Join(opts.Paths.Home, ".local", "bin")

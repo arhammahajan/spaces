@@ -14,14 +14,11 @@ package agents
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 )
@@ -33,12 +30,9 @@ var aliases = map[string]string{
 	"kimi-code": "kimi",
 }
 
-// known lists every canonical agent id, sorted. antigravity-native is
-// included: it is profile-only (its binary arrives via LaunchSpec.Binary),
-// but Resolve accepts it, so the registry and the resolver stay consistent.
+// known lists every canonical agent id, sorted.
 var known = []string{
 	"antigravity",
-	"antigravity-native",
 	"claude",
 	"cline",
 	"codex",
@@ -58,27 +52,26 @@ var known = []string{
 	"vibe",
 }
 
-// notes holds the short per-agent note shown by `harness agents`.
+// notes holds the short per-agent note shown by `spaces agents`.
 var notes = map[string]string{
-	"antigravity":        "Antigravity CLI against the router, configured default model",
-	"antigravity-native": "Profile-only: plain exec of the profile-provided native binary",
-	"claude":             "Claude Code against the router (ANTHROPIC_BASE_URL)",
-	"cline":              "Cline via fnm node with a router session key",
-	"codex":              "Codex with Model Router provider -c overrides",
-	"copilot":            "Copilot with router provider settings",
-	"deepseek":           "Deepseek harness (web UI by default)",
-	"fx":                 "fx router binary with a router session",
-	"gemini":             "Gemini CLI from a source checkout via node",
-	"grok":               "Grok CLI with router model endpoints",
-	"kilo":               "Kilo, plain exec",
-	"kimi":               "Kimi, plain exec with its own provider settings",
-	"kimi-cli":           "Kimi CLI against the router OpenAI endpoint",
-	"mcode":              "mcode, plain exec with its own provider settings",
-	"muse":               "Meta muse against the router key",
-	"opencode":           "OpenCode with a private --standalone server per TUI",
-	"pi":                 "Pi, plain exec with its own provider settings",
-	"qwen":               "Qwen, plain exec with its own provider settings",
-	"vibe":               "Mistral vibe with a router session",
+	"antigravity": "Antigravity CLI against the router, configured default model",
+	"claude":      "Claude Code against the router (ANTHROPIC_BASE_URL)",
+	"cline":       "Cline via fnm node with a router session key",
+	"codex":       "Codex with Model Router provider -c overrides",
+	"copilot":     "Copilot with router provider settings",
+	"deepseek":    "Deepseek harness (web UI by default)",
+	"fx":          "fx router binary with a router session",
+	"gemini":      "Gemini CLI from a source checkout via node",
+	"grok":        "Grok CLI with router model endpoints",
+	"kilo":        "Kilo, plain exec",
+	"kimi":        "Kimi, plain exec with its own provider settings",
+	"kimi-cli":    "Kimi CLI against the router OpenAI endpoint",
+	"mcode":       "mcode, plain exec with its own provider settings",
+	"muse":        "Meta muse against the router key",
+	"opencode":    "OpenCode with a private --standalone server per TUI",
+	"pi":          "Pi, plain exec with its own provider settings",
+	"qwen":        "Qwen, plain exec with its own provider settings",
+	"vibe":        "Mistral vibe with a router session",
 }
 
 // Known returns the canonical agent ids, sorted.
@@ -155,49 +148,6 @@ func defaultCommandRunner(name string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// FetchModelIDs retrieves model ids from the router's /v1/models endpoint.
-// It is a package variable so tests can inject a fake; the default performs
-// a real GET with a 10s timeout and tolerates both {data:[...]} and bare
-// [...] response shapes.
-var FetchModelIDs = defaultFetchModelIDs
-
-func defaultFetchModelIDs(modelsURL string) ([]string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(modelsURL)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", modelsURL, resp.Status)
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	var obj struct {
-		Data []struct {
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	if err := json.Unmarshal(body, &obj); err != nil {
-		var bare []struct {
-			ID string `json:"id"`
-		}
-		if err2 := json.Unmarshal(body, &bare); err2 != nil {
-			return nil, err
-		}
-		obj.Data = bare
-	}
-	ids := make([]string, 0, len(obj.Data))
-	for _, m := range obj.Data {
-		if m.ID != "" {
-			ids = append(ids, m.ID)
-		}
-	}
-	return ids, nil
-}
-
 // isExecutable reports whether path names an existing executable file, or
 // resolves via PATH when path holds no slash.
 func isExecutable(path string) bool {
@@ -259,8 +209,6 @@ func defaultBinary(agent string, paths harnessenv.Paths) (string, error) {
 		return "node", nil
 	case "antigravity":
 		return filepath.Join(home, ".local", "libexec", "antigravity", "agy"), nil
-	case "antigravity-native":
-		return "", nil
 	}
 	return "", fmt.Errorf("unknown agent: %s", agent)
 }
@@ -282,69 +230,6 @@ func defaultAntigravityModel(home string) string {
 		return fallback
 	}
 	return settings.Model
-}
-
-// findACPServer locates the Antigravity ACP server binary under
-// $HOME/.harness/tools/antigravity-acp/linux-x64, honoring active.json's
-// releaseId first (tolerant of any read/parse problem) and otherwise
-// picking the newest versions/*/agy_acp_server.par by (mtime, path).
-func findACPServer(paths harnessenv.Paths) (string, bool) {
-	install := filepath.Join(harnessenv.HarnessDir(paths), "tools", "antigravity-acp", "linux-x64")
-	if data, err := os.ReadFile(filepath.Join(install, "active.json")); err == nil {
-		var active struct {
-			ReleaseID string `json:"releaseId"`
-		}
-		if json.Unmarshal(data, &active) == nil && active.ReleaseID != "" {
-			cand := filepath.Join(install, "versions", active.ReleaseID, "agy_acp_server.par")
-			if isExecutable(cand) {
-				return cand, true
-			}
-		}
-	}
-	entries, err := os.ReadDir(filepath.Join(install, "versions"))
-	if err != nil {
-		return "", false
-	}
-	best := ""
-	var bestTime time.Time
-	for _, e := range entries {
-		cand := filepath.Join(install, "versions", e.Name(), "agy_acp_server.par")
-		st, err := os.Stat(cand)
-		if err != nil || st.IsDir() || st.Mode()&0o111 == 0 {
-			continue
-		}
-		if best == "" || st.ModTime().After(bestTime) ||
-			(st.ModTime().Equal(bestTime) && cand > best) {
-			best, bestTime = cand, st.ModTime()
-		}
-	}
-	return best, best != ""
-}
-
-// gatewayModels returns the comma-joined model ids for
-// AGY_LLM_GATEWAY_MODELS: the ids from the router with the default model
-// first (stable otherwise), degrading to the default model alone when the
-// fetch fails.
-func gatewayModels(gatewayURL, def string) string {
-	ids, err := FetchModelIDs(gatewayURL + "/v1/models")
-	if err != nil {
-		return def
-	}
-	var out []string
-	for _, id := range ids {
-		if id == def {
-			out = append(out, id)
-		}
-	}
-	for _, id := range ids {
-		if id != def {
-			out = append(out, id)
-		}
-	}
-	if len(out) == 0 {
-		return def
-	}
-	return strings.Join(out, ",")
 }
 
 // needsStandalone reports whether opencode should run with --standalone:

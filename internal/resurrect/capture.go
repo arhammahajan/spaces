@@ -273,11 +273,11 @@ func readChildCmdline(pid int) []string {
 		argv := readProcCmdline(child)
 		if len(argv) > 0 {
 			base := filepath.Base(argv[0])
-			// Keep user-facing `harness <agent> ...` / `harness profile ...`
-			// launchers intact so profile/shadow-home setup is preserved on
-			// restore, while descending past internal wrappers.
+			// Keep user-facing `spaces <agent> ...` / `spaces profile ...`
+			// (and legacy `harness ...`) launchers intact so profile/shadow-home
+			// setup is preserved on restore, while descending past internal wrappers.
 			best = argv
-			if base == "harness" && (len(argv) < 2 || argv[1] != "spaces") {
+			if isHarnessLauncher(argv) {
 				return argv
 			}
 			if CanonicalAgent(base) != "" {

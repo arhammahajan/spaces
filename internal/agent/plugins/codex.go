@@ -15,7 +15,6 @@ func NewCodex() agent.Plugin {
 			Aliases:                 []string{"openai-codex"},
 			ResumeSubcommand:        "resume",
 			ScreenManifestID:        "codex",
-			HarnessManaged:          true,
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
 			TitlePrefixes:           []string{"Codex - ", "Codex: "},

@@ -197,7 +197,6 @@ func TestEmitProgramStatusTmux(t *testing.T) {
 	want := []string{
 		"set-option -p -t %12 @spaces_state blocked",
 		"set-option -p -t %12 @spaces_app claude-code",
-		"set-option -p -u -t %12 @spaces_profile",
 		"set-option -p -t %12 @spaces_kind auth",
 		"set-option -p -t %12 @spaces_msg need input",
 		"set-option -p -t %12 @spaces_ts 1700000001234",

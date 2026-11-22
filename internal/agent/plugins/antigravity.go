@@ -29,7 +29,6 @@ func NewAntigravity() agent.Plugin {
 			ShortName:               "agy",
 			ResumeFlag:              "--conversation",
 			ScreenManifestID:        "agy",
-			HarnessManaged:          true,
 			OSCAuthority:            false,
 			RecognizesVersionBanner: true,
 			WorktreeTitlePrefixes:   []string{"antigravity - ", "antigravity: ", "antigravity | "},

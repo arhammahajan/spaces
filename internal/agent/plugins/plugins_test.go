@@ -25,7 +25,7 @@ func TestBuiltinPluginsRegistrationAndLookups(t *testing.T) {
 		"dsh-tui":         "deepseek",
 		"deepseek":        "deepseek",
 		"kimi":            "kimi",
-		"kimi-cli":        "kimi",
+		"kimi-cli":        "kimi-cli",
 		"kimi-code":       "kimi",
 		"open-code":       "opencode",
 		"herdr:opencode":  "opencode",

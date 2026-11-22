@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/arhammahajan/spaces/internal/agent"
 )
 
 // SpaceHooks implements `__space-hooks [--detail SESSION PANE | --titles JSON | --record-outcome JSON | --remove-outcome JSON]`.
@@ -211,7 +213,7 @@ func EnrichOutcomeMap(entry map[string]any) {
 		}
 	}
 	if strings.TrimSpace(profile) == "" && len(launchCmd) > 0 {
-		if extracted := extractProfileFromLaunchCmd(launchCmd); extracted != "" {
+		if extracted := agent.HarnessProfileFromArgv(launchCmd); extracted != "" {
 			profile = extracted
 			entry["profile"] = profile
 		}

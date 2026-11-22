@@ -1025,12 +1025,6 @@ func MaterializeCodexShadowHome(shadowDir, sharedDir string) error {
 // MaterializeForLaunch prepares shared MCP/skills/chat overlays and checks
 // Antigravity credential paths even when sharing is disabled.
 func MaterializeForLaunch(r Resolution, paths harnessenv.Paths) error {
-	if r.NativeAntigravity {
-		if _, err := agents.EnsureRestoreEnvScript(paths); err != nil {
-			return err
-		}
-		return importNativeAntigravity(r.Name, r.Profile.ShadowHome, paths)
-	}
 	p := r.Profile
 	if p.Agent == "antigravity" {
 		if _, err := agents.EnsureRestoreEnvScript(paths); err != nil {

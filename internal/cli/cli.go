@@ -90,6 +90,10 @@ type Env struct {
 	RunTabs func(Env, []string) int
 	// RunChild runs the __shim child process, returning its exit code.
 	RunChild func(bin string, args []string) int
+	// RunHarnessChild resolves a harness profile in-process, materializes
+	// overlays, builds child env via agents.BuildChildEnv, and runs the agent
+	// directly without a second Go process hop (wired by cmd/tmux-spaces).
+	RunHarnessChild func(agentName, profile string, args []string) int
 	// RunShell runs the interactive shell for __shim --hold.
 	RunShell func() int
 	// HookHealth reports hook listener health for doctor.
@@ -416,10 +420,11 @@ func Run(args []string, env Env) int {
 }
 
 func printTopHelp(env Env) {
-	env.outf(`tmux-spaces - tmux-native agent spaces
+	env.outf(`tmux-spaces - tmux-native agent spaces & coding harness launcher
 
 usage: tmux-spaces <command> [args]
 
+Spaces & TUI:
   status-bar [--plain] [--json]   status-line badge segment
   space|spaces ...                 manage spaces (tmux sessions)
   panes [--session S] [--json]     list panes with status
@@ -429,18 +434,30 @@ usage: tmux-spaces <command> [args]
   wait TARGET [flags]              wait for a pane state
   next                             jump to the hottest attention pane
   agent NAME [flags] [-- args...]  open an agent in a new window
-  __shim [--hold] APP BIN [args]   pane-side agent wrapper
+  __shim [--hold] [--profile P] APP [<bin> [args...] | -- [args...]]
+                                   pane-side agent wrapper
   doctor [--json]                  check tmux/server/hooks health
   shell-init <zsh|bash|fish>       print shell exit-status hook script
   popup [--new]                    open the Navigator TUI
   tabs|tab [--new] [--session S]   inspect & switch tabs in current workspace
   worktrees|wt [list|new|remove|prune]
                                    manage git worktrees (or open Worktrees TUI)
-  agents                           open the Agents selector TUI
+  resurrect [save|restore|list|...] save & restore tmux spaces
+  agents                           open the Agents selector TUI (or CLI inventory)
   inbox                            open the Attention Inbox TUI
   conversations|chats [--query Q]  search & resume agent conversations
   shared|skills|mcp [--dir D]      browse shared MCP servers and skills
-  tabs|tab [--new] [--session S]   inspect & switch tabs in current workspace
+
+Harness & Hooks:
+  <agent> [profile <P>] [args...]  launch a coding harness directly
+  launch <agent> [profile <P>]     explicit coding harness launch
+  profile <subcommand> ...         manage harness profiles (list/create/edit/...)
+  models                           pick a model from the router
+  usage [--days N] [--by day|model] summarize router token usage
+  harness-status [--json]          router, agents, and profiles summary
+  harness-doctor [--json]          whole-stack harness health report
+  hooks [status|start|stop|restart|serve]
+                                   manage the local hook listener
   help [command]                   show help
 `)
 }

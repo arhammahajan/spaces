@@ -1,17 +1,11 @@
-// Profile resolution, listing, built-in default profiles, and
-// native-antigravity credential lookup.
+// Profile resolution, listing, and built-in default profiles.
 //
 // Every agent starts with an implicit unmodified "default" profile
-// (SourceDefault). User-added profiles live in the own store
-// (SourceStore), and native antigravity credentials are discovered separately
-// (SourceNativeAntigravity). All storage and resolution is completely
-// independent of T3 Code.
+// (SourceDefault). User-added profiles live in the own store (SourceStore).
 package profiles
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -21,35 +15,16 @@ import (
 
 // Source labels used by Resolution and ListEntry.
 const (
-	SourceDefault           = "default"
-	SourceStore             = "store"
-	SourceNativeAntigravity = "native-antigravity"
+	SourceDefault = "default"
+	SourceStore   = "store"
 )
-
-// NativeAntigravityLabel is the generic display label for native profiles.
-// Credential contents are never exposed.
-const NativeAntigravityLabel = "Native Antigravity"
-
-// specialNativeNames require a native credential file; a missing file is a
-// dedicated login-hint error instead of a generic unknown-profile error.
-var specialNativeNames = map[string]bool{
-	"antigravity":              true,
-	"antigravity_mahajanarham": true,
-}
-
-// NativeCredentialDir returns the native-antigravity credential directory:
-// $HOME/.harness/credentials/antigravity.
-func NativeCredentialDir(paths harnessenv.Paths) string {
-	return filepath.Join(harnessenv.HarnessDir(paths), "credentials", "antigravity")
-}
 
 // Resolution is the outcome of resolving a profile name.
 type Resolution struct {
-	Source            string
-	Name              string
-	Profile           Profile
-	Customized        bool // true when a stored default overrides the built-in profile
-	NativeAntigravity bool // set when Source == "native-antigravity"
+	Source     string
+	Name       string
+	Profile    Profile
+	Customized bool // true when a stored default overrides the built-in profile
 }
 
 // ListEntry is one row of the profile-list overview. It carries names,
@@ -67,7 +42,7 @@ func DefaultResolution(agent string) Resolution {
 	return Resolution{
 		Source:  SourceDefault,
 		Name:    DefaultProfileName,
-		Profile: builtinDefaultProfile(mapWantAgent(agent)),
+		Profile: builtinDefaultProfile(agent),
 	}
 }
 
@@ -77,7 +52,22 @@ func Resolve(ref string, paths harnessenv.Paths) (Resolution, error) {
 	if err != nil {
 		return Resolution{}, err
 	}
-	return store.resolve(ref)
+	return store.Resolve(ref)
+}
+
+// Resolve resolves an agent/name reference or a unique name from an already-open Store.
+func (s *Store) Resolve(ref string) (Resolution, error) {
+	return s.resolve(ref)
+}
+
+// ResolveForAgent resolves a profile name within the specified agent from an already-open Store.
+func (s *Store) ResolveForAgent(agent, name string) (Resolution, error) {
+	return s.resolve(newProfileKey(agent, name).String())
+}
+
+// ListAll returns built-in defaults and stored profiles from an already-open Store.
+func (s *Store) ListAll() []ListEntry {
+	return s.listEntries("")
 }
 
 func (s *Store) resolve(ref string) (Resolution, error) {
@@ -89,14 +79,13 @@ func (s *Store) resolve(ref string) (Resolution, error) {
 		if !qualified {
 			return Resolution{}, fmt.Errorf("profile %q requires an agent; use agent/default", name)
 		}
-		agent = mapWantAgent(agent)
 		if !isKnownAgent(agent) {
 			return Resolution{}, fmt.Errorf("unknown agent: %s", agent)
 		}
 		p, customized := s.GetDefault(agent)
 		return Resolution{Source: SourceDefault, Name: name, Profile: p, Customized: customized}, nil
 	}
-	keys := s.profileCandidates(ref)
+	keys := s.matchingKeys(ref)
 	if len(keys) > 1 {
 		return Resolution{}, ambiguousProfile(name, keys)
 	}
@@ -108,39 +97,18 @@ func (s *Store) resolve(ref string) (Resolution, error) {
 			}
 			return Resolution{Source: SourceStore, Name: key.name, Profile: p}, nil
 		}
-		return nativeResolution(key.name, s.paths), nil
 	}
 	if qualified {
-		keys := s.profileCandidates(name)
-		if len(keys) == 1 && keys[0].agent != mapWantAgent(agent) {
+		keys := s.matchingKeys(name)
+		if len(keys) == 1 && keys[0].agent != agent {
 			return Resolution{}, fmt.Errorf("profile %q belongs to agent %s, not %s", name, keys[0].agent, agent)
 		}
 	}
-	if (!qualified || mapWantAgent(agent) == "antigravity") && specialNativeNames[name] {
-		return Resolution{}, fmt.Errorf("no native credential for profile: %s (create an antigravity profile with: harness profile create %s --agent antigravity)", name, name)
-	}
-	available := availableNames(s.paths, s)
+	available := availableNames(s)
 	if len(available) == 0 {
 		return Resolution{}, fmt.Errorf("unknown profile: %s", ref)
 	}
 	return Resolution{}, fmt.Errorf("unknown profile: %s (available: %s)", ref, strings.Join(available, ", "))
-}
-
-func (s *Store) profileCandidates(ref string) []profileKey {
-	keys := s.matchingKeys(ref)
-	agent, name, qualified := strings.Cut(ref, "/")
-	if qualified && mapWantAgent(agent) != "antigravity" {
-		return keys
-	}
-	if !qualified {
-		name = ref
-	}
-	nativeKey := newProfileKey("antigravity", name)
-	if _, stored := s.profiles[nativeKey]; !stored && name != DefaultProfileName &&
-		hasNativeCredential(s.paths, name) {
-		keys = append(keys, nativeKey)
-	}
-	return keys
 }
 
 // ResolveForAgent resolves a name within the specified agent.
@@ -154,7 +122,7 @@ func LaunchSpecFrom(r Resolution) harnessenv.LaunchSpec {
 	return LaunchSpecFromPaths(r, harnessenv.DefaultPaths())
 }
 
-// ListAll returns built-in defaults, stored profiles, and native credentials.
+// ListAll returns built-in defaults and stored profiles.
 func ListAll(paths harnessenv.Paths) ([]ListEntry, error) {
 	store, err := Open(paths)
 	if err != nil {
@@ -169,7 +137,7 @@ func ListForAgent(agent string, paths harnessenv.Paths) ([]ListEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	return store.listEntries(mapWantAgent(agent)), nil
+	return store.listEntries(agent), nil
 }
 
 func (s *Store) listEntries(agent string) []ListEntry {
@@ -195,14 +163,6 @@ func (s *Store) listEntries(agent string) []ListEntry {
 		}
 		out = append(out, ListEntry{Name: key.name, DisplayName: display, Source: SourceStore, Agent: key.agent})
 	}
-	if agent == "" || agent == "antigravity" {
-		for _, name := range listNativeCredentials(s.paths) {
-			if _, stored := s.profiles[newProfileKey("antigravity", name)]; stored || name == DefaultProfileName {
-				continue
-			}
-			out = append(out, ListEntry{Name: name, DisplayName: NativeAntigravityLabel, Source: SourceNativeAntigravity, Agent: "antigravity"})
-		}
-	}
 	return out
 }
 
@@ -223,41 +183,20 @@ func FormatPlain(entries []ListEntry) string {
 	return b.String()
 }
 
-// availableNames lists every resolvable custom/native name, sorted, for error messages.
-func availableNames(paths harnessenv.Paths, store *Store) []string {
+// availableNames lists every resolvable custom name, sorted, for error messages.
+func availableNames(store *Store) []string {
 	seen := map[string]bool{}
 	var names []string
-	add := func(n string) {
-		if !seen[n] {
-			seen[n] = true
-			names = append(names, n)
-		}
-	}
 	if store != nil {
 		for _, np := range store.List() {
-			add(np.Name)
+			if !seen[np.Name] {
+				seen[np.Name] = true
+				names = append(names, np.Name)
+			}
 		}
-	}
-	for _, n := range listNativeCredentials(paths) {
-		add(n)
 	}
 	sort.Strings(names)
 	return names
-}
-
-// nativeResolution builds a Resolution for a valid native credential.
-func nativeResolution(name string, paths harnessenv.Paths) Resolution {
-	return Resolution{
-		Source: SourceNativeAntigravity,
-		Name:   name,
-		Profile: Profile{
-			Agent:       "antigravity-native",
-			DisplayName: NativeAntigravityLabel,
-			Enabled:     true,
-			ShadowHome:  filepath.Join(harnessenv.HarnessDir(paths), "antigravity-native", name),
-		},
-		NativeAntigravity: true,
-	}
 }
 
 // expandTildePath expands a leading "~" (alone or followed by a slash) to home.
@@ -269,49 +208,6 @@ func expandTildePath(value, home string) string {
 		return filepath.Join(home, strings.TrimPrefix(value, "~/"))
 	}
 	return value
-}
-
-// hasNativeCredential reports whether a valid credential file exists for
-// name. Only the presence of token.refresh_token is checked; the file is
-// never logged and parse failures count as absent.
-func hasNativeCredential(paths harnessenv.Paths, name string) bool {
-	if name == "." || name == ".." || !safeCredentialRe.MatchString(name) {
-		return false
-	}
-	data, err := os.ReadFile(filepath.Join(NativeCredentialDir(paths), name+".json"))
-	if err != nil {
-		return false
-	}
-	var cred struct {
-		Token *struct {
-			RefreshToken string `json:"refresh_token"`
-		} `json:"token"`
-	}
-	if err := json.Unmarshal(data, &cred); err != nil {
-		return false
-	}
-	return cred.Token != nil && cred.Token.RefreshToken != ""
-}
-
-// listNativeCredentials returns the sorted names with valid credential
-// files, restricted to safe names.
-func listNativeCredentials(paths harnessenv.Paths) []string {
-	entries, err := os.ReadDir(NativeCredentialDir(paths))
-	if err != nil {
-		return nil
-	}
-	var names []string
-	for _, e := range entries {
-		if !e.Type().IsRegular() || !strings.HasSuffix(e.Name(), ".json") {
-			continue
-		}
-		name := strings.TrimSuffix(e.Name(), ".json")
-		if hasNativeCredential(paths, name) {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	return names
 }
 
 func copyMap(m map[string]string) map[string]string {

@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
+	"github.com/arhammahajan/spaces/internal/harness/profiles"
 	"github.com/arhammahajan/spaces/internal/screen"
 )
 
@@ -85,18 +87,31 @@ func (r *Registry) Register(p Plugin) {
 		spec.ScreenManifestID,
 	}
 	keys = append(keys, spec.Aliases...)
-	for _, k := range keys {
+	for i, k := range keys {
 		nk := strings.ToLower(strings.TrimSpace(k))
 		if nk == "" {
 			continue
 		}
+		isPrimaryID := i == 0
 		// Never let a WorktreeOnly plugin overwrite a runtime plugin's alias.
 		if existing, ok := r.byKey[nk]; ok && !existing.Spec().WorktreeOnly && spec.WorktreeOnly {
 			continue
 		}
+		// Never let a secondary key (ConversationID, ScreenManifestID, etc.)
+		// clobber another plugin's primary ID.
+		if !isPrimaryID {
+			if owner, hasPrimary := r.byID[nk]; hasPrimary && owner != p {
+				continue
+			}
+		}
 		r.byKey[nk] = p
 		// Also index normalized command form (e.g. stripping herdr:).
 		if norm := NormalizeCommand(nk); norm != "" && norm != nk {
+			if !isPrimaryID {
+				if owner, hasPrimary := r.byID[norm]; hasPrimary && owner != p {
+					continue
+				}
+			}
 			if existing, ok := r.byKey[norm]; !ok || existing.Spec().WorktreeOnly || !spec.WorktreeOnly {
 				r.byKey[norm] = p
 			}
@@ -436,59 +451,89 @@ func (r *Registry) DetectProcess(proc ProcessInfo) string {
 
 // RealHomeDir unwraps a harness shadow profile HOME
 // (`<realHome>/.harness/profiles/<agent>/<profile>/home`) back to
-// `<realHome>`. When home is empty, os.UserHomeDir() is used.
+// `<realHome>`. When home is empty, $HOME / os.UserHomeDir() is used.
 func RealHomeDir(home string) string {
-	h := strings.TrimSpace(home)
-	if h == "" {
-		var err error
-		h, err = os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-	}
-	if idx := strings.Index(h, "/.harness/"); idx > 0 {
-		return h[:idx]
-	}
-	return h
+	return harnessenv.RealHomeDir(home)
 }
 
-// DiscoverProfileRoots discovers optional harness-managed profile home
-// directories under `<realHome>/.harness/profiles/<agent>/<profile>/home`.
-// Returns nil cleanly when no harness profile directory exists.
+// DiscoverProfileRoots discovers harness-managed profile home directories
+// backed by profiles.Open (honoring custom ShadowHome paths and enabled flags),
+// plus any legacy/fixture directories under
+// `<realHome>/.harness/profiles/<agent>/<profile>/home` not already in the store.
+// Returns nil cleanly when no harness profiles exist.
 func (r *Registry) DiscoverProfileRoots(realHome string) []ProfileRoot {
 	base := RealHomeDir(realHome)
 	if base == "" {
 		return nil
 	}
-	profilesDir := filepath.Join(base, ".harness", "profiles")
-	agentEntries, err := os.ReadDir(profilesDir)
-	if err != nil {
-		return nil
+	paths := harnessenv.Paths{
+		Home:       base,
+		ConfigHome: filepath.Join(base, ".config"),
+		DataHome:   filepath.Join(base, ".local", "share"),
+		StateHome:  filepath.Join(base, ".local", "state"),
+		CacheHome:  filepath.Join(base, ".cache"),
 	}
+	seen := map[string]bool{}
 	var out []ProfileRoot
-	for _, ae := range agentEntries {
-		if !ae.IsDir() {
-			continue
-		}
-		agentID := r.CanonicalID(ae.Name())
-		if agentID == "" {
-			agentID = strings.ToLower(strings.TrimSpace(ae.Name()))
-		}
-		profEntries, err := os.ReadDir(filepath.Join(profilesDir, ae.Name()))
-		if err != nil {
-			continue
-		}
-		for _, pe := range profEntries {
-			if !pe.IsDir() {
+	if store, err := profiles.Open(paths); err == nil {
+		for _, np := range store.List() {
+			agentID := r.CanonicalID(np.Profile.Agent)
+			if agentID == "" {
+				agentID = strings.ToLower(strings.TrimSpace(np.Profile.Agent))
+			}
+			key := agentID + "/" + np.Name
+			seen[key] = true
+			if !np.Profile.Enabled {
 				continue
 			}
-			homeDir := filepath.Join(profilesDir, ae.Name(), pe.Name(), "home")
+			homeDir := strings.TrimSpace(np.Profile.ShadowHome)
+			if homeDir == "" {
+				homeDir = filepath.Join(base, ".harness", "profiles", np.Profile.Agent, np.Name, "home")
+			} else if homeDir == "~" {
+				homeDir = base
+			} else if strings.HasPrefix(homeDir, "~/") {
+				homeDir = filepath.Join(base, strings.TrimPrefix(homeDir, "~/"))
+			}
 			if info, statErr := os.Stat(homeDir); statErr == nil && info.IsDir() {
 				out = append(out, ProfileRoot{
 					Agent:   agentID,
-					Profile: pe.Name(),
+					Profile: np.Name,
 					HomeDir: homeDir,
 				})
+			}
+		}
+	}
+	profilesDir := filepath.Join(base, ".harness", "profiles")
+	if agentEntries, err := os.ReadDir(profilesDir); err == nil {
+		for _, ae := range agentEntries {
+			if !ae.IsDir() {
+				continue
+			}
+			agentID := r.CanonicalID(ae.Name())
+			if agentID == "" {
+				agentID = strings.ToLower(strings.TrimSpace(ae.Name()))
+			}
+			profEntries, err := os.ReadDir(filepath.Join(profilesDir, ae.Name()))
+			if err != nil {
+				continue
+			}
+			for _, pe := range profEntries {
+				if !pe.IsDir() || pe.Name() == profiles.DefaultProfileName {
+					continue
+				}
+				key := agentID + "/" + pe.Name()
+				if seen[key] {
+					continue
+				}
+				homeDir := filepath.Join(profilesDir, ae.Name(), pe.Name(), "home")
+				if info, statErr := os.Stat(homeDir); statErr == nil && info.IsDir() {
+					seen[key] = true
+					out = append(out, ProfileRoot{
+						Agent:   agentID,
+						Profile: pe.Name(),
+						HomeDir: homeDir,
+					})
+				}
 			}
 		}
 	}

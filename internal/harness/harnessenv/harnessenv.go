@@ -28,20 +28,42 @@ type Paths struct {
 	CacheHome  string // XDG_CACHE_HOME
 }
 
+// RealHomeDir unwraps a harness shadow profile HOME
+// (`<realHome>/.harness/profiles/<agent>/<profile>/home` or any path under
+// `<realHome>/.harness/...`) back to `<realHome>`. When home is empty, it
+// reads $HOME and falls back to os.UserHomeDir().
+func RealHomeDir(home string) string {
+	h := strings.TrimSpace(home)
+	if h == "" {
+		h = strings.TrimSpace(os.Getenv("HOME"))
+	}
+	if h == "" {
+		if dir, err := os.UserHomeDir(); err == nil {
+			h = dir
+		}
+	}
+	marker := string(filepath.Separator) + ".harness" + string(filepath.Separator)
+	if idx := strings.Index(h, marker); idx > 0 {
+		return h[:idx]
+	}
+	return h
+}
+
 // DefaultPaths resolves the XDG base directories from the process
 // environment with the standard fallbacks. Relative XDG values are ignored
 // in favor of the home-based defaults, matching the common systemd
-// convention. Home falls back to os.UserHomeDir when HOME is unset.
+// convention. If HOME (or an XDG_* var) points inside a harness shadow home
+// under `<realHome>/.harness/...`, it is unwrapped back to `<realHome>` so
+// invoking `spaces` from inside a shadow HOME always finds real `~/.harness`.
 func DefaultPaths() Paths {
-	home := os.Getenv("HOME")
-	if home == "" {
-		if dir, err := os.UserHomeDir(); err == nil {
-			home = dir
-		}
-	}
+	rawHome := strings.TrimSpace(os.Getenv("HOME"))
+	home := RealHomeDir(rawHome)
+	marker := string(filepath.Separator) + ".harness" + string(filepath.Separator)
 	pick := func(env, fallback string) string {
 		if v := os.Getenv(env); v != "" && filepath.IsAbs(v) {
-			return v
+			if !strings.Contains(v, marker) {
+				return v
+			}
 		}
 		return fallback
 	}
@@ -218,13 +240,4 @@ type LaunchSpec struct {
 	HomePath    string
 	ShadowHome  string
 	NoRouter    bool
-}
-
-func firstNonEmpty(values ...string) string {
-	for _, v := range values {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
 }

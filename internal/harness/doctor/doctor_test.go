@@ -255,12 +255,12 @@ func TestRunHealthyStack(t *testing.T) {
 	}
 	if detail := checks[4].Detail; !strings.Contains(detail, "socket "+sock) ||
 		!strings.Contains(detail, "2 spooled events") {
-		t.Errorf("zj-runtime detail = %q", detail)
+		t.Errorf("spaces-runtime detail = %q", detail)
 	}
 	if detail := checks[5].Detail; detail != fmt.Sprintf("listener pid %d alive", os.Getpid()) {
-		t.Errorf("zj-listener detail = %q", detail)
+		t.Errorf("spaces-listener detail = %q", detail)
 	}
-	if detail := checks[6].Detail; detail != "harness -> "+target+"; spaces -> "+target {
+	if detail := checks[6].Detail; detail != "spaces -> "+target {
 		t.Errorf("entries detail = %q", detail)
 	}
 	s := Summarize(checks)
@@ -317,7 +317,7 @@ func TestRunDegradedStack(t *testing.T) {
 		!strings.Contains(detail, "claude") || strings.Contains(detail, "antigravity-native") {
 		t.Errorf("agents detail = %q", detail)
 	}
-	if detail := got["entries"].Detail; detail != "harness missing; spaces missing" {
+	if detail := got["entries"].Detail; detail != "spaces missing" {
 		t.Errorf("entries detail = %q", detail)
 	}
 	s := Summarize(checks)
@@ -681,56 +681,42 @@ func TestCheckEntries(t *testing.T) {
 	// Each subtest gets a fresh home so leftovers never leak.
 	t.Run("healthy symlinks", func(t *testing.T) {
 		paths := testPaths(t)
-		target := filepath.Join(paths.Home, "bin", "harness-real")
+		target := filepath.Join(paths.Home, "bin", "tmux-spaces")
 		writeExec(t, target)
-		symlink(t, target, filepath.Join(paths.Home, ".local", "bin", "harness"))
 		symlink(t, target, filepath.Join(paths.Home, ".local", "bin", "spaces"))
 		state, detail := checkEntries(CheckOptions{Paths: paths})
-		if state != StateOK || detail != "harness -> "+target+"; spaces -> "+target {
+		if state != StateOK || detail != "spaces -> "+target {
 			t.Errorf("(%q, %q)", state, detail)
 		}
 	})
 	t.Run("missing", func(t *testing.T) {
 		paths := testPaths(t)
 		state, detail := checkEntries(CheckOptions{Paths: paths})
-		if state != StateFail || detail != "harness missing; spaces missing" {
+		if state != StateFail || detail != "spaces missing" {
 			t.Errorf("(%q, %q)", state, detail)
 		}
 	})
 	t.Run("dangling", func(t *testing.T) {
 		paths := testPaths(t)
 		gone := filepath.Join(paths.Home, "bin", "gone")
-		symlink(t, gone, filepath.Join(paths.Home, ".local", "bin", "harness"))
+		symlink(t, gone, filepath.Join(paths.Home, ".local", "bin", "spaces"))
 		state, detail := checkEntries(CheckOptions{Paths: paths})
-		if state != StateFail || !strings.Contains(detail, "harness dangles to "+gone) {
+		if state != StateFail || !strings.Contains(detail, "spaces dangles to "+gone) {
 			t.Errorf("(%q, %q)", state, detail)
 		}
 	})
 	t.Run("regular files still resolve", func(t *testing.T) {
 		paths := testPaths(t)
 		binDir := filepath.Join(paths.Home, ".local", "bin")
-		writeExec(t, filepath.Join(binDir, "harness"))
 		writeExec(t, filepath.Join(binDir, "spaces"))
 		state, detail := checkEntries(CheckOptions{Paths: paths})
-		if state != StateOK ||
-			detail != "harness (regular file); spaces (regular file)" {
+		if state != StateOK || detail != "spaces (regular file)" {
 			t.Errorf("(%q, %q)", state, detail)
-		}
-	})
-	t.Run("one missing", func(t *testing.T) {
-		paths := testPaths(t)
-		writeExec(t, filepath.Join(paths.Home, ".local", "bin", "harness"))
-		state, detail := checkEntries(CheckOptions{Paths: paths})
-		if state != StateFail || !strings.Contains(detail, "spaces missing") {
-			t.Errorf("(%q, %q)", state, detail)
-		}
-		if strings.Contains(detail, "harness missing") {
-			t.Errorf("detail = %q, harness exists and must not be missing", detail)
 		}
 	})
 }
 
-func TestCheckZellij(t *testing.T) {
+func TestCheckTmux(t *testing.T) {
 	// Each subtest gets a fresh home so leftovers never leak.
 	t.Run("present", func(t *testing.T) {
 		paths := testPaths(t)
