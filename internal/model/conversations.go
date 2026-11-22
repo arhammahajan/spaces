@@ -2,9 +2,7 @@ package model
 
 import (
 	"context"
-	"encoding/json"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/arhammahajan/spaces/internal/agent"
@@ -148,98 +146,21 @@ func (c ConversationEntry) IsEphemeralCWD() bool {
 	return false
 }
 
-// FetchConversations runs `spaces __space-conversations --cached-only|--refresh`
-// and parses the ConversationSnapshot.
+// FetchConversations returns conversations from the native in-process plugin
+// conversation store, using the cached snapshot unless refresh is true or the
+// cache has not been populated yet.
 func FetchConversations(ctx context.Context, refresh, includeArchived bool) (ConversationSnapshot, error) {
-	args := []string{"__space-conversations"}
-	if refresh {
-		args = append(args, "--refresh")
-	} else {
-		args = append(args, "--cached-only")
-	}
-	if includeArchived {
-		args = append(args, "--include-archived")
-	}
-	out, err := runSpaces(ctx, args...)
-	if err != nil {
-		return ConversationSnapshot{}, err
-	}
-	var snap ConversationSnapshot
-	if err := decodeJSON(out, "__space-conversations", &snap); err != nil {
-		return ConversationSnapshot{}, err
-	}
-	return snap, nil
+	return fetchConversationsNative(ctx, refresh, includeArchived)
 }
 
-// SearchConversations runs `spaces __space-conversations --search <query> ...`
-// and parses the ConversationSearchResponse.
+// SearchConversations searches conversations in-process across metadata and
+// plugin transcript logs according to req.Scope ("all", "user", or "titles").
 func SearchConversations(ctx context.Context, req ConversationSearchRequest) (ConversationSearchResponse, error) {
-	q := strings.TrimSpace(req.Query)
-	if q == "" {
-		return ConversationSearchResponse{OK: true, Scope: req.Scope}, nil
-	}
-	args := []string{"__space-conversations", "--search", q}
-	if agent := strings.TrimSpace(req.Agent); agent != "" {
-		args = append(args, "--agent", agent)
-	}
-	if cwd := strings.TrimSpace(req.CWD); cwd != "" {
-		args = append(args, "--cwd", cwd)
-	}
-	if scope := strings.TrimSpace(req.Scope); scope != "" {
-		args = append(args, "--scope", scope)
-	}
-	if req.IncludeArchived {
-		args = append(args, "--include-archived")
-	}
-	if req.Limit > 0 {
-		args = append(args, "--limit", strconv.Itoa(req.Limit))
-	}
-	out, err := runSpaces(ctx, args...)
-	if err != nil {
-		return ConversationSearchResponse{}, err
-	}
-	var resp ConversationSearchResponse
-	if err := decodeJSON(out, "__space-conversations --search", &resp); err != nil {
-		return ConversationSearchResponse{}, err
-	}
-	return resp, nil
+	return searchConversationsNative(ctx, req)
 }
 
-type conversationOpenRecord struct {
-	Agent        string `json:"agent"`
-	SessionID    string `json:"session_id"`
-	Profile      string `json:"profile,omitempty"`
-	Space        string `json:"space,omitempty"`
-	CWD          string `json:"cwd,omitempty"`
-	Title        string `json:"title,omitempty"`
-	LastOpenedMs int64  `json:"last_opened_ms,omitempty"`
-}
-
-// RecordConversationOpen sends an open event to
-// `spaces __space-conversations --record <json>` so the overlay tracks space
-// and last_opened_ms.
+// RecordConversationOpen persists an open event in conversations-overlay.json
+// so the native conversation store tracks space and last_opened_ms.
 func RecordConversationOpen(ctx context.Context, conv ConversationEntry, space string, nowMs int64) error {
-	agent := CanonicalConversationAgent(conv.Agent)
-	if agent == "" {
-		agent = CanonicalConversationAgent(conv.App)
-	}
-	sid := strings.TrimSpace(conv.ID)
-	if sid == "" {
-		sid = conv.ResumeSessionID()
-	}
-	rec := conversationOpenRecord{
-		Agent:        agent,
-		SessionID:    sid,
-		Profile:      strings.TrimSpace(conv.Profile),
-		Space:        strings.TrimSpace(space),
-		CWD:          strings.TrimSpace(conv.CWD),
-		Title:        strings.TrimSpace(conv.Title),
-		LastOpenedMs: nowMs,
-	}
-	raw, err := json.Marshal(rec)
-	if err != nil {
-		return err
-	}
-	_, err = runSpaces(ctx, "__space-conversations", "--record", string(raw))
-	return err
+	return recordConversationOpenNative(ctx, conv, space, nowMs)
 }

@@ -164,22 +164,14 @@ type TitleSnapshot struct {
 	Titles map[string]string `json:"titles"`
 }
 
-// FetchConversationTitles runs `spaces __space-hooks --titles <json>` and
-// returns the resolved paneID -> conversation title map.
+// FetchConversationTitles resolves paneID -> conversation title in-process
+// using the native plugin conversation store without spawning any subprocesses.
 func FetchConversationTitles(ctx context.Context, queries []TitleQuery) (map[string]string, error) {
 	if len(queries) == 0 {
 		return nil, nil
 	}
-	raw, err := json.Marshal(queries)
+	snap, err := fetchConversationTitlesSnapshot(ctx, queries)
 	if err != nil {
-		return nil, err
-	}
-	var snap TitleSnapshot
-	out, err := runSpaces(ctx, "__space-hooks", "--titles", string(raw))
-	if err != nil {
-		return nil, err
-	}
-	if err := decodeJSON(out, "__space-hooks --titles", &snap); err != nil {
 		return nil, err
 	}
 	return snap.Titles, nil

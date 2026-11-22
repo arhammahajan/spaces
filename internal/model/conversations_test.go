@@ -4,9 +4,46 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func setupNativeConvStoreEnv(t *testing.T) (homeDir, overlayPath string) {
+	t.Helper()
+	homeDir = t.TempDir()
+	overlayPath = filepath.Join(t.TempDir(), "data", "conversations-overlay.json")
+
+	oldHome := ConversationHomeDirFn
+	oldOverlay := ConversationOverlayPathFn
+	ConversationHomeDirFn = func() string { return homeDir }
+	ConversationOverlayPathFn = func() string { return overlayPath }
+	ResetConversationStoreCache()
+
+	// Ensure no subprocess is ever spawned by native conversation store APIs.
+	stubExec(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		t.Fatalf("unexpected subprocess execution: %s %v", name, args)
+		return nil, errors.New("unexpected exec")
+	})
+
+	t.Cleanup(func() {
+		ConversationHomeDirFn = oldHome
+		ConversationOverlayPathFn = oldOverlay
+		ResetConversationStoreCache()
+	})
+	return homeDir, overlayPath
+}
+
+func writeConvTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
 
 func TestConversationEntryHelpers(t *testing.T) {
 	c := ConversationEntry{
@@ -52,136 +89,238 @@ func TestConversationEntryHelpers(t *testing.T) {
 	}
 }
 
-func TestFetchConversationsCachedAndRefresh(t *testing.T) {
-	payload := `{
-		"ok": true,
-		"conversations": [
-			{
-				"agent": "claude",
-				"id": "uuid-1",
-				"app": "claude-code",
-				"profile": "work",
-				"title": "Refactor gateway retries",
-				"preview": "investigate 429 retries",
-				"cwd": "/home/user/dev/model-router",
-				"branch": "feat/retry",
-				"model": "claude-opus-4-6",
-				"created_at_ms": 1700000000000,
-				"updated_at_ms": 1700000100000,
-				"message_count": 42,
-				"archived": false,
-				"resume_target": "uuid-1",
-				"space": "work",
-				"last_outcome": "done",
-				"last_opened_ms": 1700000100000
-			}
-		],
-		"synced_ms": 1700000100000,
-		"indexed_messages": 12400,
-		"pending_sources": 2
-	}`
+func TestFetchConversationsCachedRefreshArchivedAndProfiles(t *testing.T) {
+	homeDir, _ := setupNativeConvStoreEnv(t)
 
-	var calls [][]string
-	stubExec(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		return []byte(payload), nil
-	})
+	// Default home: Claude active session.
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "repo-a", "sess-claude-1.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-claude-1","cwd":"/home/user/dev/repo-a","summary":"Refactor gateway retries","timestamp":1700000001000}`,
+		`{"type":"user","sessionId":"sess-claude-1","cwd":"/home/user/dev/repo-a","timestamp":1700000002000,"message":{"role":"user","model":"claude-opus-4-6","content":"investigate 429 retries"}}`,
+		`{"type":"assistant","sessionId":"sess-claude-1","cwd":"/home/user/dev/repo-a","timestamp":1700000005000,"message":{"role":"assistant","model":"claude-opus-4-6","content":"added exponential backoff"}}`,
+	}, "\n")+"\n")
 
+	// Harness profile root: Claude "work" profile session.
+	writeConvTestFile(t, filepath.Join(homeDir, ".model-router", "profiles", "claude", "work", "home", ".claude", "projects", "repo-b", "sess-claude-work.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-claude-work","cwd":"/home/user/dev/repo-b","summary":"Work profile billing fix","timestamp":1700000010000}`,
+		`{"type":"user","sessionId":"sess-claude-work","cwd":"/home/user/dev/repo-b","timestamp":1700000012000,"message":{"role":"user","content":"fix invoice rounding"}}`,
+	}, "\n")+"\n")
+
+	// Default home: Codex archived session.
+	writeConvTestFile(t, filepath.Join(homeDir, ".codex", "archived_sessions", "2026", "rollout-sess-codex-arch.jsonl"), strings.Join([]string{
+		`{"type":"session_meta","timestamp":1700000003000,"payload":{"id":"sess-codex-arch","cwd":"/home/user/dev/repo-c","model":"gpt-5-codex"}}`,
+		`{"type":"response_item","timestamp":1700000004000,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"Old archived task"}]}}`,
+	}, "\n")+"\n")
+
+	// First call populates cache; includeArchived=false filters out archived session.
 	snap, err := FetchConversations(context.Background(), false, false)
 	if err != nil {
-		t.Fatalf("FetchConversations cached error: %v", err)
+		t.Fatalf("FetchConversations initial error: %v", err)
 	}
-	if !snap.OK || len(snap.Conversations) != 1 || snap.IndexedMessages != 12400 || snap.PendingSources != 2 {
-		t.Fatalf("unexpected snap: %+v", snap)
+	if !snap.OK || snap.SyncedMs == 0 || snap.IndexedMessages < 3 {
+		t.Fatalf("unexpected snapshot metadata: %+v", snap)
 	}
-	if snap.Conversations[0].Title != "Refactor gateway retries" || snap.Conversations[0].Profile != "work" {
-		t.Fatalf("unexpected conv: %+v", snap.Conversations[0])
+	if len(snap.Conversations) != 2 {
+		t.Fatalf("got %d active conversations, want 2: %+v", len(snap.Conversations), snap.Conversations)
 	}
-	if got := strings.Join(calls[0], " "); !strings.Contains(got, "__space-conversations --cached-only") || strings.Contains(got, "--include-archived") {
-		t.Errorf("cached args = %q", got)
+	// Sorted newest first: sess-claude-work (1700000012000) then sess-claude-1 (1700000005000).
+	if snap.Conversations[0].ID != "sess-claude-work" || snap.Conversations[0].Profile != "work" || snap.Conversations[0].App != "claude-code" {
+		t.Errorf("conv[0] = %+v, want sess-claude-work with profile work", snap.Conversations[0])
+	}
+	if snap.Conversations[1].ID != "sess-claude-1" || snap.Conversations[1].Title != "Refactor gateway retries" || snap.Conversations[1].Profile != "" {
+		t.Errorf("conv[1] = %+v", snap.Conversations[1])
 	}
 
-	_, err = FetchConversations(context.Background(), true, true)
+	// Write a brand-new session on disk to verify cached vs refresh behavior.
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "repo-a", "sess-claude-new.jsonl"), strings.Join([]string{
+		`{"type":"user","sessionId":"sess-claude-new","cwd":"/home/user/dev/repo-a","timestamp":1700000099000,"message":{"role":"user","content":"Brand new session"}}`,
+	}, "\n")+"\n")
+
+	// Cached call (refresh=false, includeArchived=true) must NOT rescan disk,
+	// so it sees the archived session from cache but NOT sess-claude-new yet.
+	cachedArch, err := FetchConversations(context.Background(), false, true)
+	if err != nil {
+		t.Fatalf("FetchConversations cached archived error: %v", err)
+	}
+	if len(cachedArch.Conversations) != 3 {
+		t.Fatalf("cached archived len = %d, want 3: %+v", len(cachedArch.Conversations), cachedArch.Conversations)
+	}
+	foundArchived := false
+	for _, c := range cachedArch.Conversations {
+		if c.ID == "sess-claude-new" {
+			t.Errorf("cached fetch should not have rescanned disk for sess-claude-new")
+		}
+		if c.ID == "sess-codex-arch" && c.Archived && c.Agent == "codex" {
+			foundArchived = true
+		}
+	}
+	if !foundArchived {
+		t.Errorf("expected archived codex session in cachedArch: %+v", cachedArch.Conversations)
+	}
+
+	// Refresh call rescans disk and picks up sess-claude-new at the top.
+	refreshed, err := FetchConversations(context.Background(), true, true)
 	if err != nil {
 		t.Fatalf("FetchConversations refresh error: %v", err)
 	}
-	if got := strings.Join(calls[1], " "); !strings.Contains(got, "__space-conversations --refresh --include-archived") {
-		t.Errorf("refresh args = %q", got)
+	if len(refreshed.Conversations) != 4 {
+		t.Fatalf("refreshed len = %d, want 4: %+v", len(refreshed.Conversations), refreshed.Conversations)
+	}
+	if refreshed.Conversations[0].ID != "sess-claude-new" {
+		t.Errorf("newest refreshed conv = %q, want sess-claude-new", refreshed.Conversations[0].ID)
 	}
 }
 
-func TestSearchConversations(t *testing.T) {
-	payload := `{
-		"ok": true,
-		"query": "rate limit backoff",
-		"scope": "user",
-		"hits": [
-			{
-				"conversation": {
-					"agent": "claude",
-					"id": "uuid-2",
-					"app": "claude-code",
-					"title": "Gateway fixes",
-					"updated_at_ms": 1700000100000
-				},
-				"match_kind": "message",
-				"match_role": "user",
-				"snippet": "…hit the 429 rate limit backoff when switching…",
-				"snippet_highlights": [{"start": 13, "end": 31}],
-				"score": 12.4
-			}
-		]
-	}`
+func TestSearchConversationsNative(t *testing.T) {
+	homeDir, _ := setupNativeConvStoreEnv(t)
 
-	var gotArgs []string
-	stubExec(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		gotArgs = append([]string(nil), args...)
-		return []byte(payload), nil
-	})
+	longUserMsg := strings.Repeat("context padding words ", 8) +
+		"hit the 429 rate limit backoff when switching providers " +
+		strings.Repeat("more trailing details ", 8)
 
-	resp, err := SearchConversations(context.Background(), ConversationSearchRequest{
-		Query:           "rate limit backoff",
-		Agent:           "claude",
-		CWD:             "/repo",
-		Scope:           "user",
-		IncludeArchived: true,
-		Limit:           25,
+	// Claude session with title, user message, and assistant-only term.
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "repo-a", "sess-claude-search.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-claude-search","cwd":"/repo/alpha","summary":"Gateway fixes","timestamp":1700000100000}`,
+		`{"type":"user","sessionId":"sess-claude-search","cwd":"/repo/alpha","timestamp":1700000101000,"message":{"role":"user","content":"` + longUserMsg + `"}}`,
+		`{"type":"assistant","sessionId":"sess-claude-search","cwd":"/repo/alpha","timestamp":1700000102000,"message":{"role":"assistant","content":"Implemented jittered exponentialRetryQueue in router"}}`,
+	}, "\n")+"\n")
+
+	// Codex session in a different CWD matching title.
+	writeConvTestFile(t, filepath.Join(homeDir, ".codex", "sessions", "2026", "rollout-sess-codex-search.jsonl"), strings.Join([]string{
+		`{"type":"session_meta","timestamp":1700000105000,"payload":{"id":"sess-codex-search","cwd":"/repo/beta","title":"Gateway fixes for codex"}}`,
+		`{"type":"response_item","timestamp":1700000106000,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"check codex gateway"}]}}`,
+	}, "\n")+"\n")
+
+	// Archived Claude session.
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "repo-a", "sess-claude-archived.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-claude-archived","cwd":"/repo/alpha","summary":"Archived gateway note","archived":true,"timestamp":1700000090000}`,
+		`{"type":"user","sessionId":"sess-claude-archived","cwd":"/repo/alpha","timestamp":1700000091000,"message":{"role":"user","content":"old rate limit backoff discussion"}}`,
+	}, "\n")+"\n")
+
+	// 1. Empty query short-circuits cleanly.
+	emptyResp, err := SearchConversations(context.Background(), ConversationSearchRequest{Query: "   "})
+	if err != nil || !emptyResp.OK || len(emptyResp.Hits) != 0 {
+		t.Fatalf("empty search: resp=%+v err=%v", emptyResp, err)
+	}
+
+	// 2. Scope "titles": matches title metadata, does NOT match message-only terms.
+	titleResp, err := SearchConversations(context.Background(), ConversationSearchRequest{
+		Query: "Gateway fixes",
+		Scope: "titles",
 	})
 	if err != nil {
-		t.Fatalf("SearchConversations error: %v", err)
+		t.Fatalf("titles search error: %v", err)
 	}
-	if !resp.OK || len(resp.Hits) != 1 || resp.Hits[0].MatchKind != "message" || resp.Hits[0].MatchRole != "user" {
-		t.Fatalf("unexpected resp: %+v", resp)
+	if !titleResp.OK || len(titleResp.Hits) != 2 {
+		t.Fatalf("titles search got %d hits, want 2: %+v", len(titleResp.Hits), titleResp.Hits)
 	}
-	if len(resp.Hits[0].SnippetHighlights) != 1 || resp.Hits[0].SnippetHighlights[0].Start != 13 || resp.Hits[0].SnippetHighlights[0].End != 31 {
-		t.Fatalf("unexpected highlights: %+v", resp.Hits[0].SnippetHighlights)
-	}
-	joined := strings.Join(gotArgs, " ")
-	for _, want := range []string{"__space-conversations", "--search", "rate limit backoff", "--agent", "claude", "--cwd", "/repo", "--scope", "user", "--include-archived", "--limit", "25"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("args %q missing %q", joined, want)
+	for _, hit := range titleResp.Hits {
+		if hit.MatchKind != "metadata" {
+			t.Errorf("expected metadata match kind, got %+v", hit)
 		}
 	}
-
-	// Empty query short-circuits without spawning subprocess.
-	called := false
-	stubExec(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		called = true
-		return nil, errors.New("should not run")
+	noMsgInTitles, err := SearchConversations(context.Background(), ConversationSearchRequest{
+		Query: "rate limit backoff",
+		Scope: "titles",
 	})
-	emptyResp, err := SearchConversations(context.Background(), ConversationSearchRequest{Query: "   "})
-	if err != nil || !emptyResp.OK || called {
-		t.Fatalf("empty search: resp=%+v err=%v called=%v", emptyResp, err, called)
+	if err != nil || len(noMsgInTitles.Hits) != 0 {
+		t.Fatalf("titles scope should not match body text: resp=%+v err=%v", noMsgInTitles, err)
+	}
+
+	// 3. Scope "user": matches user message with centered snippet & exact highlight spans,
+	//    and excludes assistant-only terms.
+	userResp, err := SearchConversations(context.Background(), ConversationSearchRequest{
+		Query: "rate limit backoff",
+		Agent: "claude-code", // alias should canonicalize to "claude"
+		CWD:   "/repo/alpha/",
+		Scope: "user",
+	})
+	if err != nil {
+		t.Fatalf("user search error: %v", err)
+	}
+	if !userResp.OK || len(userResp.Hits) != 1 {
+		t.Fatalf("user search got %d hits, want 1: %+v", len(userResp.Hits), userResp.Hits)
+	}
+	hit := userResp.Hits[0]
+	if hit.Conversation.ID != "sess-claude-search" || hit.MatchKind != "message" || hit.MatchRole != "user" {
+		t.Fatalf("unexpected user hit: %+v", hit)
+	}
+	if len(hit.SnippetHighlights) == 0 {
+		t.Fatalf("expected non-empty SnippetHighlights for snippet %q", hit.Snippet)
+	}
+	snippetRunes := []rune(hit.Snippet)
+	if len(snippetRunes) > maxConvSnippetRunes+2 {
+		t.Errorf("snippet rune len = %d, want <= %d: %q", len(snippetRunes), maxConvSnippetRunes+2, hit.Snippet)
+	}
+	sp := hit.SnippetHighlights[0]
+	if sp.Start < 0 || sp.End > len(snippetRunes) || sp.Start >= sp.End {
+		t.Fatalf("invalid highlight span %+v for snippet len %d (%q)", sp, len(snippetRunes), hit.Snippet)
+	}
+	gotHighlight := strings.ToLower(string(snippetRunes[sp.Start:sp.End]))
+	if gotHighlight != "rate limit backoff" {
+		t.Errorf("highlighted text = %q, want %q (snippet=%q)", gotHighlight, "rate limit backoff", hit.Snippet)
+	}
+
+	userNoAssistant, err := SearchConversations(context.Background(), ConversationSearchRequest{
+		Query: "exponentialRetryQueue",
+		Scope: "user",
+	})
+	if err != nil || len(userNoAssistant.Hits) != 0 {
+		t.Fatalf("user scope should not match assistant message: resp=%+v err=%v", userNoAssistant, err)
+	}
+
+	// 4. Scope "all" (default): matches assistant message.
+	allResp, err := SearchConversations(context.Background(), ConversationSearchRequest{
+		Query: "exponentialRetryQueue",
+	})
+	if err != nil {
+		t.Fatalf("all search error: %v", err)
+	}
+	if !allResp.OK || allResp.Scope != "all" || len(allResp.Hits) != 1 {
+		t.Fatalf("all search resp = %+v", allResp)
+	}
+	if allResp.Hits[0].MatchKind != "message" || allResp.Hits[0].MatchRole != "assistant" {
+		t.Errorf("expected assistant message hit, got %+v", allResp.Hits[0])
+	}
+
+	// 5. IncludeArchived + Limit.
+	archResp, err := SearchConversations(context.Background(), ConversationSearchRequest{
+		Query:           "rate limit backoff",
+		Scope:           "user",
+		IncludeArchived: true,
+	})
+	if err != nil || len(archResp.Hits) != 2 {
+		t.Fatalf("archived search got %d hits, want 2: err=%v hits=%+v", len(archResp.Hits), err, archResp.Hits)
+	}
+	limitedResp, err := SearchConversations(context.Background(), ConversationSearchRequest{
+		Query:           "rate limit backoff",
+		Scope:           "user",
+		IncludeArchived: true,
+		Limit:           1,
+	})
+	if err != nil || len(limitedResp.Hits) != 1 {
+		t.Fatalf("limited search got %d hits, want 1: err=%v", len(limitedResp.Hits), err)
 	}
 }
 
-func TestRecordConversationOpen(t *testing.T) {
-	var gotArgs []string
-	stubExec(t, func(ctx context.Context, name string, args ...string) ([]byte, error) {
-		gotArgs = append([]string(nil), args...)
-		return []byte(`{"ok":true}`), nil
-	})
-	err := RecordConversationOpen(context.Background(), ConversationEntry{
+func TestRecordConversationOpenAndOverlayMerge(t *testing.T) {
+	homeDir, overlayPath := setupNativeConvStoreEnv(t)
+
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "repo-a", "sess-42.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-42","cwd":"/repo","summary":"Refactor retries","timestamp":1700000100000}`,
+		`{"type":"user","sessionId":"sess-42","cwd":"/repo","timestamp":1700000101000,"message":{"role":"user","content":"refactor retries"}}`,
+	}, "\n")+"\n")
+
+	// Prime cache before recording open.
+	before, err := FetchConversations(context.Background(), false, false)
+	if err != nil || len(before.Conversations) != 1 {
+		t.Fatalf("initial fetch: err=%v convs=%+v", err, before.Conversations)
+	}
+	if before.Conversations[0].Space != "" || before.Conversations[0].LastOpenedMs != 0 {
+		t.Fatalf("expected empty overlay initially: %+v", before.Conversations[0])
+	}
+
+	// Record open event.
+	err = RecordConversationOpen(context.Background(), ConversationEntry{
 		Agent:   "claude-code",
 		ID:      "sess-42",
 		Profile: "work",
@@ -191,15 +330,90 @@ func TestRecordConversationOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RecordConversationOpen error: %v", err)
 	}
-	if len(gotArgs) < 3 {
-		t.Fatalf("unexpected args: %v", gotArgs)
+
+	// Verify persisted overlay file on disk.
+	raw, err := os.ReadFile(overlayPath)
+	if err != nil {
+		t.Fatalf("read overlay file %s: %v", overlayPath, err)
 	}
-	rawJSON := gotArgs[len(gotArgs)-1]
-	var decoded map[string]any
-	if err := json.Unmarshal([]byte(rawJSON), &decoded); err != nil {
-		t.Fatalf("invalid record json %q: %v", rawJSON, err)
+	var decoded conversationOverlayFile
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal overlay: %v", err)
 	}
-	if decoded["agent"] != "claude" || decoded["session_id"] != "sess-42" || decoded["space"] != "alpha" || decoded["profile"] != "work" {
-		t.Errorf("unexpected decoded payload: %+v", decoded)
+	ov, ok := decoded.Entries["claude:sess-42"]
+	if !ok {
+		t.Fatalf("overlay missing claude:sess-42: %+v", decoded.Entries)
+	}
+	if ov.Space != "alpha" || ov.LastOpenedMs != 1700000999000 || ov.Profile != "work" {
+		t.Errorf("unexpected overlay entry: %+v", ov)
+	}
+
+	// Subsequent cached fetch immediately sees merged Space & LastOpenedMs.
+	cached, err := FetchConversations(context.Background(), false, false)
+	if err != nil || len(cached.Conversations) != 1 {
+		t.Fatalf("cached fetch after record: err=%v convs=%+v", err, cached.Conversations)
+	}
+	if cached.Conversations[0].Space != "alpha" || cached.Conversations[0].LastOpenedMs != 1700000999000 || cached.Conversations[0].Profile != "work" {
+		t.Errorf("cached conv missing overlay fields: %+v", cached.Conversations[0])
+	}
+
+	// Full rescan after cache reset reloads overlay from disk and merges it.
+	ResetConversationStoreCache()
+	reloaded, err := FetchConversations(context.Background(), true, false)
+	if err != nil || len(reloaded.Conversations) != 1 {
+		t.Fatalf("reloaded fetch: err=%v convs=%+v", err, reloaded.Conversations)
+	}
+	if reloaded.Conversations[0].Space != "alpha" || reloaded.Conversations[0].LastOpenedMs != 1700000999000 {
+		t.Errorf("reloaded conv missing overlay fields: %+v", reloaded.Conversations[0])
+	}
+}
+
+func TestFetchConversationTitlesNative(t *testing.T) {
+	homeDir, _ := setupNativeConvStoreEnv(t)
+
+	// Older Claude conversation in /repo/shared.
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "shared", "sess-old.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-old","cwd":"/repo/shared","summary":"Older shared task","timestamp":1700000100000}`,
+		`{"type":"user","sessionId":"sess-old","cwd":"/repo/shared","timestamp":1700000101000,"message":{"role":"user","content":"old"}}`,
+	}, "\n")+"\n")
+
+	// Newer Claude conversation in /repo/shared.
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "shared", "sess-new.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-new","cwd":"/repo/shared","summary":"Newest shared task","timestamp":1700000200000}`,
+		`{"type":"user","sessionId":"sess-new","cwd":"/repo/shared","timestamp":1700000201000,"message":{"role":"user","content":"new"}}`,
+	}, "\n")+"\n")
+
+	// Codex conversation in /repo/codex.
+	writeConvTestFile(t, filepath.Join(homeDir, ".codex", "sessions", "2026", "rollout-sess-codex-title.jsonl"), strings.Join([]string{
+		`{"type":"session_meta","timestamp":1700000300000,"payload":{"id":"sess-codex-title","cwd":"/repo/codex","title":"Codex rollout title"}}`,
+		`{"type":"response_item","timestamp":1700000301000,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"hello codex"}]}}`,
+	}, "\n")+"\n")
+
+	// Empty queries returns nil cleanly.
+	emptyTitles, err := FetchConversationTitles(context.Background(), nil)
+	if err != nil || emptyTitles != nil {
+		t.Fatalf("empty titles: got=%v err=%v", emptyTitles, err)
+	}
+
+	titles, err := FetchConversationTitles(context.Background(), []TitleQuery{
+		{Key: "pane-exact", Agent: "claude-code", CWD: "/repo/shared", SessionID: "sess-old"},
+		{Key: "pane-cwd", Agent: "claude", CWD: "/repo/shared/"},
+		{Key: "pane-codex", Agent: "codex", CWD: "/repo/codex"},
+		{Key: "pane-missing", Agent: "claude", CWD: "/repo/does-not-exist"},
+	})
+	if err != nil {
+		t.Fatalf("FetchConversationTitles error: %v", err)
+	}
+	if titles["pane-exact"] != "Older shared task" {
+		t.Errorf("pane-exact = %q, want %q", titles["pane-exact"], "Older shared task")
+	}
+	if titles["pane-cwd"] != "Newest shared task" {
+		t.Errorf("pane-cwd = %q, want %q", titles["pane-cwd"], "Newest shared task")
+	}
+	if titles["pane-codex"] != "Codex rollout title" {
+		t.Errorf("pane-codex = %q, want %q", titles["pane-codex"], "Codex rollout title")
+	}
+	if _, exists := titles["pane-missing"]; exists {
+		t.Errorf("pane-missing should not be present: %+v", titles)
 	}
 }
