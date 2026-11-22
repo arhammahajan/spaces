@@ -350,6 +350,13 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 		}
 	}
 
+	if s.cfg.agentID == "antigravity" && hasSQLiteRecords {
+		// conversation_summaries.db is authoritative for this home; walking
+		// conversations/ and brain/ would add untitled subagents and internal
+		// .system_generated/messages/*.json artifacts.
+		return s.finalizeRecords(bySession, opts), nil
+	}
+
 	for _, relDir := range s.cfg.relDirs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -368,22 +375,24 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 				return nil
 			}
 			if d.IsDir() {
+				switch d.Name() {
+				case ".index-cache", "messages", "steps":
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if s.cfg.agentID == "kimi" && strings.EqualFold(d.Name(), "state.json") {
 				return nil
 			}
 			if s.cfg.fileFilter != nil && !s.cfg.fileFilter(d.Name()) {
 				return nil
 			}
 
-			// For Antigravity: when conversation_summaries.db provided records,
-			// skip bare .db fallback files from conversations/*.db since
-			// conversation_summaries.db is authoritative (avoids untitled
-			// subagent/orphan .db entries and mtime drift).
-			if s.cfg.agentID == "antigravity" && hasSQLiteRecords && strings.HasSuffix(strings.ToLower(path), ".db") {
-				return nil
-			}
-
 			rec, ok := s.loadRecord(ctx, root, path, d)
 			if !ok {
+				return nil
+			}
+			if s.cfg.agentID == "kimi" && rec.MessageCount == 0 && strings.TrimSpace(rec.Title) == "" {
 				return nil
 			}
 			key := rec.SessionID
@@ -402,6 +411,10 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 		}
 	}
 
+	return s.finalizeRecords(bySession, opts), nil
+}
+
+func (s *fileConversationStore) finalizeRecords(bySession map[string]agent.ConversationRecord, opts agent.ConversationListOptions) []agent.ConversationRecord {
 	wantCWD := normalizeCWD(opts.CWD)
 	wantProfile := strings.TrimSpace(opts.Profile)
 	records := make([]agent.ConversationRecord, 0, len(bySession))
@@ -431,7 +444,7 @@ func (s *fileConversationStore) List(ctx context.Context, opts agent.Conversatio
 	if opts.Limit > 0 && len(records) > opts.Limit {
 		records = records[:opts.Limit]
 	}
-	return records, nil
+	return records
 }
 
 func (s *fileConversationStore) Search(ctx context.Context, query string, opts agent.ConversationListOptions) ([]agent.ConversationRecord, error) {
@@ -768,6 +781,19 @@ func extractFileMetadata(ctx context.Context, provider, path string) fileMetadat
 				typ := strField(obj, "type")
 				if typ == "session_meta" || typ == "turn_context" {
 					applyMetaObject(&meta, payload)
+				}
+			}
+		}
+		// Muse embeds session stream ID, route_facts (cwd), and metadata/run_model (model_id)
+		if provider == "muse" {
+			if stream, ok := obj["stream"].(map[string]any); ok {
+				if sid := strField(stream, "id"); sid != "" && meta.sessionID == "" {
+					meta.sessionID = sid
+				}
+			}
+			if payload, ok := obj["payload"].(map[string]any); ok {
+				if recObj, ok := payload["record"].(map[string]any); ok {
+					applyMetaObject(&meta, recObj)
 				}
 			}
 		}
@@ -1369,6 +1395,36 @@ func appendStructuredEntry(entries *[]agent.LogEntry, obj map[string]any, sessio
 		strField(obj, "chatId"),
 	); sid != "" {
 		*sessionID = sid
+	}
+	if stream, ok := obj["stream"].(map[string]any); ok {
+		if sid := strField(stream, "id"); sid != "" {
+			*sessionID = sid
+		}
+	}
+
+	// Muse session.jsonl envelope: payload.kind == "run" with payload.event.prompt
+	if payload, ok := obj["payload"].(map[string]any); ok {
+		if recObj, ok := payload["record"].(map[string]any); ok {
+			if m := firstNonEmpty(strField(recObj, "model_id"), strField(recObj, "model")); m != "" {
+				*lastModel = m
+			}
+		}
+		if strField(payload, "kind") == "run" {
+			if evObj, ok := payload["event"].(map[string]any); ok {
+				if prompt := strings.TrimSpace(strField(evObj, "prompt")); prompt != "" {
+					ts := firstTimestamp(obj, "recorded_at", "timestamp", "ts")
+					*entries = append(*entries, agent.LogEntry{
+						TimestampMs: ts,
+						Role:        "user",
+						Event:       "run_started",
+						Text:        prompt,
+						SessionID:   *sessionID,
+						Model:       *lastModel,
+					})
+					return
+				}
+			}
+		}
 	}
 
 	model := firstNonEmpty(strField(obj, "model"), strField(obj, "model_id"), strField(obj, "modelId"))
