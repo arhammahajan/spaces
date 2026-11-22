@@ -3,6 +3,8 @@ package cli
 import (
 	"os"
 	"strings"
+
+	"github.com/arhammahajan/spaces/internal/agent"
 )
 
 // cmdAgent opens an agent in a new tmux window under `__shim`. With
@@ -78,10 +80,7 @@ func cmdAgent(args []string, env Env) int {
 		}
 		cmd = append([]string{env.Self, "__shim", "--profile", profile, canonicalApp(name), "harness", "spaces", "__shim-profile", name + "/" + profile}, extra...)
 	} else {
-		bin := name
-		if name == "cursor" {
-			bin = "cursor-agent"
-		}
+		bin := agent.DefaultRegistry().BinaryName(name)
 		if _, lerr := env.LookPath(bin); lerr != nil {
 			env.errf("tmux-spaces agent: agent %q not found on PATH\n", bin)
 			return ExitError

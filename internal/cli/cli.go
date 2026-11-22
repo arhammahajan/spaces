@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/arhammahajan/spaces/internal/agent"
+	_ "github.com/arhammahajan/spaces/internal/agent/plugins"
 	"github.com/arhammahajan/spaces/internal/tmux"
 )
 
@@ -265,20 +267,7 @@ func bucketPriority(bucket string) int {
 
 // canonicalApp mirrors the harness canonical app labels.
 func canonicalApp(app string) string {
-	switch app {
-	case "claude":
-		return "claude-code"
-	case "kimi-cli":
-		return "kimi"
-	case "dsh", "dsh-tui":
-		return "deepseek"
-	case "cursor":
-		return "cursor-agent"
-	case "agy":
-		return "antigravity"
-	default:
-		return app
-	}
+	return agent.DefaultRegistry().CLIDisplayApp(app)
 }
 
 // errHelp is returned by parseFlags when -h/--help is present.
