@@ -12,6 +12,12 @@ func NewKilo() agent.Plugin {
 			HarnessManaged:          true,
 			OSCAuthority:            false,
 			RecognizesVersionBanner: true,
+			TitlePrefixes:           []string{"Kilo - ", "Kilo: ", "Kilo Code - "},
+			WorktreeTitlePrefixes: []string{
+				"kilo - ", "kilo: ", "kilo | ",
+				"kilo code - ", "kilo code: ", "kilo code | ",
+			},
+			BoilerplateTitles: []string{"kilo", "kilo code"},
 		},
 		MCPTargets: []agent.MCPConfigTarget{
 			{HarnessLabel: "kilo", RelPath: ".config/kilo/kilo.json"},

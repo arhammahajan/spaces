@@ -23,11 +23,12 @@ func NewOpenCode() agent.Plugin {
 			HarnessManaged:          true,
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
-			TitlePrefixes:           []string{"OC | "},
+			TitlePrefixes: []string{"OC | ", "OpenCode - ", "OpenCode: "},
 			WorktreeTitlePrefixes: []string{
 				"oc | ", "oc: ", "oc - ",
 				"opencode | ", "opencode - ", "opencode: ",
 			},
+			BoilerplateTitles: []string{"opencode", "open code"},
 		},
 		MCPTargets: []agent.MCPConfigTarget{
 			{HarnessLabel: "opencode", RelPath: ".config/opencode/opencode.json"},

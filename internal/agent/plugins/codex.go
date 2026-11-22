@@ -17,7 +17,9 @@ func NewCodex() agent.Plugin {
 			HarnessManaged:          true,
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
+			TitlePrefixes:           []string{"Codex - ", "Codex: "},
 			WorktreeTitlePrefixes:   []string{"codex - ", "codex: ", "codex | "},
+			BoilerplateTitles:       []string{"codex", "openai codex"},
 		},
 		MCPTargets: []agent.MCPConfigTarget{
 			{HarnessLabel: "codex", RelPath: ".codex/config.toml"},

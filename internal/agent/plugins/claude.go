@@ -20,12 +20,12 @@ func NewClaude() agent.Plugin {
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
 			MatchesBareVersion:      true,
-			TitlePrefixes:           []string{"Claude Code - ", "Claude Code: "},
+			TitlePrefixes: []string{"Claude Code - ", "Claude Code: ", "Claude - ", "Claude: "},
 			WorktreeTitlePrefixes: []string{
 				"claude code - ", "claude code: ", "claude code | ",
 				"claude - ", "claude: ", "claude | ",
 			},
-			BoilerplateTitles: []string{"claude code"},
+			BoilerplateTitles: []string{"claude code", "claude"},
 		},
 		MCPTargets: []agent.MCPConfigTarget{
 			{HarnessLabel: "claude", RelPath: ".claude.json"},

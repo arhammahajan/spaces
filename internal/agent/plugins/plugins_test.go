@@ -73,10 +73,123 @@ func TestBuiltinPluginsRegistrationAndLookups(t *testing.T) {
 		t.Error("MatchesBareVersionCommand(2.1.76) = false, want true")
 	}
 
-	// MCP targets count: 22 stowed targets across built-in plugins
+	// MCP targets count: 25 stowed targets across built-in plugins
+	// (22 original + 1 cursor + 2 deepseek).
 	targets := reg.AllMCPConfigTargets()
-	if len(targets) != 22 {
-		t.Errorf("len(AllMCPConfigTargets()) = %d, want 22", len(targets))
+	if len(targets) != 25 {
+		t.Errorf("len(AllMCPConfigTargets()) = %d, want 25", len(targets))
+	}
+}
+
+func TestProviderPluginsFeatureParity(t *testing.T) {
+	cases := []struct {
+		name           string
+		plugin         agent.Plugin
+		sampleViewport string
+		wantTitle      string
+		checkManifest  bool
+	}{
+		{
+			name:           "antigravity",
+			plugin:         NewAntigravity(),
+			sampleViewport: "> inspect plugin parity\n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  true,
+		},
+		{
+			name:           "claude",
+			plugin:         NewClaude(),
+			sampleViewport: "❯ inspect plugin parity\n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  true,
+		},
+		{
+			name:           "codex",
+			plugin:         NewCodex(),
+			sampleViewport: "gpt-5 high · ~/dev/spaces · inspect plugin parity\n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  true,
+		},
+		{
+			name:           "cursor",
+			plugin:         NewCursor(),
+			sampleViewport: "Cursor Agent · inspect plugin parity\n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  true,
+		},
+		{
+			name:           "deepseek",
+			plugin:         NewDeepSeek(),
+			sampleViewport: "DeepSeek · inspect plugin parity\n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  false, // manifest added in parallel branch
+		},
+		{
+			name:           "kilo",
+			plugin:         NewKilo(),
+			sampleViewport: "‹2  Home  inspect plugin parity +  \n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  true,
+		},
+		{
+			name:           "kimi",
+			plugin:         NewKimi(),
+			sampleViewport: "Kimi Code · inspect plugin parity\n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  true,
+		},
+		{
+			name:           "muse",
+			plugin:         NewMuse(),
+			sampleViewport: "claude-sonnet · high · ~/dev/spaces · inspect plugin parity 4k/200k (2%)\n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  true,
+		},
+		{
+			name:           "opencode",
+			plugin:         NewOpenCode(),
+			sampleViewport: "‹2  Home  inspect plugin parity +  \n",
+			wantTitle:      "inspect plugin parity",
+			checkManifest:  true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := tc.plugin.Spec()
+			if spec.ScreenManifestID == "" {
+				t.Errorf("%s: Spec().ScreenManifestID is empty", tc.name)
+			}
+			if len(spec.WorktreeTitlePrefixes) == 0 {
+				t.Errorf("%s: Spec().WorktreeTitlePrefixes is empty", tc.name)
+			}
+			if cp := tc.plugin.ConfigProvider(); cp == nil || len(cp.MCPConfigTargets()) == 0 {
+				t.Errorf("%s: ConfigProvider().MCPConfigTargets() is empty", tc.name)
+			}
+			te := tc.plugin.TitleExtractor()
+			if te == nil {
+				t.Fatalf("%s: TitleExtractor() is nil", tc.name)
+			}
+			if got := te.ExtractTitle(tc.sampleViewport); got != tc.wantTitle {
+				t.Errorf("%s: ExtractTitle() = %q, want %q", tc.name, got, tc.wantTitle)
+			}
+			if tc.plugin.HookPolicy() == nil {
+				t.Errorf("%s: HookPolicy() is nil", tc.name)
+			}
+			if tc.plugin.SessionResolver() == nil {
+				t.Errorf("%s: SessionResolver() is nil", tc.name)
+			}
+			if tc.plugin.Launcher() == nil {
+				t.Errorf("%s: Launcher() is nil", tc.name)
+			}
+			sr := tc.plugin.ScreenReader()
+			if sr == nil {
+				t.Fatalf("%s: ScreenReader() is nil", tc.name)
+			}
+			if tc.checkManifest && !sr.HasManifest() {
+				t.Errorf("%s: ScreenReader().HasManifest() = false, want true", tc.name)
+			}
+		})
 	}
 }
 
@@ -162,6 +275,36 @@ func TestBuiltinScreenDetectionAndTitleExtraction(t *testing.T) {
 	agyViewport := "> design the agent\n  plugin interface\n● working\n"
 	if got := reg.ExtractTitle("antigravity", agyViewport); got != "design the agent plugin interface" {
 		t.Errorf("antigravity ExtractTitle = %q, want 'design the agent plugin interface'", got)
+	}
+
+	// Cursor title extraction (header and prompt fallback)
+	cursorHeaderViewport := "Cursor Agent · Fix sidebar focus\n› ignored prompt\n"
+	if got := reg.ExtractTitle("cursor", cursorHeaderViewport); got != "Fix sidebar focus" {
+		t.Errorf("cursor header ExtractTitle = %q, want 'Fix sidebar focus'", got)
+	}
+	cursorPromptViewport := "› add cursor mcp target\n"
+	if got := reg.ExtractTitle("cursor-agent", cursorPromptViewport); got != "add cursor mcp target" {
+		t.Errorf("cursor prompt ExtractTitle = %q, want 'add cursor mcp target'", got)
+	}
+
+	// DeepSeek title extraction (dsh-tui header and prompt fallback)
+	deepseekHeaderViewport := "dsh · Refactor plugin registry\n❯ ignored prompt\n"
+	if got := reg.ExtractTitle("deepseek", deepseekHeaderViewport); got != "Refactor plugin registry" {
+		t.Errorf("deepseek header ExtractTitle = %q, want 'Refactor plugin registry'", got)
+	}
+	deepseekPromptViewport := "❯ add deepseek manifest\n"
+	if got := reg.ExtractTitle("dsh", deepseekPromptViewport); got != "add deepseek manifest" {
+		t.Errorf("deepseek prompt ExtractTitle = %q, want 'add deepseek manifest'", got)
+	}
+
+	// Kimi title extraction (status header and prompt fallback)
+	kimiHeaderViewport := "Kimi Code · Implement parity tests\n❯ ignored prompt\n"
+	if got := reg.ExtractTitle("kimi", kimiHeaderViewport); got != "Implement parity tests" {
+		t.Errorf("kimi header ExtractTitle = %q, want 'Implement parity tests'", got)
+	}
+	kimiPromptViewport := "❯ verify kimi prompt parsing\n"
+	if got := reg.ExtractTitle("kimi-cli", kimiPromptViewport); got != "verify kimi prompt parsing" {
+		t.Errorf("kimi prompt ExtractTitle = %q, want 'verify kimi prompt parsing'", got)
 	}
 
 	// Claude manifest detection

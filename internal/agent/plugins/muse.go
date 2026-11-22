@@ -20,6 +20,9 @@ func NewMuse() agent.Plugin {
 			HarnessManaged:          true,
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
+			TitlePrefixes:           []string{"Muse - ", "Muse: "},
+			WorktreeTitlePrefixes:   []string{"muse - ", "muse: ", "muse | "},
+			BoilerplateTitles:       []string{"muse", "muse cli"},
 		},
 		MCPTargets: []agent.MCPConfigTarget{
 			{HarnessLabel: "muse", RelPath: ".config/muse/settings.json"},
