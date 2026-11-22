@@ -19,7 +19,7 @@ const (
 	maxConvSnippetRunes     = 140
 	maxConvTitleRunes       = 120
 	maxConvPreviewRunes     = 200
-	currentConvCacheVersion = 2
+	currentConvCacheVersion = 3
 )
 
 // ConversationHomeDirFn resolves the real user home directory used when
@@ -28,8 +28,8 @@ var ConversationHomeDirFn = func() string {
 	return agent.RealHomeDir("")
 }
 
-// ConversationOverlayPathFn resolves the path to conversations-overlay.json.
-// Tests may override it.
+// ConversationOverlayPathFn resolves the path to conversations-overlay.db.
+// Tests may override it (including with a legacy .json path).
 var ConversationOverlayPathFn = defaultConversationOverlayPath
 
 // ConversationCachePathFn resolves the path to conversations-cache.json.
@@ -51,7 +51,7 @@ func defaultConversationOverlayPath() string {
 		}
 		xdg = filepath.Join(home, ".local", "share")
 	}
-	return filepath.Join(xdg, "tmux-spaces", "conversations-overlay.json")
+	return filepath.Join(xdg, "tmux-spaces", "conversations-overlay.db")
 }
 
 func defaultConversationCachePath() string {
@@ -73,14 +73,16 @@ func defaultConversationCachePath() string {
 }
 
 type conversationOverlayEntry struct {
-	Agent        string `json:"agent"`
-	SessionID    string `json:"session_id"`
-	Space        string `json:"space,omitempty"`
-	LastOpenedMs int64  `json:"last_opened_ms,omitempty"`
-	LastOutcome  string `json:"last_outcome,omitempty"`
-	Profile      string `json:"profile,omitempty"`
-	CWD          string `json:"cwd,omitempty"`
-	Title        string `json:"title,omitempty"`
+	Agent        string   `json:"agent"`
+	SessionID    string   `json:"session_id"`
+	Space        string   `json:"space,omitempty"`
+	LastOpenedMs int64    `json:"last_opened_ms,omitempty"`
+	LastOutcome  string   `json:"last_outcome,omitempty"`
+	Profile      string   `json:"profile,omitempty"`
+	CWD          string   `json:"cwd,omitempty"`
+	Title        string   `json:"title,omitempty"`
+	LaunchCmd    []string `json:"launch_cmd,omitempty"`
+	UpdatedAtMs  int64    `json:"updated_at_ms,omitempty"`
 }
 
 type conversationOverlayFile struct {
@@ -216,75 +218,14 @@ func overlayKey(canonAgent, sessionID string) string {
 }
 
 func loadConversationOverlay(path string) map[string]conversationOverlayEntry {
-	out := make(map[string]conversationOverlayEntry)
-	if strings.TrimSpace(path) == "" {
-		return out
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil || len(strings.TrimSpace(string(raw))) == 0 {
-		return out
-	}
-	var file conversationOverlayFile
-	if err := json.Unmarshal(raw, &file); err != nil {
-		return out
-	}
-	for k, v := range file.Entries {
-		canon := CanonicalConversationAgent(v.Agent)
-		sid := strings.TrimSpace(v.SessionID)
-		if canon != "" && sid != "" {
-			v.Agent = canon
-			v.SessionID = sid
-			out[overlayKey(canon, sid)] = v
-		} else if k != "" {
-			out[k] = v
-		}
-	}
-	return out
+	return loadConversationOverlaySQLite(path)
 }
 
-func saveConversationOverlay(path string, entries map[string]conversationOverlayEntry) error {
-	if strings.TrimSpace(path) == "" {
+func cloneStringSlice(in []string) []string {
+	if len(in) == 0 {
 		return nil
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	file := conversationOverlayFile{
-		Version: 1,
-		Entries: entries,
-	}
-	data, err := json.MarshalIndent(file, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-
-	tmp, err := os.CreateTemp(dir, ".conversations-overlay-*.tmp")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	cleanup := true
-	defer func() {
-		if cleanup {
-			_ = os.Remove(tmpPath)
-		}
-	}()
-
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	_ = os.Chmod(tmpPath, 0o600)
-	if err := os.Rename(tmpPath, path); err != nil {
-		return err
-	}
-	cleanup = false
-	return nil
+	return append([]string(nil), in...)
 }
 
 func applyOverlayToEntry(entry *ConversationEntry, ov conversationOverlayEntry) {
@@ -306,18 +247,106 @@ func applyOverlayToEntry(entry *ConversationEntry, ov conversationOverlayEntry) 
 	if strings.TrimSpace(entry.Title) == "" && ov.Title != "" {
 		entry.Title = ov.Title
 	}
+	if len(ov.LaunchCmd) > 0 {
+		entry.LaunchCmd = cloneStringSlice(ov.LaunchCmd)
+	}
 }
 
 type convScanJob struct {
-	plugin  agent.Plugin
-	store   agent.ConversationStore
-	homeDir string
-	profile string
+	plugin          agent.Plugin
+	store           agent.ConversationStore
+	homeDir         string
+	resolvedHomeDir string
+	profile         string
+}
+
+type storePathReporter interface {
+	StorePaths(homeDir string) []string
 }
 
 type convDedupKey struct {
 	agent string
 	id    string
+}
+
+func resolveRealPath(path string) string {
+	clean := strings.TrimSpace(path)
+	if clean == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(clean)
+}
+
+func isPathWithin(path, dir string) bool {
+	if path == "" || dir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(dir, path)
+	if err != nil {
+		return false
+	}
+	return rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)))
+}
+
+// pathPointsIntoRealHome reports whether path (which may carry a "#id"
+// SQLite fragment suffix) resolves via symlinks to a location inside
+// resolvedRealHome and outside resolvedProfileHome.
+func pathPointsIntoRealHome(path, resolvedProfileHome, resolvedRealHome string) bool {
+	if resolvedRealHome == "" || resolvedProfileHome == "" {
+		return false
+	}
+	clean := strings.TrimSpace(path)
+	if clean == "" {
+		return false
+	}
+	if idx := strings.IndexByte(clean, '#'); idx >= 0 {
+		clean = clean[:idx]
+	}
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return false
+	}
+	resolved = filepath.Clean(resolved)
+	return isPathWithin(resolved, resolvedRealHome) && !isPathWithin(resolved, resolvedProfileHome)
+}
+
+// profileStorePointsToRealHome reports whether profileHome itself resolves to
+// resolvedRealHome, or all existing store paths under profileHome resolve via
+// symlinks into resolvedRealHome (outside profileHome).
+func profileStorePointsToRealHome(store agent.ConversationStore, profileHome, resolvedRealHome string) bool {
+	if resolvedRealHome == "" || strings.TrimSpace(profileHome) == "" {
+		return false
+	}
+	resolvedProfile, err := filepath.EvalSymlinks(profileHome)
+	if err != nil {
+		return false
+	}
+	resolvedProfile = filepath.Clean(resolvedProfile)
+	if resolvedProfile == resolvedRealHome {
+		return true
+	}
+	reporter, ok := store.(storePathReporter)
+	if !ok {
+		return false
+	}
+	paths := reporter.StorePaths(profileHome)
+	if len(paths) == 0 {
+		return false
+	}
+	existing := 0
+	for _, p := range paths {
+		if _, statErr := os.Stat(p); statErr != nil {
+			continue
+		}
+		existing++
+		if !pathPointsIntoRealHome(p, resolvedProfile, resolvedRealHome) {
+			return false
+		}
+	}
+	return existing > 0
 }
 
 func scanAllConversations(ctx context.Context) ([]ConversationEntry, int, error) {
@@ -327,6 +356,7 @@ func scanAllConversations(ctx context.Context) ([]ConversationEntry, int, error)
 
 	reg := agent.DefaultRegistry()
 	realHome := strings.TrimSpace(ConversationHomeDirFn())
+	resolvedRealHome := resolveRealPath(realHome)
 
 	var jobs []convScanJob
 	for _, p := range reg.RuntimePlugins() {
@@ -336,10 +366,11 @@ func scanAllConversations(ctx context.Context) ([]ConversationEntry, int, error)
 		}
 		if realHome != "" {
 			jobs = append(jobs, convScanJob{
-				plugin:  p,
-				store:   store,
-				homeDir: realHome,
-				profile: "",
+				plugin:          p,
+				store:           store,
+				homeDir:         realHome,
+				resolvedHomeDir: resolvedRealHome,
+				profile:         "",
 			})
 		}
 	}
@@ -354,11 +385,15 @@ func scanAllConversations(ctx context.Context) ([]ConversationEntry, int, error)
 			if store == nil {
 				continue
 			}
+			if profileStorePointsToRealHome(store, pr.HomeDir, resolvedRealHome) {
+				continue
+			}
 			jobs = append(jobs, convScanJob{
-				plugin:  p,
-				store:   store,
-				homeDir: pr.HomeDir,
-				profile: pr.Profile,
+				plugin:          p,
+				store:           store,
+				homeDir:         pr.HomeDir,
+				resolvedHomeDir: resolveRealPath(pr.HomeDir),
+				profile:         pr.Profile,
 			})
 		}
 	}
@@ -387,7 +422,14 @@ func scanAllConversations(ctx context.Context) ([]ConversationEntry, int, error)
 			}
 			mapped := make([]ConversationEntry, 0, len(recs))
 			for _, rec := range recs {
-				mapped = append(mapped, mapRecordToEntry(reg, j.plugin, j.profile, rec))
+				fallbackProfile := j.profile
+				if fallbackProfile != "" && pathPointsIntoRealHome(rec.SourcePath, j.resolvedHomeDir, resolvedRealHome) {
+					fallbackProfile = ""
+					if strings.EqualFold(strings.TrimSpace(rec.Profile), j.profile) {
+						rec.Profile = ""
+					}
+				}
+				mapped = append(mapped, mapRecordToEntry(reg, j.plugin, fallbackProfile, rec))
 			}
 			results[idx] = mapped
 		}(i, job)
@@ -508,6 +550,9 @@ func mergeConversationEntries(a, b ConversationEntry) ConversationEntry {
 	if winner.ResumeTarget == "" {
 		winner.ResumeTarget = loser.ResumeTarget
 	}
+	if len(winner.LaunchCmd) == 0 && len(loser.LaunchCmd) > 0 {
+		winner.LaunchCmd = cloneStringSlice(loser.LaunchCmd)
+	}
 	if loser.CreatedAtMs > 0 && (winner.CreatedAtMs == 0 || loser.CreatedAtMs < winner.CreatedAtMs) {
 		winner.CreatedAtMs = loser.CreatedAtMs
 	}
@@ -615,6 +660,23 @@ func fetchConversationsNative(ctx context.Context, refresh, includeArchived bool
 	}, nil
 }
 
+func applyOverlayToConvCache(canonAgent, sid string, ov conversationOverlayEntry) {
+	convCache.mu.Lock()
+	if convCache.loaded {
+		updated := false
+		for i := range convCache.entries {
+			if convCache.entries[i].Agent == canonAgent && convCache.entries[i].ID == sid {
+				applyOverlayToEntry(&convCache.entries[i], ov)
+				updated = true
+			}
+		}
+		if updated {
+			sortConversationEntries(convCache.entries)
+		}
+	}
+	convCache.mu.Unlock()
+}
+
 func recordConversationOpenNative(ctx context.Context, conv ConversationEntry, space string, nowMs int64) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -631,52 +693,69 @@ func recordConversationOpenNative(ctx context.Context, conv ConversationEntry, s
 		return nil
 	}
 
-	key := overlayKey(canonAgent, sid)
-	overlayPath := ConversationOverlayPathFn()
+	ov := conversationOverlayEntry{
+		Agent:        canonAgent,
+		SessionID:    sid,
+		Space:        strings.TrimSpace(space),
+		LastOpenedMs: nowMs,
+		LastOutcome:  strings.TrimSpace(conv.LastOutcome),
+		Profile:      strings.TrimSpace(conv.Profile),
+		CWD:          strings.TrimSpace(conv.CWD),
+		Title:        strings.TrimSpace(conv.Title),
+		LaunchCmd:    cloneStringSlice(conv.LaunchCmd),
+		UpdatedAtMs:  nowMs,
+	}
 
+	overlayPath := ConversationOverlayPathFn()
 	overlayMu.Lock()
-	entries := loadConversationOverlay(overlayPath)
-	ov := entries[key]
-	ov.Agent = canonAgent
-	ov.SessionID = sid
-	if s := strings.TrimSpace(space); s != "" {
-		ov.Space = s
-	}
-	if nowMs > ov.LastOpenedMs {
-		ov.LastOpenedMs = nowMs
-	}
-	if p := strings.TrimSpace(conv.Profile); p != "" {
-		ov.Profile = p
-	}
-	if c := strings.TrimSpace(conv.CWD); c != "" {
-		ov.CWD = c
-	}
-	if t := strings.TrimSpace(conv.Title); t != "" {
-		ov.Title = t
-	}
-	entries[key] = ov
-	err := saveConversationOverlay(overlayPath, entries)
+	err := upsertConversationOverlaySQLite(overlayPath, ov)
 	overlayMu.Unlock()
 	if err != nil {
 		return err
 	}
 
 	// Keep the in-memory cache immediately consistent with the new overlay.
-	convCache.mu.Lock()
-	if convCache.loaded {
-		updated := false
-		for i := range convCache.entries {
-			if convCache.entries[i].Agent == canonAgent && convCache.entries[i].ID == sid {
-				applyOverlayToEntry(&convCache.entries[i], ov)
-				updated = true
-			}
-		}
-		if updated {
-			sortConversationEntries(convCache.entries)
-		}
-	}
-	convCache.mu.Unlock()
+	applyOverlayToConvCache(canonAgent, sid, ov)
+	return nil
+}
 
+func recordConversationLaunchNative(ctx context.Context, agentName, sessionID, profile, cwd, title string, launchCmd []string, space string, nowMs int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	canonAgent := CanonicalConversationAgent(agentName)
+	sid := strings.TrimSpace(sessionID)
+	if canonAgent == "" || sid == "" {
+		return nil
+	}
+
+	updatedAt := nowMs
+	if updatedAt <= 0 {
+		updatedAt = time.Now().UnixMilli()
+	}
+
+	ov := conversationOverlayEntry{
+		Agent:        canonAgent,
+		SessionID:    sid,
+		Space:        strings.TrimSpace(space),
+		LastOpenedMs: nowMs,
+		Profile:      strings.TrimSpace(profile),
+		CWD:          strings.TrimSpace(cwd),
+		Title:        strings.TrimSpace(title),
+		LaunchCmd:    cloneStringSlice(launchCmd),
+		UpdatedAtMs:  updatedAt,
+	}
+
+	overlayPath := ConversationOverlayPathFn()
+	overlayMu.Lock()
+	err := upsertConversationOverlaySQLite(overlayPath, ov)
+	overlayMu.Unlock()
+	if err != nil {
+		return err
+	}
+
+	// Keep the in-memory cache immediately consistent with the new overlay.
+	applyOverlayToConvCache(canonAgent, sid, ov)
 	return nil
 }
 

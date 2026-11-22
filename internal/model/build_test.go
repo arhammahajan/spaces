@@ -382,3 +382,92 @@ func TestBuildSpacesWindowAndPaneExtendedMetadata(t *testing.T) {
 		t.Errorf("pane process metadata = %+v", p)
 	}
 }
+
+func TestBuildPaneFallsBackToDescendantProfile(t *testing.T) {
+	origProf := DetectDescendantProfileFn
+	origInspect := InspectPaneProcessFn
+	t.Cleanup(func() {
+		DetectDescendantProfileFn = origProf
+		InspectPaneProcessFn = origInspect
+	})
+	InspectPaneProcessFn = func(int) (string, int) { return "", 0 }
+	DetectDescendantProfileFn = func(pid int) string {
+		if pid == 4242 {
+			return "saucerf166"
+		}
+		return ""
+	}
+
+	snap := tmux.ServerSnapshot{
+		Sessions: []tmux.Session{{Name: "dev", ID: "$1"}},
+		Panes: []tmux.Pane{
+			{
+				SessionName:    "dev",
+				ID:             "%1",
+				CurrentCommand: "agy",
+				PID:            4242,
+				// ResumeProfile intentionally empty (@spaces_profile unset).
+			},
+			{
+				SessionName:    "dev",
+				ID:             "%2",
+				CurrentCommand: "agy",
+				PID:            4242,
+				ResumeProfile:  "pratham", // @spaces_profile takes precedence.
+			},
+			{
+				SessionName:    "dev",
+				ID:             "%3",
+				CurrentCommand: "zsh",
+				PID:            4242, // non-agent pane should not query profile.
+			},
+		},
+	}
+
+	spaces := BuildSpaces(snap, 1_700_000_000_000)
+	if len(spaces) != 1 || len(spaces[0].Panes) != 3 {
+		t.Fatalf("unexpected spaces: %+v", spaces)
+	}
+	byID := map[string]Pane{}
+	for _, p := range spaces[0].Panes {
+		byID[p.ID] = p
+	}
+	if byID["%1"].Profile != "saucerf166" {
+		t.Errorf("pane %%1 Profile = %q, want saucerf166", byID["%1"].Profile)
+	}
+	if byID["%2"].Profile != "pratham" {
+		t.Errorf("pane %%2 Profile = %q, want pratham (@spaces_profile must win)", byID["%2"].Profile)
+	}
+	if byID["%3"].Profile != "" {
+		t.Errorf("pane %%3 (non-agent) Profile = %q, want empty", byID["%3"].Profile)
+	}
+}
+
+func TestExtractProfileFromProcData(t *testing.T) {
+	// 1. cmdline argv wins over environ.
+	got := extractProfileFromProcData(
+		[]byte("harness\x00agy\x00profile\x00pratham\x00"),
+		[]byte("PATH=/usr/bin\x00HARNESS_PROFILE=other\x00"),
+	)
+	if got != "pratham" {
+		t.Errorf("cmdline precedence = %q, want pratham", got)
+	}
+
+	// 2. Falls back to HARNESS_PROFILE in environ when cmdline has no profile.
+	got = extractProfileFromProcData(
+		[]byte("/usr/bin/agy\x00--conversation\x00abc\x00"),
+		[]byte("HOME=/tmp\x00HARNESS_PROFILE=saucerf166\x00TERM=xterm\x00"),
+	)
+	if got != "saucerf166" {
+		t.Errorf("environ fallback = %q, want saucerf166", got)
+	}
+
+	// 3. Empty when neither has a profile.
+	got = extractProfileFromProcData(
+		[]byte("claude\x00--resume\x00123\x00"),
+		[]byte("HOME=/tmp\x00"),
+	)
+	if got != "" {
+		t.Errorf("empty case = %q, want empty", got)
+	}
+}

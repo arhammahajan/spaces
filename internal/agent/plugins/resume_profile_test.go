@@ -53,7 +53,7 @@ func TestDiscoverProfileRootsAndFindUnclaimedConversation(t *testing.T) {
 	}
 
 	// Harness profile home for claude/work
-	profHome := filepath.Join(home, ".model-router", "profiles", "claude", "work", "home")
+	profHome := filepath.Join(home, ".harness", "profiles", "claude", "work", "home")
 	profClaudeDir := filepath.Join(profHome, ".claude", "projects", "repo")
 	if err := os.MkdirAll(profClaudeDir, 0o755); err != nil {
 		t.Fatal(err)

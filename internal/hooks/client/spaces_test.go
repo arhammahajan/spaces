@@ -1,9 +1,11 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -55,6 +57,7 @@ func TestSpaceHookRecordAndRemoveOutcome(t *testing.T) {
 	// RecordOutcome enriches from tmux pane options and DiscoverTitleFunc.
 	var calls []tmuxCall
 	TmuxFunc = stubTmux(&calls, "mysess\x1f/work/app\x1fprofA\x1fsid-42\x1f\x1ffailed\n", 0, nil)
+	RecordConversationLaunchFunc = nil
 	DiscoverTitleFunc = func(agent, cwd, sid string) string {
 		if agent == "claude" && sid == "sid-42" {
 			return "Debug CI"
@@ -101,10 +104,90 @@ func TestSpaceHookRecordAndRemoveOutcome(t *testing.T) {
 	}
 }
 
+func TestSpaceHookRecordOutcomeCapturesLaunchCmd(t *testing.T) {
+	snap := saveSeams()
+	defer snap.restore()
+	clearSpaceEnv(t)
+	outPath, _ := captureOutput(t)
+
+	var calls []tmuxCall
+	TmuxFunc = stubTmux(&calls, "mysess\x1f/work/app\x1fprofA\x1fsid-99\x1fMy Title\x1f\x1f[\"/usr/local/bin/harness\",\"claude\",\"profile\",\"profA\"]\n", 0, nil)
+	RecordOutcome = func(entry map[string]any) error { return nil }
+
+	var gotAgent, gotSID, gotProfile, gotCWD, gotTitle, gotSpace string
+	var gotCmd []string
+	RecordConversationLaunchFunc = func(_ context.Context, agent, sessionID, profile, cwd, title string, launchCmd []string, space string, _ int64) error {
+		gotAgent, gotSID, gotProfile, gotCWD, gotTitle, gotSpace = agent, sessionID, profile, cwd, title, space
+		gotCmd = append([]string(nil), launchCmd...)
+		return nil
+	}
+
+	payload := `{"pane":"%9","app":"claude-code","outcome":"done","text":"finished"}`
+	if code := SpaceHookRecordOutcome([]string{payload}); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	_ = outPath
+	wantCmd := []string{"/usr/local/bin/harness", "claude", "profile", "profA"}
+	if gotAgent != "claude" || gotSID != "sid-99" || gotProfile != "profA" ||
+		gotCWD != "/work/app" || gotTitle != "My Title" || gotSpace != "mysess" ||
+		!reflect.DeepEqual(gotCmd, wantCmd) {
+		t.Fatalf("recorded outcome launch = (%q, %q, %q, %q, %q, %q, %v)",
+			gotAgent, gotSID, gotProfile, gotCWD, gotTitle, gotSpace, gotCmd)
+	}
+}
+
+func TestSpaceHookRecordOutcomeRecordsProfileWithoutLaunchCmd(t *testing.T) {
+	snap := saveSeams()
+	defer snap.restore()
+	clearSpaceEnv(t)
+	_, _ = captureOutput(t)
+
+	type rec struct {
+		agent, sid, profile, cwd, title, space string
+		cmd                                    []string
+	}
+	var recorded []rec
+	RecordConversationLaunchFunc = func(_ context.Context, agent, sessionID, profile, cwd, title string, launchCmd []string, space string, _ int64) error {
+		recorded = append(recorded, rec{
+			agent: agent, sid: sessionID, profile: profile, cwd: cwd, title: title, space: space,
+			cmd: append([]string(nil), launchCmd...),
+		})
+		return nil
+	}
+	RecordOutcome = func(entry map[string]any) error { return nil }
+
+	// 1. @spaces_profile set, @spaces_launch_cmd empty -> still records profile.
+	var calls []tmuxCall
+	TmuxFunc = stubTmux(&calls, "mysess\x1f/work/app\x1fpratham\x1fsid-101\x1fFix bug\x1f\x1f\n", 0, nil)
+	if code := SpaceHookRecordOutcome([]string{`{"pane":"%9","app":"antigravity","outcome":"done","text":"finished"}`}); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if len(recorded) != 1 || recorded[0].agent != "antigravity" || recorded[0].sid != "sid-101" ||
+		recorded[0].profile != "pratham" || recorded[0].cwd != "/work/app" ||
+		recorded[0].title != "Fix bug" || recorded[0].space != "mysess" || len(recorded[0].cmd) != 0 {
+		t.Fatalf("case 1 recorded = %+v", recorded)
+	}
+
+	// 2. @spaces_profile empty, @spaces_launch_cmd has profile -> extracts profile into entry and overlay.
+	recorded = nil
+	var lastEntry map[string]any
+	RecordOutcome = func(entry map[string]any) error { lastEntry = entry; return nil }
+	TmuxFunc = stubTmux(&calls, "mysess\x1f/work/app\x1f\x1fsid-102\x1fAnother\x1f\x1f[\"/usr/local/bin/harness\",\"claude\",\"profile\",\"extracted\"]\n", 0, nil)
+	if code := SpaceHookRecordOutcome([]string{`{"pane":"%9","app":"claude-code","outcome":"done","text":"finished"}`}); code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	if lastEntry["profile"] != "extracted" {
+		t.Fatalf("entry profile = %v, want extracted", lastEntry["profile"])
+	}
+	if len(recorded) != 1 || recorded[0].profile != "extracted" {
+		t.Fatalf("case 2 recorded = %+v", recorded)
+	}
+}
+
 func TestDiscoverProfileAntigravity(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	brainDir := filepath.Join(tmpHome, ".model-router", "profiles", "antigravity", "work-prof", "home", ".gemini", "antigravity-cli", "brain", "conv-123")
+	brainDir := filepath.Join(tmpHome, ".harness", "profiles", "antigravity", "work-prof", "home", ".gemini", "antigravity-cli", "brain", "conv-123")
 	if err := os.MkdirAll(brainDir, 0o755); err != nil {
 		t.Fatal(err)
 	}

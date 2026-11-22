@@ -1,7 +1,9 @@
 package client
 
 import (
+	"context"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -497,5 +499,120 @@ func TestHookClientStopBackgroundDecisionMatchesTmuxAndStore(t *testing.T) {
 	}
 	if !sawDone || !sawUnsetPrior {
 		t.Fatalf("expected tmux done + unset prior outcome, got %v", calls)
+	}
+}
+
+func TestRecordResumeTargetRecordsLaunchCmd(t *testing.T) {
+	saveTmuxTestSeams(t)
+	clearSpaceEnv(t)
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,42,0")
+	t.Setenv("TMUX_PANE", "%12")
+	NowFunc = func() time.Time { return time.UnixMilli(1700000123456) }
+
+	var calls []tmuxCall
+	TmuxFunc = func(args []string, _ time.Duration) (string, int, error) {
+		calls = append(calls, tmuxCall{args: append([]string{}, args...)})
+		if len(args) > 0 && args[0] == "display-message" {
+			return "alpha\x1f/repo/work\x1fwork\x1f[\"/usr/local/bin/harness\",\"claude\",\"profile\",\"work\"]\n", 0, nil
+		}
+		return "", 0, nil
+	}
+
+	var gotAgent, gotSID, gotProfile, gotCWD, gotSpace string
+	var gotCmd []string
+	var gotNowMs int64
+	RecordConversationLaunchFunc = func(_ context.Context, agent, sessionID, profile, cwd, title string, launchCmd []string, space string, nowMs int64) error {
+		gotAgent, gotSID, gotProfile, gotCWD, gotSpace = agent, sessionID, profile, cwd, space
+		gotCmd = append([]string(nil), launchCmd...)
+		gotNowMs = nowMs
+		return nil
+	}
+
+	RecordResumeTarget("claude", map[string]any{"session_id": "sess-xyz"})
+
+	wantCmd := []string{"/usr/local/bin/harness", "claude", "profile", "work"}
+	if gotAgent != "claude" || gotSID != "sess-xyz" || gotProfile != "work" ||
+		gotCWD != "/repo/work" || gotSpace != "alpha" || gotNowMs != 1700000123456 ||
+		!reflect.DeepEqual(gotCmd, wantCmd) {
+		t.Fatalf("recorded launch = (%q, %q, %q, %q, %q, %v, %d)",
+			gotAgent, gotSID, gotProfile, gotCWD, gotSpace, gotCmd, gotNowMs)
+	}
+}
+
+func TestRecordResumeTargetRecordsProfileWithoutLaunchCmd(t *testing.T) {
+	saveTmuxTestSeams(t)
+	clearSpaceEnv(t)
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,42,0")
+	t.Setenv("TMUX_PANE", "%12")
+	NowFunc = func() time.Time { return time.UnixMilli(1700000123456) }
+
+	type rec struct {
+		agent, sid, profile, cwd, space string
+		cmd                             []string
+		nowMs                           int64
+	}
+	var recorded []rec
+	RecordConversationLaunchFunc = func(_ context.Context, agent, sessionID, profile, cwd, _ string, launchCmd []string, space string, nowMs int64) error {
+		recorded = append(recorded, rec{
+			agent: agent, sid: sessionID, profile: profile, cwd: cwd, space: space,
+			cmd: append([]string(nil), launchCmd...), nowMs: nowMs,
+		})
+		return nil
+	}
+
+	// 1. @spaces_profile set, @spaces_launch_cmd empty -> still records profile.
+	TmuxFunc = func(args []string, _ time.Duration) (string, int, error) {
+		if len(args) > 0 && args[0] == "display-message" {
+			return "alpha\x1f/repo/work\x1fpratham\x1f\n", 0, nil
+		}
+		return "", 0, nil
+	}
+	RecordResumeTarget("antigravity", map[string]any{"session_id": "sess-1"})
+	if len(recorded) != 1 || recorded[0].agent != "antigravity" || recorded[0].sid != "sess-1" ||
+		recorded[0].profile != "pratham" || recorded[0].cwd != "/repo/work" || recorded[0].space != "alpha" ||
+		len(recorded[0].cmd) != 0 {
+		t.Fatalf("case 1 recorded = %+v", recorded)
+	}
+
+	// 2. Both tmux options empty, HARNESS_PROFILE env set -> still records profile.
+	recorded = nil
+	t.Setenv("HARNESS_PROFILE", "env-prof")
+	TmuxFunc = func(args []string, _ time.Duration) (string, int, error) {
+		if len(args) > 0 && args[0] == "display-message" {
+			return "alpha\x1f/repo/work\x1f\x1f\n", 0, nil
+		}
+		return "", 0, nil
+	}
+	RecordResumeTarget("claude", map[string]any{"session_id": "sess-2"})
+	if len(recorded) != 1 || recorded[0].profile != "env-prof" || len(recorded[0].cmd) != 0 {
+		t.Fatalf("case 2 recorded = %+v", recorded)
+	}
+
+	// 3. @spaces_profile and HARNESS_PROFILE empty, @spaces_launch_cmd has profile -> extracts profile.
+	recorded = nil
+	t.Setenv("HARNESS_PROFILE", "")
+	TmuxFunc = func(args []string, _ time.Duration) (string, int, error) {
+		if len(args) > 0 && args[0] == "display-message" {
+			return "alpha\x1f/repo/work\x1f\x1f[\"/usr/local/bin/harness\",\"agy\",\"profile\",\"from-cmd\"]\n", 0, nil
+		}
+		return "", 0, nil
+	}
+	RecordResumeTarget("antigravity", map[string]any{"session_id": "sess-3"})
+	wantCmd := []string{"/usr/local/bin/harness", "agy", "profile", "from-cmd"}
+	if len(recorded) != 1 || recorded[0].profile != "from-cmd" || !reflect.DeepEqual(recorded[0].cmd, wantCmd) {
+		t.Fatalf("case 3 recorded = %+v", recorded)
+	}
+
+	// 4. Both launchCmd and profile empty -> does not record.
+	recorded = nil
+	TmuxFunc = func(args []string, _ time.Duration) (string, int, error) {
+		if len(args) > 0 && args[0] == "display-message" {
+			return "alpha\x1f/repo/work\x1f\x1f\n", 0, nil
+		}
+		return "", 0, nil
+	}
+	RecordResumeTarget("claude", map[string]any{"session_id": "sess-4"})
+	if len(recorded) != 0 {
+		t.Fatalf("case 4 expected no record when both launchCmd and profile are empty, got %+v", recorded)
 	}
 }

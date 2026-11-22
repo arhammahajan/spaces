@@ -435,7 +435,7 @@ func (r *Registry) DetectProcess(proc ProcessInfo) string {
 }
 
 // RealHomeDir unwraps a harness shadow profile HOME
-// (`<realHome>/.model-router/profiles/<agent>/<profile>/home`) back to
+// (`<realHome>/.harness/profiles/<agent>/<profile>/home`) back to
 // `<realHome>`. When home is empty, os.UserHomeDir() is used.
 func RealHomeDir(home string) string {
 	h := strings.TrimSpace(home)
@@ -446,21 +446,21 @@ func RealHomeDir(home string) string {
 			return ""
 		}
 	}
-	if idx := strings.Index(h, "/.model-router/"); idx > 0 {
+	if idx := strings.Index(h, "/.harness/"); idx > 0 {
 		return h[:idx]
 	}
 	return h
 }
 
 // DiscoverProfileRoots discovers optional harness-managed profile home
-// directories under `<realHome>/.model-router/profiles/<agent>/<profile>/home`.
+// directories under `<realHome>/.harness/profiles/<agent>/<profile>/home`.
 // Returns nil cleanly when no harness profile directory exists.
 func (r *Registry) DiscoverProfileRoots(realHome string) []ProfileRoot {
 	base := RealHomeDir(realHome)
 	if base == "" {
 		return nil
 	}
-	profilesDir := filepath.Join(base, ".model-router", "profiles")
+	profilesDir := filepath.Join(base, ".harness", "profiles")
 	agentEntries, err := os.ReadDir(profilesDir)
 	if err != nil {
 		return nil

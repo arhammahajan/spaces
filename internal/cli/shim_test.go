@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -231,5 +233,60 @@ func TestShimEmitsOSCLifecycle(t *testing.T) {
 		base64.StdEncoding.EncodeToString([]byte("exited with status 3")) + "\x1b\\"
 	if got := tty.String(); got != wantErr {
 		t.Fatalf("osc tty (error) = %q, want %q", got, wantErr)
+	}
+}
+
+func TestShimSetsLaunchCmdAndStripsResumeArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		want []string
+	}{
+		{
+			name: "claude strips --resume id",
+			args: []string{"__shim", "--profile", "work", "claude", "/usr/local/bin/harness", "claude", "profile", "work", "--model", "opus", "--resume", "old-sess-1"},
+			want: []string{"/usr/local/bin/harness", "claude", "profile", "work", "--model", "opus"},
+		},
+		{
+			name: "claude strips --resume=id",
+			args: []string{"__shim", "claude", "/bin/claude", "--resume=old-sess-2", "-p", "hi"},
+			want: []string{"/bin/claude", "-p", "hi"},
+		},
+		{
+			name: "antigravity strips --conversation id",
+			args: []string{"__shim", "--profile", "saucer", "antigravity", "/usr/local/bin/harness", "antigravity", "profile", "saucer", "--conversation", "conv-99"},
+			want: []string{"/usr/local/bin/harness", "antigravity", "profile", "saucer"},
+		},
+		{
+			name: "codex strips resume subcommand and id",
+			args: []string{"__shim", "--profile", "dev", "codex", "/usr/local/bin/harness", "codex", "profile", "dev", "resume", "codex-sess-7"},
+			want: []string{"/usr/local/bin/harness", "codex", "profile", "dev"},
+		},
+		{
+			name: "plain command without resume flags preserved",
+			args: []string{"__shim", "claude", "/bin/claude", "-p", "hello"},
+			want: []string{"/bin/claude", "-p", "hello"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &FakeClient{Up: true}
+			env := shimEnv(fc, 0)
+			if code := Run(tc.args, env); code != 0 {
+				t.Fatalf("code = %d", code)
+			}
+			raw, ok := findSet(fc.SetCalls, "@spaces_launch_cmd")
+			if !ok {
+				t.Fatalf("expected @spaces_launch_cmd to be set: %+v", fc.SetCalls)
+			}
+			var got []string
+			if err := json.Unmarshal([]byte(raw), &got); err != nil {
+				t.Fatalf("unmarshal @spaces_launch_cmd %q: %v", raw, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("@spaces_launch_cmd = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

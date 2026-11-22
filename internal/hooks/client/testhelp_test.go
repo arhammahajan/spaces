@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"io"
 	"os"
 	"testing"
@@ -73,6 +74,7 @@ type seamSnapshot struct {
 	daemon        func() int
 	serve         func(bool, *int) int
 	discoverTitle func(string, string, string) string
+	recordLaunch  func(context.Context, string, string, string, string, string, []string, string, int64) error
 	stdin         interface{ Read([]byte) (int, error) }
 	now           func() time.Time
 }
@@ -85,7 +87,7 @@ func saveSeams() seamSnapshot {
 		EnsureServer, SpaceHooksSummary, SpaceHooksDetail,
 		RecordOutcome, RemoveOutcome, PaneState,
 		HooksStatus, HooksStop, HooksStart, Daemonize, Serve,
-		DiscoverTitleFunc,
+		DiscoverTitleFunc, RecordConversationLaunchFunc,
 		StdinValue, NowFunc,
 	}
 }
@@ -97,6 +99,6 @@ func (s seamSnapshot) restore() {
 	EnsureServer, SpaceHooksSummary, SpaceHooksDetail = s.ensure, s.summary, s.detail
 	RecordOutcome, RemoveOutcome, PaneState = s.recordOutcome, s.removeOutcome, s.paneState
 	HooksStatus, HooksStop, HooksStart, Daemonize, Serve = s.status, s.stop, s.start, s.daemon, s.serve
-	DiscoverTitleFunc = s.discoverTitle
+	DiscoverTitleFunc, RecordConversationLaunchFunc = s.discoverTitle, s.recordLaunch
 	StdinValue, NowFunc = s.stdin, s.now
 }

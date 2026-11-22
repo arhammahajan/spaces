@@ -469,6 +469,114 @@ func (m *Model) moveConvSelection(delta int) {
 	}
 }
 
+func (m Model) convProfilesFor(conv model.ConversationEntry) []model.HarnessProfile {
+	if len(m.harnesses) == 0 {
+		return nil
+	}
+	want := model.CanonicalConversationAgent(conv.Agent)
+	if want == "" {
+		want = model.CanonicalConversationAgent(conv.App)
+	}
+	if want == "" {
+		return nil
+	}
+	for _, h := range m.harnesses {
+		if model.CanonicalConversationAgent(h.Name) != want {
+			continue
+		}
+		if len(h.Profiles) == 0 {
+			return nil
+		}
+		hasDefault := false
+		for _, p := range h.Profiles {
+			if strings.EqualFold(strings.TrimSpace(p.Name), "default") {
+				hasDefault = true
+				break
+			}
+		}
+		var out []model.HarnessProfile
+		if !hasDefault && strings.ToLower(strings.TrimSpace(h.BinaryState)) != "missing" {
+			out = append(out, model.HarnessProfile{
+				Name:        "default",
+				DisplayName: "Default",
+			})
+		}
+		out = append(out, h.Profiles...)
+		return out
+	}
+	return nil
+}
+
+func (m *Model) clearConvProfilePicker() {
+	m.convPickPending = nil
+	m.convPickForceNewTab = false
+	m.convPickProfiles = nil
+	m.convPickCursor = 0
+	m.convPickWaitingHarnesses = false
+}
+
+func (m *Model) moveConvPickCursor(delta int) {
+	n := len(m.convPickProfiles)
+	if n == 0 {
+		m.convPickCursor = 0
+		return
+	}
+	m.convPickCursor += delta
+	if m.convPickCursor < 0 {
+		m.convPickCursor = 0
+	}
+	if m.convPickCursor >= n {
+		m.convPickCursor = n - 1
+	}
+}
+
+func (m *Model) openConversationDirect(conv model.ConversationEntry, forceNewTab bool) {
+	cb, ok := m.backend.(ConversationsBackend)
+	if !ok {
+		m.toast = "Cannot open conversation: backend unsupported."
+		return
+	}
+	if err := cb.OpenConversation(context.Background(), conv, forceNewTab); err != nil {
+		m.toast = err.Error()
+		return
+	}
+	m.quitting = true
+}
+
+func convProfileCursor(profiles []model.HarnessProfile, currentProfile string) int {
+	want := strings.TrimSpace(currentProfile)
+	if want == "" {
+		return 0
+	}
+	for i, p := range profiles {
+		if strings.EqualFold(strings.TrimSpace(p.Name), want) {
+			return i
+		}
+	}
+	return 0
+}
+
+func (m Model) finishConvPickAfterHarnesses() (tea.Model, tea.Cmd) {
+	m.convPickWaitingHarnesses = false
+	if m.convPickPending == nil {
+		return m, nil
+	}
+	profiles := m.convProfilesFor(*m.convPickPending)
+	if len(profiles) > 1 {
+		m.convPickProfiles = profiles
+		m.convPickCursor = convProfileCursor(profiles, m.convPickPending.Profile)
+		return m, nil
+	}
+	conv := *m.convPickPending
+	forceNewTab := m.convPickForceNewTab
+	m.clearConvProfilePicker()
+	m.openConversationDirect(conv, forceNewTab)
+	if m.quitting {
+		return m, tea.Quit
+	}
+	return m, nil
+}
+
 func (m *Model) activateConversation(idx int, forceNewTab bool) {
 	items := m.conversationItems()
 	if idx < 0 || idx >= len(items) {
@@ -484,16 +592,25 @@ func (m *Model) activateConversation(idx int, forceNewTab bool) {
 		m.quitting = true
 		return
 	}
-	cb, ok := m.backend.(ConversationsBackend)
-	if !ok {
-		m.toast = "Cannot open conversation: backend unsupported."
+	if m.agentsLoading {
+		conv := item.Conv
+		m.convPickPending = &conv
+		m.convPickForceNewTab = forceNewTab
+		m.convPickProfiles = nil
+		m.convPickCursor = 0
+		m.convPickWaitingHarnesses = true
 		return
 	}
-	if err := cb.OpenConversation(ctx, item.Conv, forceNewTab); err != nil {
-		m.toast = err.Error()
+	if profiles := m.convProfilesFor(item.Conv); len(profiles) > 1 {
+		conv := item.Conv
+		m.convPickPending = &conv
+		m.convPickForceNewTab = forceNewTab
+		m.convPickProfiles = profiles
+		m.convPickCursor = convProfileCursor(profiles, conv.Profile)
+		m.convPickWaitingHarnesses = false
 		return
 	}
-	m.quitting = true
+	m.openConversationDirect(item.Conv, forceNewTab)
 }
 
 func (m Model) hasActiveConvFilter() bool {
@@ -594,7 +711,61 @@ func (m Model) handleConvSearchResult(msg convSearchResultMsg) (tea.Model, tea.C
 // key + mouse handling (search-first)
 // ---------------------------------------------------------------------------
 
+func (m Model) handleConvProfilePicker(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.Type {
+	case tea.KeyCtrlC:
+		m.quitting = true
+		return m, tea.Quit
+	case tea.KeyEsc:
+		m.clearConvProfilePicker()
+		return m, nil
+	case tea.KeyUp, tea.KeyCtrlP:
+		m.moveConvPickCursor(-1)
+		return m, nil
+	case tea.KeyDown, tea.KeyCtrlN:
+		m.moveConvPickCursor(1)
+		return m, nil
+	case tea.KeyEnter:
+		if m.convPickWaitingHarnesses || len(m.convPickProfiles) == 0 || m.convPickPending == nil {
+			return m, nil
+		}
+		if m.convPickCursor < 0 {
+			m.convPickCursor = 0
+		}
+		if m.convPickCursor >= len(m.convPickProfiles) {
+			m.convPickCursor = len(m.convPickProfiles) - 1
+		}
+		conv := *m.convPickPending
+		conv.Profile = m.convPickProfiles[m.convPickCursor].Name
+		conv.LaunchCmd = nil
+		forceNewTab := m.convPickForceNewTab
+		m.clearConvProfilePicker()
+		m.openConversationDirect(conv, forceNewTab)
+		if m.quitting {
+			return m, tea.Quit
+		}
+		return m, nil
+	case tea.KeyRunes:
+		if len(msg.Runes) == 0 {
+			return m, nil
+		}
+		switch string(msg.Runes) {
+		case "k":
+			m.moveConvPickCursor(-1)
+		case "j":
+			m.moveConvPickCursor(1)
+		case "q":
+			m.clearConvProfilePicker()
+		}
+		return m, nil
+	}
+	return m, nil
+}
+
 func (m Model) handleConversations(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.convPickPending != nil {
+		return m.handleConvProfilePicker(msg)
+	}
 	// Alt-c toggles current workspace/CWD scope vs all workspaces.
 	if (msg.Alt && msg.Type == tea.KeyRunes && len(msg.Runes) == 1 && (msg.Runes[0] == 'c' || msg.Runes[0] == 'C')) ||
 		msg.String() == "alt+c" {
@@ -773,6 +944,9 @@ func (m Model) handleConversations(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m Model) handleConvLeftClick(x, y int) (tea.Model, tea.Cmd) {
 	_ = x
+	if m.convPickPending != nil {
+		return m, nil
+	}
 	items := m.conversationItems()
 	if len(items) == 0 {
 		return m, nil
@@ -863,6 +1037,9 @@ func convSelectedEntryIdx(entries []convListEntry, selected int) int {
 }
 
 func (m Model) renderConversations(width, height int) string {
+	if m.convPickPending != nil {
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, m.renderConvProfilePicker(width, height))
+	}
 	layout := m.convLayout(width, height)
 	items := m.conversationItems()
 
@@ -898,6 +1075,96 @@ func (m Model) renderConversations(width, height int) string {
 	}
 	b.WriteString(m.convHintsLine(width))
 	return b.String()
+}
+
+func (m Model) renderConvProfilePicker(width, height int) string {
+	conv := *m.convPickPending
+	innerW := 54
+	if maxW := width - 8; maxW < innerW {
+		innerW = maxW
+	}
+	if innerW < 24 {
+		innerW = 24
+	}
+
+	agentLabel := conv.DisplayApp()
+	if agentLabel == "" {
+		agentLabel = strings.TrimSpace(conv.Agent)
+	}
+	if agentLabel == "" {
+		agentLabel = "agent"
+	}
+
+	title := singleLineText(strings.TrimSpace(conv.Title))
+	if title == "" {
+		if prev := singleLineText(strings.TrimSpace(conv.Preview)); prev != "" {
+			title = prev
+		} else {
+			title = "(untitled)"
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString(styleAccent.Render("Choose profile") + "  " + styleSubtext.Render(truncate(agentLabel, innerW-16)))
+	b.WriteString("\n")
+	b.WriteString(styleMuted.Render(truncate(title, innerW)))
+	b.WriteString("\n\n")
+
+	if m.convPickWaitingHarnesses {
+		b.WriteString(styleMuted.Render("Loading profiles…"))
+		b.WriteString("\n")
+	} else if len(m.convPickProfiles) == 0 {
+		b.WriteString(styleMuted.Render("No profiles available."))
+		b.WriteString("\n")
+	} else {
+		maxVisible := height - 10
+		if maxVisible < 3 {
+			maxVisible = 3
+		}
+		if maxVisible > len(m.convPickProfiles) {
+			maxVisible = len(m.convPickProfiles)
+		}
+		start := windowStart(m.convPickCursor, len(m.convPickProfiles), maxVisible)
+		end := start + maxVisible
+		if end > len(m.convPickProfiles) {
+			end = len(m.convPickProfiles)
+		}
+		for i := start; i < end; i++ {
+			p := m.convPickProfiles[i]
+			label := p.Name
+			note := ""
+			if strings.EqualFold(p.Name, "default") && p.DisplayName == "Default" {
+				label = "Default"
+				note = "default profile"
+			} else {
+				if p.DisplayName != "" && p.DisplayName != p.Name {
+					note = p.DisplayName
+				}
+				if p.Source != "" {
+					if note != "" {
+						note += " · " + p.Source
+					} else {
+						note = p.Source
+					}
+				}
+			}
+			line := label
+			if note != "" {
+				line += "  " + note
+			}
+			line = truncate(line, innerW-2)
+			if i == m.convPickCursor {
+				b.WriteString(styleSelection.Width(innerW).Render("▌ " + line))
+			} else {
+				b.WriteString("  " + line)
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(styleMuted.Render(truncate("↑↓ move · enter open · esc cancel", innerW)))
+	return styleDialogBox.Render(b.String())
 }
 
 func formatCompactCount(n int) string {

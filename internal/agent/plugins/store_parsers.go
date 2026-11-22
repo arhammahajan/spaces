@@ -98,6 +98,7 @@ func NewAntigravityConversationStore(homeDir string) agent.ConversationStore {
 			agentID:         "antigravity",
 			appName:         "antigravity",
 			relDirs:         []string{".gemini/antigravity-cli/conversations", ".gemini/antigravity-cli/brain"},
+			sqliteRelPaths:  []string{".gemini/antigravity-cli/conversation_summaries.db"},
 			allowDBFallback: true,
 			fileFilter:      antigravityFileFilter,
 			parser:          NewAntigravityLogParser(),
@@ -192,12 +193,13 @@ func NewKiloConversationStore(homeDir string) agent.ConversationStore {
 	return &fileConversationStore{
 		homeDir: homeDir,
 		cfg: providerStoreConfig{
-			agentID:      "kilo",
-			appName:      "kilo",
-			relDirs:      []string{".local/share/kilo/storage/session", ".config/kilo/sessions"},
-			fileFilter:   jsonOrJSONLFilter,
-			parser:       NewKiloLogParser(),
-			sqliteLoader: loadKiloSQLite,
+			agentID:        "kilo",
+			appName:        "kilo",
+			relDirs:        []string{".local/share/kilo/storage/session", ".config/kilo/sessions"},
+			sqliteRelPaths: []string{".local/share/kilo/kilo.db"},
+			fileFilter:     jsonOrJSONLFilter,
+			parser:         NewKiloLogParser(),
+			sqliteLoader:   loadKiloSQLite,
 		},
 	}
 }
@@ -231,12 +233,13 @@ func NewMuseConversationStore(homeDir string) agent.ConversationStore {
 	return &fileConversationStore{
 		homeDir: homeDir,
 		cfg: providerStoreConfig{
-			agentID:      "muse",
-			appName:      "muse",
-			relDirs:      []string{".config/muse/sessions", ".local/share/muse/sessions"},
-			fileFilter:   jsonOrJSONLFilter,
-			parser:       NewMuseLogParser(),
-			sqliteLoader: loadMuseSQLite,
+			agentID:        "muse",
+			appName:        "muse",
+			relDirs:        []string{".config/muse/sessions", ".local/share/muse/sessions"},
+			sqliteRelPaths: []string{".local/share/muse/session-index.db"},
+			fileFilter:     jsonOrJSONLFilter,
+			parser:         NewMuseLogParser(),
+			sqliteLoader:   loadMuseSQLite,
 		},
 	}
 }
@@ -251,12 +254,13 @@ func NewOpenCodeConversationStore(homeDir string) agent.ConversationStore {
 	return &fileConversationStore{
 		homeDir: homeDir,
 		cfg: providerStoreConfig{
-			agentID:      "opencode",
-			appName:      "opencode",
-			relDirs:      []string{".local/share/opencode/storage/session", ".opencode/sessions"},
-			fileFilter:   jsonOrJSONLFilter,
-			parser:       NewOpenCodeLogParser(),
-			sqliteLoader: loadOpenCodeSQLite,
+			agentID:        "opencode",
+			appName:        "opencode",
+			relDirs:        []string{".local/share/opencode/storage/session", ".opencode/sessions"},
+			sqliteRelPaths: []string{".local/share/opencode/opencode.db"},
+			fileFilter:     jsonOrJSONLFilter,
+			parser:         NewOpenCodeLogParser(),
+			sqliteLoader:   loadOpenCodeSQLite,
 		},
 	}
 }
@@ -274,6 +278,7 @@ type providerStoreConfig struct {
 	agentID         string
 	appName         string
 	relDirs         []string
+	sqliteRelPaths  []string
 	allowDBFallback bool
 	fileFilter      func(name string) bool
 	parser          agent.LogParser
@@ -322,6 +327,23 @@ func (s *fileConversationStore) resolveHome(override string) (string, error) {
 		return s.homeDir, nil
 	}
 	return os.UserHomeDir()
+}
+
+// StorePaths returns the candidate filesystem paths under homeDir that this
+// store inspects (conversation directories and SQLite databases).
+func (s *fileConversationStore) StorePaths(homeDir string) []string {
+	home, err := s.resolveHome(homeDir)
+	if err != nil || strings.TrimSpace(home) == "" {
+		return nil
+	}
+	out := make([]string, 0, len(s.cfg.relDirs)+len(s.cfg.sqliteRelPaths))
+	for _, rel := range s.cfg.relDirs {
+		out = append(out, filepath.Join(home, filepath.FromSlash(rel)))
+	}
+	for _, rel := range s.cfg.sqliteRelPaths {
+		out = append(out, filepath.Join(home, filepath.FromSlash(rel)))
+	}
+	return out
 }
 
 func (s *fileConversationStore) List(ctx context.Context, opts agent.ConversationListOptions) ([]agent.ConversationRecord, error) {

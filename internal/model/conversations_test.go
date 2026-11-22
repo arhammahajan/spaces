@@ -6,7 +6,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -104,7 +106,7 @@ func TestFetchConversationsCachedRefreshArchivedAndProfiles(t *testing.T) {
 	}, "\n")+"\n")
 
 	// Harness profile root: Claude "work" profile session.
-	writeConvTestFile(t, filepath.Join(homeDir, ".model-router", "profiles", "claude", "work", "home", ".claude", "projects", "repo-b", "sess-claude-work.jsonl"), strings.Join([]string{
+	writeConvTestFile(t, filepath.Join(homeDir, ".harness", "profiles", "claude", "work", "home", ".claude", "projects", "repo-b", "sess-claude-work.jsonl"), strings.Join([]string{
 		`{"type":"summary","sessionId":"sess-claude-work","cwd":"/home/user/dev/repo-b","summary":"Work profile billing fix","timestamp":1700000010000}`,
 		`{"type":"user","sessionId":"sess-claude-work","cwd":"/home/user/dev/repo-b","timestamp":1700000012000,"message":{"role":"user","content":"fix invoice rounding"}}`,
 	}, "\n")+"\n")
@@ -335,18 +337,19 @@ func TestRecordConversationOpenAndOverlayMerge(t *testing.T) {
 		t.Fatalf("RecordConversationOpen error: %v", err)
 	}
 
-	// Verify persisted overlay file on disk.
-	raw, err := os.ReadFile(overlayPath)
+	// Verify persisted SQLite overlay DB on disk (mapped from legacy .json path to .db).
+	dbPath := strings.TrimSuffix(overlayPath, ".json") + ".db"
+	fi, err := os.Stat(dbPath)
 	if err != nil {
-		t.Fatalf("read overlay file %s: %v", overlayPath, err)
+		t.Fatalf("stat overlay db %s: %v", dbPath, err)
 	}
-	var decoded conversationOverlayFile
-	if err := json.Unmarshal(raw, &decoded); err != nil {
-		t.Fatalf("unmarshal overlay: %v", err)
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("overlay db permissions = %o, want 0600", perm)
 	}
-	ov, ok := decoded.Entries["claude:sess-42"]
+	loadedOverlay := loadConversationOverlay(overlayPath)
+	ov, ok := loadedOverlay["claude:sess-42"]
 	if !ok {
-		t.Fatalf("overlay missing claude:sess-42: %+v", decoded.Entries)
+		t.Fatalf("overlay missing claude:sess-42: %+v", loadedOverlay)
 	}
 	if ov.Space != "alpha" || ov.LastOpenedMs != 1700000999000 || ov.Profile != "work" {
 		t.Errorf("unexpected overlay entry: %+v", ov)
@@ -515,5 +518,338 @@ func TestConversationDiskCacheInstantReload(t *testing.T) {
 	}
 	if !snap4.OK || snap4.SyncedMs != snap3.SyncedMs || len(snap4.Conversations) != 0 {
 		t.Fatalf("expected updated empty disk cache (synced_ms=%d), got: %+v", snap3.SyncedMs, snap4)
+	}
+}
+
+func TestFetchConversationsSkipsProfileStoresSymlinkedToRealHome(t *testing.T) {
+	homeDir, _ := setupNativeConvStoreEnv(t)
+
+	// Shared Claude store in realHome.
+	realClaudeProjects := filepath.Join(homeDir, ".claude", "projects")
+	writeConvTestFile(t, filepath.Join(realClaudeProjects, "repo-a", "sess-shared-claude.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-shared-claude","cwd":"/repo/a","summary":"Shared claude chat","timestamp":1700000100000}`,
+		`{"type":"user","sessionId":"sess-shared-claude","cwd":"/repo/a","timestamp":1700000101000,"message":{"role":"user","content":"hello shared"}}`,
+	}, "\n")+"\n")
+
+	// Profile "alpha" symlinks .claude/projects -> realHome/.claude/projects.
+	alphaClaudeDir := filepath.Join(homeDir, ".harness", "profiles", "claude", "alpha", "home", ".claude")
+	if err := os.MkdirAll(alphaClaudeDir, 0o755); err != nil {
+		t.Fatalf("mkdir alpha: %v", err)
+	}
+	if err := os.Symlink(realClaudeProjects, filepath.Join(alphaClaudeDir, "projects")); err != nil {
+		t.Fatalf("symlink alpha projects: %v", err)
+	}
+
+	// Profile "beta" symlinks its entire home directory -> realHome.
+	betaProfileDir := filepath.Join(homeDir, ".harness", "profiles", "claude", "beta")
+	if err := os.MkdirAll(betaProfileDir, 0o755); err != nil {
+		t.Fatalf("mkdir beta: %v", err)
+	}
+	if err := os.Symlink(homeDir, filepath.Join(betaProfileDir, "home")); err != nil {
+		t.Fatalf("symlink beta home: %v", err)
+	}
+
+	// Profile "isolated" has its own real (non-symlinked) .claude/projects store.
+	writeConvTestFile(t, filepath.Join(homeDir, ".harness", "profiles", "claude", "isolated", "home", ".claude", "projects", "repo-b", "sess-isolated.jsonl"), strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-isolated","cwd":"/repo/b","summary":"Isolated profile chat","timestamp":1700000200000}`,
+		`{"type":"user","sessionId":"sess-isolated","cwd":"/repo/b","timestamp":1700000201000,"message":{"role":"user","content":"hello isolated"}}`,
+	}, "\n")+"\n")
+
+	// Hybrid Codex profile: sessions symlinks to realHome, archived_sessions is private.
+	realCodexSessions := filepath.Join(homeDir, ".codex", "sessions")
+	writeConvTestFile(t, filepath.Join(realCodexSessions, "2026", "rollout-sess-shared-codex.jsonl"), strings.Join([]string{
+		`{"type":"session_meta","timestamp":1700000300000,"payload":{"id":"sess-shared-codex","cwd":"/repo/c","title":"Shared codex chat"}}`,
+		`{"type":"response_item","timestamp":1700000301000,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"shared codex"}]}}`,
+	}, "\n")+"\n")
+
+	hybridCodexDir := filepath.Join(homeDir, ".harness", "profiles", "codex", "hybrid", "home", ".codex")
+	if err := os.MkdirAll(hybridCodexDir, 0o755); err != nil {
+		t.Fatalf("mkdir hybrid codex: %v", err)
+	}
+	if err := os.Symlink(realCodexSessions, filepath.Join(hybridCodexDir, "sessions")); err != nil {
+		t.Fatalf("symlink hybrid sessions: %v", err)
+	}
+	writeConvTestFile(t, filepath.Join(hybridCodexDir, "archived_sessions", "2026", "rollout-sess-private-codex.jsonl"), strings.Join([]string{
+		`{"type":"session_meta","timestamp":1700000400000,"payload":{"id":"sess-private-codex","cwd":"/repo/d","title":"Private hybrid archived"}}`,
+		`{"type":"response_item","timestamp":1700000401000,"payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"private archived"}]}}`,
+	}, "\n")+"\n")
+
+	snap, err := FetchConversations(context.Background(), true, true)
+	if err != nil {
+		t.Fatalf("FetchConversations error: %v", err)
+	}
+
+	byID := make(map[string]ConversationEntry, len(snap.Conversations))
+	for _, c := range snap.Conversations {
+		byID[c.ID] = c
+	}
+
+	if got, ok := byID["sess-shared-claude"]; !ok {
+		t.Fatalf("missing sess-shared-claude in %+v", snap.Conversations)
+	} else if got.Profile != "" {
+		t.Errorf("sess-shared-claude.Profile = %q, want empty (must not inherit symlinked profile alpha/beta)", got.Profile)
+	}
+
+	if got, ok := byID["sess-isolated"]; !ok {
+		t.Fatalf("missing sess-isolated in %+v", snap.Conversations)
+	} else if got.Profile != "isolated" {
+		t.Errorf("sess-isolated.Profile = %q, want isolated", got.Profile)
+	}
+
+	if got, ok := byID["sess-shared-codex"]; !ok {
+		t.Fatalf("missing sess-shared-codex in %+v", snap.Conversations)
+	} else if got.Profile != "" {
+		t.Errorf("sess-shared-codex.Profile = %q, want empty (shared symlinked dir in hybrid profile)", got.Profile)
+	}
+
+	if got, ok := byID["sess-private-codex"]; !ok {
+		t.Fatalf("missing sess-private-codex in %+v", snap.Conversations)
+	} else if got.Profile != "hybrid" {
+		t.Errorf("sess-private-codex.Profile = %q, want hybrid", got.Profile)
+	}
+
+	// Verify conversations-overlay.json can now supply a profile for shared chats
+	// instead of being blocked by a bogus symlinked profile tag.
+	if err := RecordConversationOpen(context.Background(), ConversationEntry{
+		Agent:   "claude",
+		ID:      "sess-shared-claude",
+		Profile: "work",
+	}, "dev", 1700000900000); err != nil {
+		t.Fatalf("RecordConversationOpen error: %v", err)
+	}
+
+	snap2, err := FetchConversations(context.Background(), true, true)
+	if err != nil {
+		t.Fatalf("FetchConversations after overlay error: %v", err)
+	}
+	for _, c := range snap2.Conversations {
+		if c.ID == "sess-shared-claude" {
+			if c.Profile != "work" {
+				t.Errorf("after overlay, sess-shared-claude.Profile = %q, want work", c.Profile)
+			}
+			return
+		}
+	}
+	t.Fatalf("missing sess-shared-claude after overlay refresh")
+}
+
+func TestRecordConversationLaunchAndSQLiteRoundTrip(t *testing.T) {
+	homeDir, _ := setupNativeConvStoreEnv(t)
+	dbOverlayPath := filepath.Join(t.TempDir(), "data", "conversations-overlay.db")
+	ConversationOverlayPathFn = func() string { return dbOverlayPath }
+
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "repo-launch", "sess-launch-1.jsonl"), strings.Join([]string{
+		`{"type":"user","sessionId":"sess-launch-1","cwd":"/repo/launch","timestamp":1700000100000,"message":{"role":"user","content":"start launch test"}}`,
+	}, "\n")+"\n")
+
+	// Prime cache before recording launch.
+	snap1, err := FetchConversations(context.Background(), false, false)
+	if err != nil || len(snap1.Conversations) != 1 {
+		t.Fatalf("initial fetch: err=%v convs=%+v", err, snap1.Conversations)
+	}
+	if len(snap1.Conversations[0].LaunchCmd) != 0 {
+		t.Fatalf("expected empty LaunchCmd initially, got %v", snap1.Conversations[0].LaunchCmd)
+	}
+
+	launchCmd := []string{"harness", "run", "--profile", "work", "claude", "--resume", "sess-launch-1"}
+	if err := RecordConversationLaunch(
+		context.Background(),
+		"claude-code",
+		"sess-launch-1",
+		"work",
+		"/repo/launch",
+		"Launch test title",
+		launchCmd,
+		"space-dev",
+		1700000888000,
+	); err != nil {
+		t.Fatalf("RecordConversationLaunch error: %v", err)
+	}
+
+	// Mutating caller slice must not affect persisted or cached LaunchCmd.
+	launchCmd[0] = "mutated"
+
+	fi, err := os.Stat(dbOverlayPath)
+	if err != nil {
+		t.Fatalf("expected sqlite db at %s: %v", dbOverlayPath, err)
+	}
+	if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Errorf("overlay db permissions = %o, want 0600", perm)
+	}
+
+	wantCmd := []string{"harness", "run", "--profile", "work", "claude", "--resume", "sess-launch-1"}
+
+	// Cached fetch sees LaunchCmd and metadata immediately.
+	cached, err := FetchConversations(context.Background(), false, false)
+	if err != nil || len(cached.Conversations) != 1 {
+		t.Fatalf("cached fetch after launch: err=%v convs=%+v", err, cached.Conversations)
+	}
+	gotCached := cached.Conversations[0]
+	if !reflect.DeepEqual(gotCached.LaunchCmd, wantCmd) {
+		t.Errorf("cached LaunchCmd = %v, want %v", gotCached.LaunchCmd, wantCmd)
+	}
+	if gotCached.Profile != "work" || gotCached.Space != "space-dev" || gotCached.LastOpenedMs != 1700000888000 {
+		t.Errorf("cached conv missing launch overlay fields: %+v", gotCached)
+	}
+
+	// Full rescan after cache reset reloads LaunchCmd from SQLite.
+	ResetConversationStoreCache()
+	reloaded, err := FetchConversations(context.Background(), true, false)
+	if err != nil || len(reloaded.Conversations) != 1 {
+		t.Fatalf("reloaded fetch: err=%v convs=%+v", err, reloaded.Conversations)
+	}
+	gotReloaded := reloaded.Conversations[0]
+	if !reflect.DeepEqual(gotReloaded.LaunchCmd, wantCmd) {
+		t.Errorf("reloaded LaunchCmd = %v, want %v", gotReloaded.LaunchCmd, wantCmd)
+	}
+	if gotReloaded.Profile != "work" || gotReloaded.Space != "space-dev" || gotReloaded.LastOpenedMs != 1700000888000 {
+		t.Errorf("reloaded conv missing launch overlay fields: %+v", gotReloaded)
+	}
+}
+
+func TestConversationOverlayLegacyJSONMigration(t *testing.T) {
+	homeDir, _ := setupNativeConvStoreEnv(t)
+	dataDir := filepath.Join(t.TempDir(), "data")
+	legacyJSONPath := filepath.Join(dataDir, "conversations-overlay.json")
+	dbPath := filepath.Join(dataDir, "conversations-overlay.db")
+	ConversationOverlayPathFn = func() string { return dbPath }
+
+	legacy := conversationOverlayFile{
+		Version: 1,
+		Entries: map[string]conversationOverlayEntry{
+			"claude:sess-migrated": {
+				Agent:        "claude-code",
+				SessionID:    "sess-migrated",
+				Space:        "legacy-space",
+				LastOpenedMs: 1700000777000,
+				LastOutcome:  "ok",
+				Profile:      "personal",
+				CWD:          "/repo/legacy",
+				Title:        "Migrated session",
+				LaunchCmd:    []string{"claude", "--resume", "sess-migrated"},
+			},
+		},
+	}
+	raw, err := json.MarshalIndent(legacy, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal legacy json: %v", err)
+	}
+	writeConvTestFile(t, legacyJSONPath, string(raw))
+
+	writeConvTestFile(t, filepath.Join(homeDir, ".claude", "projects", "repo-legacy", "sess-migrated.jsonl"), strings.Join([]string{
+		`{"type":"user","sessionId":"sess-migrated","cwd":"/repo/legacy","timestamp":1700000100000,"message":{"role":"user","content":"migrated"}}`,
+	}, "\n")+"\n")
+
+	snap, err := FetchConversations(context.Background(), true, false)
+	if err != nil || len(snap.Conversations) != 1 {
+		t.Fatalf("fetch after migration: err=%v convs=%+v", err, snap.Conversations)
+	}
+	got := snap.Conversations[0]
+	if got.Space != "legacy-space" || got.LastOpenedMs != 1700000777000 || got.LastOutcome != "ok" || got.Profile != "personal" {
+		t.Errorf("migrated fields mismatch: %+v", got)
+	}
+	wantCmd := []string{"claude", "--resume", "sess-migrated"}
+	if !reflect.DeepEqual(got.LaunchCmd, wantCmd) {
+		t.Errorf("migrated LaunchCmd = %v, want %v", got.LaunchCmd, wantCmd)
+	}
+
+	if _, err := os.Stat(dbPath); err != nil {
+		t.Fatalf("expected migrated sqlite db at %s: %v", dbPath, err)
+	}
+
+	// Verify migration is one-time: adding another entry to the legacy JSON after
+	// SQLite is populated must not re-import it.
+	legacy.Entries["claude:sess-after"] = conversationOverlayEntry{
+		Agent:     "claude",
+		SessionID: "sess-after",
+		Space:     "should-not-import",
+	}
+	raw2, _ := json.Marshal(legacy)
+	writeConvTestFile(t, legacyJSONPath, string(raw2))
+
+	overlay := loadConversationOverlay(dbPath)
+	if _, exists := overlay["claude:sess-after"]; exists {
+		t.Errorf("legacy JSON was re-imported after SQLite was already populated: %+v", overlay)
+	}
+}
+
+func TestConversationOverlayConcurrentUpsertsPreserveFields(t *testing.T) {
+	_, _ = setupNativeConvStoreEnv(t)
+	dbPath := filepath.Join(t.TempDir(), "data", "conversations-overlay.db")
+
+	const workers = 16
+	var wg sync.WaitGroup
+	errCh := make(chan error, workers*2)
+
+	wantCmd := []string{"harness", "run", "--profile", "work", "claude", "--resume", "sess-concurrent"}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(2)
+		go func(iter int) {
+			defer wg.Done()
+			err := upsertConversationOverlaySQLite(dbPath, conversationOverlayEntry{
+				Agent:       "claude",
+				SessionID:   "sess-concurrent",
+				Profile:     "work",
+				CWD:         "/repo/concurrent",
+				Title:       "Concurrent chat",
+				LaunchCmd:   wantCmd,
+				UpdatedAtMs: int64(1700001000000 + iter),
+			})
+			if err != nil {
+				errCh <- err
+			}
+		}(i)
+		go func(iter int) {
+			defer wg.Done()
+			err := upsertConversationOverlaySQLite(dbPath, conversationOverlayEntry{
+				Agent:        "claude",
+				SessionID:    "sess-concurrent",
+				Space:        "space-alpha",
+				LastOpenedMs: int64(1700002000000 + iter),
+				LastOutcome:  "opened",
+				UpdatedAtMs:  int64(1700002000000 + iter),
+			})
+			if err != nil {
+				errCh <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		t.Fatalf("concurrent upsert error: %v", err)
+	}
+
+	overlay := loadConversationOverlay(dbPath)
+	ov, ok := overlay["claude:sess-concurrent"]
+	if !ok {
+		t.Fatalf("missing claude:sess-concurrent in %+v", overlay)
+	}
+	if ov.Profile != "work" {
+		t.Errorf("Profile = %q, want work", ov.Profile)
+	}
+	if !reflect.DeepEqual(ov.LaunchCmd, wantCmd) {
+		t.Errorf("LaunchCmd = %v, want %v", ov.LaunchCmd, wantCmd)
+	}
+	if ov.CWD != "/repo/concurrent" {
+		t.Errorf("CWD = %q, want /repo/concurrent", ov.CWD)
+	}
+	if ov.Title != "Concurrent chat" {
+		t.Errorf("Title = %q, want Concurrent chat", ov.Title)
+	}
+	if ov.Space != "space-alpha" {
+		t.Errorf("Space = %q, want space-alpha", ov.Space)
+	}
+	if ov.LastOutcome != "opened" {
+		t.Errorf("LastOutcome = %q, want opened", ov.LastOutcome)
+	}
+	wantMaxOpened := int64(1700002000000 + workers - 1)
+	if ov.LastOpenedMs != wantMaxOpened {
+		t.Errorf("LastOpenedMs = %d, want %d", ov.LastOpenedMs, wantMaxOpened)
+	}
+	if ov.UpdatedAtMs != wantMaxOpened {
+		t.Errorf("UpdatedAtMs = %d, want %d", ov.UpdatedAtMs, wantMaxOpened)
 	}
 }

@@ -122,6 +122,7 @@ func EnrichOutcomeMap(entry map[string]any) {
 	// outcomes recorded via OSC 7501 or __shim still capture @spaces_profile,
 	// @spaces_resume_session, @spaces_title, @spaces_prior_outcome, session, and pane CWD.
 	priorOutcome := ""
+	var launchCmd []string
 	if paneStr != "" && TmuxFunc != nil {
 		paneRef := paneStr
 		if !strings.HasPrefix(paneRef, "%") {
@@ -129,7 +130,7 @@ func EnrichOutcomeMap(entry map[string]any) {
 		}
 		if stdout, code, err := TmuxFunc([]string{
 			"display-message", "-p", "-t", paneRef,
-			"#{session_name}\x1f#{pane_current_path}\x1f#{@spaces_profile}\x1f#{@spaces_resume_session}\x1f#{@spaces_title}\x1f#{@spaces_prior_outcome}",
+			"#{session_name}\x1f#{pane_current_path}\x1f#{@spaces_profile}\x1f#{@spaces_resume_session}\x1f#{@spaces_title}\x1f#{@spaces_prior_outcome}\x1f#{@spaces_launch_cmd}",
 		}, 2*time.Second); err == nil && code == 0 {
 			parts := strings.Split(strings.TrimSuffix(stdout, "\n"), "\x1f")
 			getPart := func(i int) string {
@@ -172,6 +173,7 @@ func EnrichOutcomeMap(entry map[string]any) {
 				}
 			}
 			priorOutcome = getPart(5)
+			launchCmd = parseLaunchCmdJSON(getPart(6))
 		}
 	}
 	if session == "" {
@@ -208,6 +210,12 @@ func EnrichOutcomeMap(entry map[string]any) {
 			entry["profile"] = profile
 		}
 	}
+	if strings.TrimSpace(profile) == "" && len(launchCmd) > 0 {
+		if extracted := extractProfileFromLaunchCmd(launchCmd); extracted != "" {
+			profile = extracted
+			entry["profile"] = profile
+		}
+	}
 	if strings.TrimSpace(cwd) == "" {
 		cwd = CurrentDirectory()
 		entry["cwd"] = cwd
@@ -220,8 +228,14 @@ func EnrichOutcomeMap(entry map[string]any) {
 	}
 	if strings.TrimSpace(title) == "" && agentName != "" && (sid != "" || cwd != "") {
 		if t := discoverTitle(agentName, cwd, sid); t != "" {
+			title = t
 			entry["title"] = t
 		}
+	}
+	if (len(launchCmd) > 0 || strings.TrimSpace(profile) != "") && agentName != "" && strings.TrimSpace(sid) != "" && RecordConversationLaunchFunc != nil {
+		ctx, cancel := contextWithTimeout(2 * time.Second)
+		defer cancel()
+		_ = RecordConversationLaunchFunc(ctx, agentName, strings.TrimSpace(sid), strings.TrimSpace(profile), strings.TrimSpace(cwd), strings.TrimSpace(title), launchCmd, strings.TrimSpace(session), tmuxNowMs())
 	}
 
 	outcomeStr, _ := entry["outcome"].(string)

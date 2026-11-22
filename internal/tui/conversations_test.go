@@ -199,6 +199,7 @@ func TestConversationsHybridFuzzyAndDebouncedFTS5MergeAndStaleDiscard(t *testing
 		Now:         func() time.Time { return now },
 	})
 	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = update(m, harnessesMsg{})
 	m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
 
 	// Type "rate limit": bumped seq, local fuzzy runs immediately (0 matches), debounce tick fires FTS5.
@@ -292,6 +293,7 @@ func TestConversationsLivePaneDetectionEnterVsCtrlO(t *testing.T) {
 	})
 	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 28})
 	m = update(m, spacesMsg{spaces: fb.spaces})
+	m = update(m, harnessesMsg{})
 	m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
 
 	items := m.conversationItems()
@@ -341,6 +343,7 @@ func TestConversationsFiltersKeybindingsAndTwoStageEsc(t *testing.T) {
 	})
 	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 28})
 	m = update(m, spacesMsg{spaces: fb.spaces})
+	m = update(m, harnessesMsg{})
 	m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
 
 	// Archived and /tmp hidden by default => 3 visible chats.
@@ -424,6 +427,7 @@ func TestConversationsMouseClickOpensRow(t *testing.T) {
 		Now:         func() time.Time { return now },
 	})
 	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 28})
+	m = update(m, harnessesMsg{})
 	m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
 
 	layout := m.convLayout(120, 28)
@@ -466,6 +470,7 @@ func TestConversationsPrimaryTitleFolderAndHiddenProfile(t *testing.T) {
 		Now:         func() time.Time { return now },
 	})
 	m = update(m, tea.WindowSizeMsg{Width: 120, Height: 24})
+	m = update(m, harnessesMsg{})
 	m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
 
 	plain := ansi.Strip(m.View())
@@ -501,4 +506,445 @@ func TestConversationsPrimaryTitleFolderAndHiddenProfile(t *testing.T) {
 	if len(fb.openedConvs) != 1 || fb.openedConvs[0].conv.Profile != "secret-profile" {
 		t.Fatalf("OpenConversation must retain conv.Profile for resume, got %+v", fb.openedConvs)
 	}
+}
+
+func TestConversationsProfilePickerSelectAndOpen(t *testing.T) {
+	now := time.UnixMilli(1700000100000)
+	conv := model.ConversationEntry{
+		Agent:       "codex",
+		ID:          "sess-codex-pick",
+		App:         "codex",
+		Title:       "Add SQLite FTS5 indexing",
+		CWD:         "/home/u/dev/model-router",
+		UpdatedAtMs: now.UnixMilli() - 60_000,
+	}
+	harnesses := []model.HarnessEntry{
+		{
+			Name:        "codex",
+			BinaryState: "ok",
+			Profiles: []model.HarnessProfile{
+				{Name: "router", DisplayName: "Codex Router", Source: "store"},
+				{Name: "local", DisplayName: "Local", Source: "user"},
+			},
+		},
+	}
+	fb := &fakeConversationsBackend{
+		fakeBackend: fakeBackend{harness: harnesses},
+		cachedSnap:  model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+	}
+	m := New(fb, Options{
+		InitialMode: ModeConversations,
+		HomeDir:     "/home/u",
+		Now:         func() time.Time { return now },
+	})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = update(m, harnessesMsg{entries: harnesses})
+	m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+	// Enter opens the profile picker instead of immediately calling OpenConversation.
+	m = update(m, keyType(tea.KeyEnter))
+	if m.Quitting() {
+		t.Fatal("Enter on unprofiled chat with multiple profiles should open picker, not quit")
+	}
+	if m.convPickPending == nil {
+		t.Fatal("expected convPickPending to be set")
+	}
+	if len(fb.openedConvs) != 0 {
+		t.Fatalf("OpenConversation should not have been called yet, got %+v", fb.openedConvs)
+	}
+	if len(m.convPickProfiles) != 3 { // Default + router + local
+		t.Fatalf("convPickProfiles len = %d, want 3: %+v", len(m.convPickProfiles), m.convPickProfiles)
+	}
+	if m.convPickCursor != 0 {
+		t.Fatalf("convPickCursor = %d, want 0 when conv.Profile is empty", m.convPickCursor)
+	}
+
+	// Render shows title, agent, profiles, and footer hint.
+	plain := ansi.Strip(m.View())
+	for _, want := range []string{"Choose profile", "codex", "Add SQLite FTS5 indexing", "Default", "router", "local", "enter open · esc cancel"} {
+		if !strings.Contains(plain, want) {
+			t.Errorf("picker view missing %q:\n%s", want, plain)
+		}
+	}
+
+	// Navigate down twice (to "local"), then up once (to "router"), then press Enter.
+	m = update(m, keyType(tea.KeyDown))
+	m = update(m, keyRunes("j"))
+	if m.convPickCursor != 2 {
+		t.Fatalf("cursor = %d, want 2", m.convPickCursor)
+	}
+	m = update(m, keyRunes("k"))
+	if m.convPickCursor != 1 {
+		t.Fatalf("cursor = %d, want 1", m.convPickCursor)
+	}
+
+	m = update(m, keyType(tea.KeyEnter))
+	if !m.Quitting() {
+		t.Fatal("Enter in profile picker should open conversation and quit")
+	}
+	if m.convPickPending != nil {
+		t.Fatal("convPickPending should be cleared after opening")
+	}
+	if len(fb.openedConvs) != 1 || fb.openedConvs[0].conv.ID != "sess-codex-pick" || fb.openedConvs[0].conv.Profile != "router" {
+		t.Fatalf("openedConvs = %+v, want sess-codex-pick with profile router", fb.openedConvs)
+	}
+}
+
+func TestConversationsProfilePickerCancelWithEscAndQ(t *testing.T) {
+	now := time.UnixMilli(1700000100000)
+	conv := model.ConversationEntry{
+		Agent:       "codex",
+		ID:          "sess-codex-cancel",
+		App:         "codex",
+		Title:       "Cancelable chat",
+		CWD:         "/home/u/dev/model-router",
+		UpdatedAtMs: now.UnixMilli() - 60_000,
+	}
+	harnesses := []model.HarnessEntry{
+		{
+			Name:     "codex",
+			Profiles: []model.HarnessProfile{{Name: "work"}, {Name: "personal"}},
+		},
+	}
+	fb := &fakeConversationsBackend{
+		fakeBackend: fakeBackend{harness: harnesses},
+		cachedSnap:  model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+	}
+	m := New(fb, Options{
+		InitialMode: ModeConversations,
+		HomeDir:     "/home/u",
+		Now:         func() time.Time { return now },
+	})
+	m = update(m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m = update(m, harnessesMsg{entries: harnesses})
+	m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+	// Open picker then press Esc.
+	m = update(m, keyType(tea.KeyEnter))
+	if m.convPickPending == nil {
+		t.Fatal("expected picker to open")
+	}
+	m = update(m, keyType(tea.KeyEsc))
+	if m.convPickPending != nil || m.Quitting() || len(fb.openedConvs) != 0 {
+		t.Fatalf("Esc should cancel picker and stay in ModeConversations: pending=%v quitting=%v opened=%+v", m.convPickPending != nil, m.Quitting(), fb.openedConvs)
+	}
+
+	// Open picker again then press q.
+	m = update(m, keyType(tea.KeyEnter))
+	if m.convPickPending == nil {
+		t.Fatal("expected picker to reopen")
+	}
+	m = update(m, keyRunes("q"))
+	if m.convPickPending != nil || m.Quitting() || len(fb.openedConvs) != 0 {
+		t.Fatalf("q should cancel picker and stay in ModeConversations: pending=%v quitting=%v opened=%+v", m.convPickPending != nil, m.Quitting(), fb.openedConvs)
+	}
+}
+
+func TestConversationsProfilePickerShownWhenProfileOrLaunchCmdSet(t *testing.T) {
+	now := time.UnixMilli(1700000100000)
+	harnesses := []model.HarnessEntry{
+		{
+			Name:     "codex",
+			Profiles: []model.HarnessProfile{{Name: "work"}, {Name: "personal"}},
+		},
+	}
+
+	t.Run("stored profile pre-selects profile and confirms it with cleared launch_cmd", func(t *testing.T) {
+		conv := model.ConversationEntry{
+			Agent:       "codex",
+			ID:          "sess-has-profile",
+			App:         "codex",
+			Profile:     "work",
+			LaunchCmd:   []string{"harness", "codex", "-p", "work", "resume", "sess-has-profile"},
+			Title:       "Has stored profile",
+			UpdatedAtMs: now.UnixMilli() - 60_000,
+		}
+		fb := &fakeConversationsBackend{
+			fakeBackend: fakeBackend{harness: harnesses},
+			cachedSnap:  model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+		}
+		m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+		m = update(m, harnessesMsg{entries: harnesses})
+		m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+		// First Enter opens the picker with "work" (index 1) pre-selected.
+		m = update(m, keyType(tea.KeyEnter))
+		if m.Quitting() || m.convPickPending == nil || len(fb.openedConvs) != 0 {
+			t.Fatalf("expected profile picker even when profile is set: quitting=%v pending=%v opened=%+v", m.Quitting(), m.convPickPending != nil, fb.openedConvs)
+		}
+		if m.convPickCursor != 1 || m.convPickProfiles[m.convPickCursor].Name != "work" {
+			t.Fatalf("cursor = %d (%+v), want index 1 (work)", m.convPickCursor, m.convPickProfiles)
+		}
+
+		// Second Enter immediately confirms "work" and clears LaunchCmd.
+		m = update(m, keyType(tea.KeyEnter))
+		if !m.Quitting() || len(fb.openedConvs) != 1 {
+			t.Fatalf("expected open after confirming picker: quitting=%v opened=%+v", m.Quitting(), fb.openedConvs)
+		}
+		if fb.openedConvs[0].conv.Profile != "work" {
+			t.Fatalf("opened Profile = %q, want work", fb.openedConvs[0].conv.Profile)
+		}
+		if fb.openedConvs[0].conv.LaunchCmd != nil {
+			t.Fatalf("expected LaunchCmd to be cleared on picker confirm, got %v", fb.openedConvs[0].conv.LaunchCmd)
+		}
+	})
+
+	t.Run("stored profile case-insensitive pre-select and switch to another profile clears launch_cmd", func(t *testing.T) {
+		conv := model.ConversationEntry{
+			Agent:       "codex",
+			ID:          "sess-switch-profile",
+			App:         "codex",
+			Profile:     "WORK",
+			LaunchCmd:   []string{"harness", "codex", "-p", "work", "resume", "sess-switch-profile"},
+			Title:       "Switch profile chat",
+			UpdatedAtMs: now.UnixMilli() - 60_000,
+		}
+		fb := &fakeConversationsBackend{
+			fakeBackend: fakeBackend{harness: harnesses},
+			cachedSnap:  model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+		}
+		m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+		m = update(m, harnessesMsg{entries: harnesses})
+		m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+		m = update(m, keyType(tea.KeyEnter))
+		if m.convPickPending == nil || m.convPickCursor != 1 {
+			t.Fatalf("expected picker pre-selected to work (1), pending=%v cursor=%d", m.convPickPending != nil, m.convPickCursor)
+		}
+
+		// Move down to "personal" (index 2) and confirm.
+		m = update(m, keyType(tea.KeyDown))
+		if m.convPickCursor != 2 {
+			t.Fatalf("cursor = %d, want 2 (personal)", m.convPickCursor)
+		}
+		m = update(m, keyType(tea.KeyEnter))
+		if !m.Quitting() || len(fb.openedConvs) != 1 {
+			t.Fatalf("expected open after switching profile: quitting=%v opened=%+v", m.Quitting(), fb.openedConvs)
+		}
+		if fb.openedConvs[0].conv.Profile != "personal" {
+			t.Fatalf("opened Profile = %q, want personal", fb.openedConvs[0].conv.Profile)
+		}
+		if fb.openedConvs[0].conv.LaunchCmd != nil {
+			t.Fatalf("expected LaunchCmd to be cleared when switching profile, got %v", fb.openedConvs[0].conv.LaunchCmd)
+		}
+	})
+
+	t.Run("stored launch_cmd without profile still shows picker at cursor 0", func(t *testing.T) {
+		conv := model.ConversationEntry{
+			Agent:       "codex",
+			ID:          "sess-has-launch-cmd",
+			App:         "codex",
+			Title:       "Has stored launch_cmd",
+			LaunchCmd:   []string{"codex", "resume", "sess-has-launch-cmd"},
+			UpdatedAtMs: now.UnixMilli() - 60_000,
+		}
+		fb := &fakeConversationsBackend{
+			fakeBackend: fakeBackend{harness: harnesses},
+			cachedSnap:  model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+		}
+		m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+		m = update(m, harnessesMsg{entries: harnesses})
+		m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+		m = update(m, keyType(tea.KeyEnter))
+		if m.Quitting() || m.convPickPending == nil || len(fb.openedConvs) != 0 {
+			t.Fatalf("expected profile picker even when launch_cmd is set: quitting=%v pending=%v opened=%+v", m.Quitting(), m.convPickPending != nil, fb.openedConvs)
+		}
+		if m.convPickCursor != 0 {
+			t.Fatalf("cursor = %d, want 0 when Profile is empty", m.convPickCursor)
+		}
+
+		m = update(m, keyType(tea.KeyEnter))
+		if !m.Quitting() || len(fb.openedConvs) != 1 || fb.openedConvs[0].conv.Profile != "default" || fb.openedConvs[0].conv.LaunchCmd != nil {
+			t.Fatalf("expected open with default profile and nil LaunchCmd, got quitting=%v opened=%+v", m.Quitting(), fb.openedConvs)
+		}
+	})
+
+	t.Run("unknown stored profile falls back to cursor 0", func(t *testing.T) {
+		conv := model.ConversationEntry{
+			Agent:       "codex",
+			ID:          "sess-unknown-profile",
+			App:         "codex",
+			Profile:     "deleted-profile",
+			Title:       "Unknown stored profile",
+			UpdatedAtMs: now.UnixMilli() - 60_000,
+		}
+		fb := &fakeConversationsBackend{
+			fakeBackend: fakeBackend{harness: harnesses},
+			cachedSnap:  model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+		}
+		m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+		m = update(m, harnessesMsg{entries: harnesses})
+		m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+		m = update(m, keyType(tea.KeyEnter))
+		if m.convPickPending == nil || m.convPickCursor != 0 {
+			t.Fatalf("expected fallback to cursor 0 for unknown profile: pending=%v cursor=%d", m.convPickPending != nil, m.convPickCursor)
+		}
+	})
+}
+
+func TestConversationsProfilePickerSkippedWhenNoOrSingleProfile(t *testing.T) {
+	now := time.UnixMilli(1700000100000)
+
+	t.Run("no profiles for agent", func(t *testing.T) {
+		conv := model.ConversationEntry{
+			Agent:       "pi",
+			ID:          "sess-pi-1",
+			App:         "pi",
+			Title:       "Standalone pi chat",
+			UpdatedAtMs: now.UnixMilli() - 60_000,
+		}
+		harnesses := []model.HarnessEntry{
+			{Name: "pi", BinaryState: "ok", Profiles: nil},
+		}
+		fb := &fakeConversationsBackend{
+			fakeBackend: fakeBackend{harness: harnesses},
+			cachedSnap:  model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+		}
+		m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+		m = update(m, harnessesMsg{entries: harnesses})
+		m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+		m = update(m, keyType(tea.KeyEnter))
+		if !m.Quitting() || m.convPickPending != nil || len(fb.openedConvs) != 1 {
+			t.Fatalf("expected immediate open with no profiles: quitting=%v pending=%v opened=%+v", m.Quitting(), m.convPickPending != nil, fb.openedConvs)
+		}
+	})
+
+	t.Run("single profile-only agent", func(t *testing.T) {
+		conv := model.ConversationEntry{
+			Agent:       "codex",
+			ID:          "sess-single-1",
+			App:         "codex",
+			Title:       "Single profile chat",
+			UpdatedAtMs: now.UnixMilli() - 60_000,
+		}
+		harnesses := []model.HarnessEntry{
+			{Name: "codex", BinaryState: "missing", Profiles: []model.HarnessProfile{{Name: "only"}}},
+		}
+		fb := &fakeConversationsBackend{
+			fakeBackend: fakeBackend{harness: harnesses},
+			cachedSnap:  model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+		}
+		m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+		m = update(m, harnessesMsg{entries: harnesses})
+		m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+		m = update(m, keyType(tea.KeyEnter))
+		if !m.Quitting() || m.convPickPending != nil || len(fb.openedConvs) != 1 {
+			t.Fatalf("expected immediate open with single profile: quitting=%v pending=%v opened=%+v", m.Quitting(), m.convPickPending != nil, fb.openedConvs)
+		}
+	})
+}
+
+func TestConversationsProfilePickerLivePaneFocusesDirectly(t *testing.T) {
+	now := time.UnixMilli(1700000100000)
+	conv := model.ConversationEntry{
+		Agent:       "codex",
+		ID:          "sess-live-unprofiled",
+		App:         "codex",
+		Title:       "Live codex session",
+		CWD:         "/home/u/dev/model-router",
+		UpdatedAtMs: now.UnixMilli() - 60_000,
+	}
+	harnesses := []model.HarnessEntry{
+		{Name: "codex", Profiles: []model.HarnessProfile{{Name: "work"}, {Name: "personal"}}},
+	}
+	fb := &fakeConversationsBackend{
+		fakeBackend: fakeBackend{
+			harness: harnesses,
+			spaces: []model.Space{
+				{
+					Name:      "work",
+					IsCurrent: true,
+					Panes: []model.Pane{
+						{
+							ID:            "%9",
+							NumericID:     9,
+							WindowID:      "@2",
+							App:           "codex",
+							Status:        model.StatusWorking,
+							ResumeSession: "sess-live-unprofiled",
+						},
+					},
+				},
+			},
+		},
+		cachedSnap: model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+	}
+	m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+	m = update(m, spacesMsg{spaces: fb.spaces})
+	m = update(m, harnessesMsg{entries: harnesses})
+	m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+	// Enter focuses live pane directly without showing the profile picker.
+	m1 := update(m, keyType(tea.KeyEnter))
+	if !m1.Quitting() || m1.convPickPending != nil || len(fb.focused) != 1 || fb.focused[0] != "work/@2/%9" {
+		t.Fatalf("Enter on live pane should focus directly: quitting=%v pending=%v focused=%v", m1.Quitting(), m1.convPickPending != nil, fb.focused)
+	}
+
+	// Ctrl-o forces new tab and opens the profile picker because conv has no profile.
+	m2 := update(m, keyType(tea.KeyCtrlO))
+	if m2.Quitting() || m2.convPickPending == nil || !m2.convPickForceNewTab {
+		t.Fatalf("Ctrl-o on unprofiled live conv should open picker with forceNewTab: quitting=%v pending=%v forceNewTab=%v", m2.Quitting(), m2.convPickPending != nil, m2.convPickForceNewTab)
+	}
+}
+
+func TestConversationsProfilePickerWaitsForHarnesses(t *testing.T) {
+	now := time.UnixMilli(1700000100000)
+	conv := model.ConversationEntry{
+		Agent:       "codex",
+		ID:          "sess-race",
+		App:         "codex",
+		Title:       "Fast Enter before harnesses load",
+		UpdatedAtMs: now.UnixMilli() - 60_000,
+	}
+
+	t.Run("opens picker once harnesses arrive with multiple profiles and pre-selects stored profile", func(t *testing.T) {
+		convWithProfile := conv
+		convWithProfile.Profile = "work"
+		harnesses := []model.HarnessEntry{
+			{Name: "codex", Profiles: []model.HarnessProfile{{Name: "work"}}},
+		}
+		fb := &fakeConversationsBackend{
+			cachedSnap: model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{convWithProfile}},
+		}
+		m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+		m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+		// User hits Enter before harnessesMsg arrives.
+		m = update(m, keyType(tea.KeyEnter))
+		if !m.convPickWaitingHarnesses || m.Quitting() {
+			t.Fatalf("expected waiting for harnesses: waiting=%v quitting=%v", m.convPickWaitingHarnesses, m.Quitting())
+		}
+
+		// Harnesses arrive -> picker opens with Default + work, pre-selecting work (index 1).
+		m = update(m, harnessesMsg{entries: harnesses})
+		if m.convPickWaitingHarnesses || m.convPickPending == nil || len(m.convPickProfiles) != 2 {
+			t.Fatalf("expected picker populated after harnessesMsg: waiting=%v pending=%v profiles=%+v", m.convPickWaitingHarnesses, m.convPickPending != nil, m.convPickProfiles)
+		}
+		if m.convPickCursor != 1 {
+			t.Fatalf("convPickCursor = %d, want 1 (work)", m.convPickCursor)
+		}
+	})
+
+	t.Run("opens directly once harnesses arrive empty or error", func(t *testing.T) {
+		fb := &fakeConversationsBackend{
+			cachedSnap: model.ConversationSnapshot{OK: true, Conversations: []model.ConversationEntry{conv}},
+		}
+		m := New(fb, Options{InitialMode: ModeConversations, HomeDir: "/home/u", Now: func() time.Time { return now }})
+		m = update(m, conversationsMsg{snap: fb.cachedSnap, refresh: true})
+
+		m = update(m, keyType(tea.KeyEnter))
+		if !m.convPickWaitingHarnesses {
+			t.Fatal("expected waiting for harnesses")
+		}
+
+		// Harnesses load fails (e.g. harness not installed) -> opens immediately with no toast.
+		m = update(m, harnessesMsg{err: "harnesses.json not found"})
+		if !m.Quitting() || m.toast != "" || len(fb.openedConvs) != 1 || fb.openedConvs[0].conv.ID != "sess-race" {
+			t.Fatalf("expected immediate open without toast: quitting=%v toast=%q opened=%+v", m.Quitting(), m.toast, fb.openedConvs)
+		}
+	})
 }

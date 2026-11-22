@@ -424,19 +424,22 @@ type tuiBackend struct {
 	store      *resurrect.Store
 	git        *gitinfo.Collector
 	wt         *worktree.Manager
-	now        func() time.Time
-	dirExists  func(string) bool
-	lookPath   func(string) (string, error)
-	selfPath   string
+	now              func() time.Time
+	dirExists        func(string) bool
+	lookPath         func(string) (string, error)
+	recordConvOpen   func(ctx context.Context, conv model.ConversationEntry, space string, nowMs int64) error
+	recordConvLaunch func(ctx context.Context, agent, sessionID, profile, cwd, title string, launchCmd []string, space string, nowMs int64) error
+	selfPath         string
 
-	mu                 sync.Mutex
-	lastScreenAt       time.Time
-	cachedScreens      map[string]model.ScreenReading
-	lastTitlesAt       time.Time
-	cachedTitles       map[string]string
-	cachedTitleQueries map[string]model.TitleQuery
-	lastOutcomes       []model.OutcomeEntry
-	hasOutcomes        bool
+	mu                   sync.Mutex
+	lastScreenAt         time.Time
+	cachedScreens        map[string]model.ScreenReading
+	lastTitlesAt         time.Time
+	cachedTitles         map[string]string
+	cachedTitleQueries   map[string]model.TitleQuery
+	recordedLiveProfiles map[string]string
+	lastOutcomes         []model.OutcomeEntry
+	hasOutcomes          bool
 }
 
 func isExistingDir(path string) bool {
@@ -462,9 +465,10 @@ func newTUIBackend(client *tmux.Client) *tuiBackend {
 		dirExists:          isExistingDir,
 		lookPath:           exec.LookPath,
 		selfPath:           self,
-		cachedScreens:      make(map[string]model.ScreenReading),
-		cachedTitles:       make(map[string]string),
-		cachedTitleQueries: make(map[string]model.TitleQuery),
+		cachedScreens:        make(map[string]model.ScreenReading),
+		cachedTitles:         make(map[string]string),
+		cachedTitleQueries:   make(map[string]model.TitleQuery),
+		recordedLiveProfiles: make(map[string]string),
 	}
 }
 
@@ -585,6 +589,7 @@ var returnedShellStaleOptions = []string{
 	"@spaces_resume_session",
 	"@spaces_resume_agent",
 	"@spaces_prior_outcome",
+	"@spaces_launch_cmd",
 }
 
 // syncScreenStateToTmux persists screen-detected working and working->done
@@ -724,6 +729,27 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 				if liveSID := discoverLiveSessionID(plugin, p.PID); liveSID != "" {
 					sid = liveSID
 					p.ResumeSession = liveSID
+				}
+			}
+			if sid != "" {
+				if prof := strings.TrimSpace(p.Profile); prof != "" {
+					key := sid + "\x1f" + prof
+					b.mu.Lock()
+					if b.recordedLiveProfiles == nil {
+						b.recordedLiveProfiles = make(map[string]string)
+					}
+					alreadyRecorded := b.recordedLiveProfiles[p.ID] == key
+					if !alreadyRecorded {
+						b.recordedLiveProfiles[p.ID] = key
+					}
+					b.mu.Unlock()
+					if !alreadyRecorded {
+						recordLaunch := b.recordConvLaunch
+						if recordLaunch == nil {
+							recordLaunch = model.RecordConversationLaunch
+						}
+						_ = recordLaunch(ctx, p.App, sid, prof, p.CWD, p.ConversationTitle, nil, spaces[si].Name, now.UnixMilli())
+					}
 				}
 			}
 			if strings.TrimSpace(p.ConversationTitle) != "" {
@@ -1103,7 +1129,7 @@ func (b *tuiBackend) OpenOutcome(ctx context.Context, outcome model.OutcomeEntry
 			harnessPath = p
 		}
 	}
-	cmd := buildOutcomeOpenCommand(agent, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), b.selfPath, harnessPath)
+	cmd := buildOutcomeOpenCommand(agent, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), nil, b.selfPath, harnessPath)
 	if len(cmd) == 0 {
 		return fmt.Errorf("could not build resume command for %s", agent)
 	}
@@ -1163,20 +1189,20 @@ func (b *tuiBackend) SearchConversations(ctx context.Context, req model.Conversa
 
 func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.ConversationEntry, forceNewTab bool) error {
 	_ = forceNewTab
-	agent := resurrect.CanonicalAgent(conv.Agent)
-	if agent == "" {
-		agent = resurrect.CanonicalAgent(conv.App)
+	agentName := resurrect.CanonicalAgent(conv.Agent)
+	if agentName == "" {
+		agentName = resurrect.CanonicalAgent(conv.App)
 	}
-	if agent == "" {
-		agent = model.CanonicalConversationAgent(conv.Agent)
+	if agentName == "" {
+		agentName = model.CanonicalConversationAgent(conv.Agent)
 	}
-	if agent == "" {
-		agent = strings.TrimSpace(conv.Agent)
+	if agentName == "" {
+		agentName = strings.TrimSpace(conv.Agent)
 	}
-	if agent == "" {
-		agent = strings.TrimSpace(conv.App)
+	if agentName == "" {
+		agentName = strings.TrimSpace(conv.App)
 	}
-	if agent == "" {
+	if agentName == "" {
 		return fmt.Errorf("conversation has no agent to open")
 	}
 
@@ -1218,12 +1244,26 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 		}
 	}
 
-	cmd := buildConversationOpenCommand(agent, profile, sessionID, cwd, strings.TrimSpace(conv.Title), b.selfPath, harnessPath)
+	cmd := buildConversationOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(conv.Title), conv.LaunchCmd, b.selfPath, harnessPath)
 	if len(cmd) == 0 {
-		return fmt.Errorf("could not build resume command for %s", agent)
+		return fmt.Errorf("could not build resume command for %s", agentName)
 	}
 
-	label := agent
+	if harnessPath != "" && agent.DefaultRegistry().IsHarnessManaged(agentName) {
+		if len(conv.LaunchCmd) == 0 {
+			prof := profile
+			if prof == "" {
+				prof = "default"
+			}
+			conv.LaunchCmd = []string{harnessPath, agentName, "profile", prof}
+		} else if profile != "" {
+			if launchProf := extractProfileFromLaunchCmd(conv.LaunchCmd); launchProf != "" && launchProf != profile {
+				conv.LaunchCmd = []string{harnessPath, agentName, "profile", profile}
+			}
+		}
+	}
+
+	label := agentName
 	if profile != "" && profile != "default" {
 		label = profile
 	}
@@ -1231,7 +1271,11 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 		return err
 	}
 	// Best-effort overlay update so space and last_opened_ms stay fresh.
-	_ = model.RecordConversationOpen(ctx, conv, targetSession, b.now().UnixMilli())
+	recordOpen := b.recordConvOpen
+	if recordOpen == nil {
+		recordOpen = model.RecordConversationOpen
+	}
+	_ = recordOpen(ctx, conv, targetSession, b.now().UnixMilli())
 	if cur, err := b.client.CurrentSession(ctx); err != nil || cur != targetSession {
 		if err := b.client.SwitchToSpace(ctx, targetSession); err != nil {
 			return err
@@ -1240,8 +1284,8 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 	return nil
 }
 
-func buildConversationOpenCommand(agent, profile, sessionID, cwd, title, selfPath, harnessPath string) []string {
-	return buildOutcomeOpenCommand(agent, profile, sessionID, cwd, title, "", selfPath, harnessPath)
+func buildConversationOpenCommand(agent, profile, sessionID, cwd, title string, launchCmd []string, selfPath, harnessPath string) []string {
+	return buildOutcomeOpenCommand(agent, profile, sessionID, cwd, title, "", launchCmd, selfPath, harnessPath)
 }
 
 var _ tui.SharedBackend = (*tuiBackend)(nil)
@@ -1305,7 +1349,7 @@ func (b *tuiBackend) OpenSharedFile(ctx context.Context, path string) error {
 // `harness <agent> profile <profile|default>` with native plugin resume flags
 // directly under `__shim`. For standalone or non-harness agents, it launches
 // the plugin's resolved binary with native resume flags under `__shim`.
-func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOutcome, selfPath, harnessPath string) []string {
+func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOutcome string, launchCmd []string, selfPath, harnessPath string) []string {
 	_, _ = cwd, title
 	reg := agent.DefaultRegistry()
 	resumeArgs := reg.ResumeArgs(agentName, sessionID)
@@ -1317,16 +1361,36 @@ func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOut
 	var inner []string
 	if harnessPath != "" && reg.IsHarnessManaged(agentName) {
 		trimmedProfile := strings.TrimSpace(profile)
-		prof := trimmedProfile
-		if prof == "" {
-			prof = "default"
+		useLaunchCmd := len(launchCmd) > 0
+		if useLaunchCmd && trimmedProfile != "" {
+			if launchProf := extractProfileFromLaunchCmd(launchCmd); launchProf != "" && launchProf != trimmedProfile {
+				useLaunchCmd = false
+			}
 		}
-		inner = []string{selfPath, "__shim"}
-		if trimmedProfile != "" {
-			inner = append(inner, "--profile", trimmedProfile)
+		if useLaunchCmd {
+			baseCmd := cli.StripResumeArgs(agentName, launchCmd)
+			if trimmedProfile == "" {
+				trimmedProfile = extractProfileFromLaunchCmd(baseCmd)
+			}
+			inner = []string{selfPath, "__shim"}
+			if trimmedProfile != "" {
+				inner = append(inner, "--profile", trimmedProfile)
+			}
+			inner = append(inner, appLabel)
+			inner = append(inner, baseCmd...)
+			inner = append(inner, resumeArgs...)
+		} else {
+			prof := trimmedProfile
+			if prof == "" {
+				prof = "default"
+			}
+			inner = []string{selfPath, "__shim"}
+			if trimmedProfile != "" {
+				inner = append(inner, "--profile", trimmedProfile)
+			}
+			inner = append(inner, appLabel, harnessPath, agentName, "profile", prof)
+			inner = append(inner, resumeArgs...)
 		}
-		inner = append(inner, appLabel, harnessPath, agentName, "profile", prof)
-		inner = append(inner, resumeArgs...)
 	} else {
 		bin := reg.BinaryName(agentName)
 		if bin == "" {
@@ -1336,6 +1400,18 @@ func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOut
 		inner = append(inner, resumeArgs...)
 	}
 	return wrapOutcomeInShell(inner, priorOutcome, selfPath)
+}
+
+func extractProfileFromLaunchCmd(cmd []string) string {
+	for i := 1; i+1 < len(cmd); i++ {
+		if cmd[i] == "profile" {
+			prof := strings.TrimSpace(cmd[i+1])
+			if prof != "" && !strings.HasPrefix(prof, "-") {
+				return prof
+			}
+		}
+	}
+	return ""
 }
 
 func wrapOutcomeInShell(cmd []string, priorOutcome, selfPath string) []string {

@@ -345,7 +345,7 @@ func AgentIsNoninteractive(agentName string) bool {
 
 // DiscoverProfile infers a harness profile name for an existing conversation ID
 // when the recorded outcome omitted it. Supports Antigravity profile shadow
-// homes under ~/.model-router/profiles/antigravity/<profile>/home.
+// homes under ~/.harness/profiles/antigravity/<profile>/home.
 func DiscoverProfile(agentName, cwd, sessionID string) string {
 	_ = cwd
 	if Normalize(agentName) != "antigravity" {
@@ -357,7 +357,7 @@ func DiscoverProfile(agentName, cwd, sessionID string) string {
 	}
 	home := homeDir()
 	// If already executing inside a profile shadow home, extract its profile name.
-	marker := filepath.Join(".model-router", "profiles", "antigravity") + string(filepath.Separator)
+	marker := filepath.Join(".harness", "profiles", "antigravity") + string(filepath.Separator)
 	if idx := strings.Index(home, marker); idx >= 0 {
 		rest := home[idx+len(marker):]
 		if prof, _, ok := strings.Cut(rest, string(filepath.Separator)); ok && prof != "" {
@@ -367,7 +367,7 @@ func DiscoverProfile(agentName, cwd, sessionID string) string {
 			}
 		}
 	}
-	profilesRoot := filepath.Join(home, ".model-router", "profiles", "antigravity")
+	profilesRoot := filepath.Join(home, ".harness", "profiles", "antigravity")
 	entries, err := os.ReadDir(profilesRoot)
 	if err != nil {
 		return ""

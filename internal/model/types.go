@@ -517,7 +517,7 @@ type HarnessProfile struct {
 }
 
 // UnmarshalJSON accepts both camelCase (`displayName`, as written to
-// ~/.model-router/harnesses.json) and legacy snake_case (`display_name`).
+// ~/.harness/harnesses.json) and legacy snake_case (`display_name`).
 func (p *HarnessProfile) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Name              string `json:"name"`
@@ -539,7 +539,7 @@ func (p *HarnessProfile) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// HarnessEntry describes one launchable agent from ~/.model-router/harnesses.json.
+// HarnessEntry describes one launchable agent from ~/.harness/harnesses.json.
 type HarnessEntry struct {
 	Name        string           `json:"name"`
 	Binary      string           `json:"binary,omitempty"`
@@ -548,7 +548,7 @@ type HarnessEntry struct {
 	Profiles    []HarnessProfile `json:"profiles,omitempty"`
 }
 
-// UnmarshalJSON accepts both `note` (as written to ~/.model-router/harnesses.json)
+// UnmarshalJSON accepts both `note` (as written to ~/.harness/harnesses.json)
 // and legacy `description`.
 func (e *HarnessEntry) UnmarshalJSON(data []byte) error {
 	var raw struct {
@@ -583,7 +583,7 @@ func (e HarnessEntry) IsLaunchable() bool {
 	return state == "" || state == "ok"
 }
 
-// HarnessFile is the JSON inventory stored at ~/.model-router/harnesses.json.
+// HarnessFile is the JSON inventory stored at ~/.harness/harnesses.json.
 type HarnessFile struct {
 	Version       int            `json:"version,omitempty"`
 	SchemaVersion int            `json:"schema_version,omitempty"`

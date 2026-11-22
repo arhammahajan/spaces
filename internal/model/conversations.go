@@ -27,9 +27,10 @@ type ConversationEntry struct {
 	SourcePath   string `json:"source_path,omitempty"`
 	ResumeTarget string `json:"resume_target,omitempty"`
 
-	Space        string `json:"space,omitempty"`
-	LastOutcome  string `json:"last_outcome,omitempty"`
-	LastOpenedMs int64  `json:"last_opened_ms,omitempty"`
+	Space        string   `json:"space,omitempty"`
+	LastOutcome  string   `json:"last_outcome,omitempty"`
+	LastOpenedMs int64    `json:"last_opened_ms,omitempty"`
+	LaunchCmd    []string `json:"launch_cmd,omitempty"`
 }
 
 // SnippetSpan marks a highlighted rune range [Start, End) inside
@@ -159,8 +160,14 @@ func SearchConversations(ctx context.Context, req ConversationSearchRequest) (Co
 	return searchConversationsNative(ctx, req)
 }
 
-// RecordConversationOpen persists an open event in conversations-overlay.json
-// so the native conversation store tracks space and last_opened_ms.
+// RecordConversationOpen persists an open event in the SQLite conversation
+// overlay so the native conversation store tracks space and last_opened_ms.
 func RecordConversationOpen(ctx context.Context, conv ConversationEntry, space string, nowMs int64) error {
 	return recordConversationOpenNative(ctx, conv, space, nowMs)
+}
+
+// RecordConversationLaunch persists launch metadata (including profile, cwd,
+// title, launch command argv, and space) in the SQLite conversation overlay.
+func RecordConversationLaunch(ctx context.Context, agent, sessionID, profile, cwd, title string, launchCmd []string, space string, nowMs int64) error {
+	return recordConversationLaunchNative(ctx, agent, sessionID, profile, cwd, title, launchCmd, space, nowMs)
 }

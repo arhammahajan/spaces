@@ -222,7 +222,7 @@ func TestDefaultSharedDirShadowHomeFallback(t *testing.T) {
 	if err := os.MkdirAll(realShared, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	shadowHome := filepath.Join(base, ".model-router", "profiles", "antigravity", "work", "home")
+	shadowHome := filepath.Join(base, ".harness", "profiles", "antigravity", "work", "home")
 	t.Setenv("TMUX_SPACES_SHARED_DIR", "")
 
 	got := DefaultSharedDir("", shadowHome)
@@ -262,8 +262,8 @@ command = "/usr/local/bin/agent-browser"
 args = ["mcp"]
 `)
 
-	// Shadow profile under ~/.model-router/ resolves to real $HOME/.agents.
-	shadowHome := filepath.Join(home, ".model-router", "profiles", "antigravity", "work", "home")
+	// Shadow profile under ~/.harness/ resolves to real $HOME/.agents.
+	shadowHome := filepath.Join(home, ".harness", "profiles", "antigravity", "work", "home")
 	wantRoot := filepath.Join(home, ".agents")
 	if got := DefaultSharedDir("", shadowHome); got != wantRoot {
 		t.Fatalf("DefaultSharedDir shadow = %q, want %q", got, wantRoot)

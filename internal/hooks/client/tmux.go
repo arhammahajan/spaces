@@ -1,11 +1,42 @@
 package client
 
 import (
+	"encoding/json"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/arhammahajan/spaces/internal/model"
 )
+
+// RecordConversationLaunchFunc persists a conversation's invoking command and
+// metadata in the conversation overlay. Tests may override it.
+var RecordConversationLaunchFunc = model.RecordConversationLaunch
+
+func parseLaunchCmdJSON(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "-" {
+		return nil
+	}
+	var cmd []string
+	if err := json.Unmarshal([]byte(raw), &cmd); err != nil || len(cmd) == 0 {
+		return nil
+	}
+	return cmd
+}
+
+func extractProfileFromLaunchCmd(cmd []string) string {
+	for i := 1; i+1 < len(cmd); i++ {
+		if cmd[i] == "profile" {
+			prof := strings.TrimSpace(cmd[i+1])
+			if prof != "" && !strings.HasPrefix(prof, "-") {
+				return prof
+			}
+		}
+	}
+	return ""
+}
 
 // TmuxBinary returns the tmux binary path ($TMUX_BIN or "tmux").
 func TmuxBinary() string {
@@ -157,6 +188,52 @@ func recordTmuxResumeTarget(agent, sessionID string) {
 			"set-option", "-p", "-t", pane, "@spaces_resume_agent", agent,
 		}, 2*time.Second)
 	}
+	recordPaneLaunchCmd(pane, agent, sessionID)
+}
+
+// recordPaneLaunchCmd reads @spaces_launch_cmd, @spaces_profile, session name,
+// and pane CWD from the tmux pane and records the invoking command and/or
+// profile in the conversation overlay as a best-effort non-fatal call.
+func recordPaneLaunchCmd(pane, agent, sessionID string) {
+	if TmuxFunc == nil || RecordConversationLaunchFunc == nil || pane == "" || agent == "" || sessionID == "" {
+		return
+	}
+	stdout, code, err := TmuxFunc([]string{
+		"display-message", "-p", "-t", pane,
+		"#{session_name}\x1f#{pane_current_path}\x1f#{@spaces_profile}\x1f#{@spaces_launch_cmd}",
+	}, 2*time.Second)
+	if err != nil || code != 0 {
+		return
+	}
+	parts := strings.Split(strings.TrimSuffix(stdout, "\n"), "\x1f")
+	getPart := func(i int) string {
+		if i < len(parts) {
+			v := strings.TrimSpace(parts[i])
+			if v != "" && v != "-" {
+				return v
+			}
+		}
+		return ""
+	}
+	space := getPart(0)
+	cwd := getPart(1)
+	profile := getPart(2)
+	launchCmd := parseLaunchCmdJSON(getPart(3))
+	if profile == "" {
+		profile = strings.TrimSpace(os.Getenv("HARNESS_PROFILE"))
+	}
+	if profile == "" && len(launchCmd) > 0 {
+		profile = extractProfileFromLaunchCmd(launchCmd)
+	}
+	if len(launchCmd) == 0 && profile == "" {
+		return
+	}
+	if cwd == "" {
+		cwd = CurrentDirectory()
+	}
+	ctx, cancel := contextWithTimeout(2 * time.Second)
+	defer cancel()
+	_ = RecordConversationLaunchFunc(ctx, agent, sessionID, profile, cwd, "", launchCmd, space, tmuxNowMs())
 }
 
 // SetTmuxPaneOption sets a per-pane tmux option on paneRef (or $TMUX_PANE when empty).
