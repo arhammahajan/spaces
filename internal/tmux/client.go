@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // sessionListFormat is the -F format for ListSessions.
@@ -170,45 +171,70 @@ func (c *Client) ListPanes(ctx context.Context) ([]Pane, error) {
 // (falling back to $TMUX_PANE for the pane) rather than failing the whole
 // snapshot.
 func (c *Client) Snapshot(ctx context.Context) (ServerSnapshot, error) {
-	var snap ServerSnapshot
-	sessions, err := c.ListSessions(ctx)
-	if err != nil {
-		if errors.Is(err, ErrNoServer) {
-			return snap, nil
+	var (
+		sessions []Session
+		windows  []Window
+		panes    []Pane
+		curSess  string
+		curPane  string
+		sessErr  error
+		winErr   error
+		paneErr  error
+		wg       sync.WaitGroup
+	)
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		sessions, sessErr = c.ListSessions(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		windows, winErr = c.ListWindows(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		panes, paneErr = c.ListPanes(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		if stdout, _, _, err := c.Runner.Run(ctx, "display-message", "-p", "-F",
+			"#{session_name}\x1f#{pane_id}"); err == nil {
+			if fields := strings.Split(strings.TrimSpace(stdout), unitSep); len(fields) == 2 {
+				curSess = fields[0]
+				curPane = fields[1]
+			}
 		}
-		return snap, err
-	}
-	snap.Sessions = sessions
+	}()
+	wg.Wait()
 
-	windows, err := c.ListWindows(ctx)
-	if err != nil {
-		if errors.Is(err, ErrNoServer) {
+	if sessErr != nil {
+		if errors.Is(sessErr, ErrNoServer) {
 			return ServerSnapshot{}, nil
 		}
-		return snap, err
+		return ServerSnapshot{}, sessErr
 	}
-	snap.Windows = windows
-
-	panes, err := c.ListPanes(ctx)
-	if err != nil {
-		if errors.Is(err, ErrNoServer) {
+	if winErr != nil {
+		if errors.Is(winErr, ErrNoServer) {
 			return ServerSnapshot{}, nil
 		}
-		return snap, err
+		return ServerSnapshot{Sessions: sessions}, winErr
 	}
-	snap.Panes = panes
-
-	if stdout, _, _, err := c.Runner.Run(ctx, "display-message", "-p", "-F",
-		"#{session_name}\x1f#{pane_id}"); err == nil {
-		if fields := strings.Split(strings.TrimSpace(stdout), unitSep); len(fields) == 2 {
-			snap.CurrentSession = fields[0]
-			snap.CurrentPaneID = fields[1]
+	if paneErr != nil {
+		if errors.Is(paneErr, ErrNoServer) {
+			return ServerSnapshot{}, nil
 		}
+		return ServerSnapshot{Sessions: sessions, Windows: windows}, paneErr
 	}
-	if snap.CurrentPaneID == "" {
-		snap.CurrentPaneID = c.CurrentPaneID()
+	if curPane == "" {
+		curPane = c.CurrentPaneID()
 	}
-	return snap, nil
+	return ServerSnapshot{
+		Sessions:       sessions,
+		Windows:        windows,
+		Panes:          panes,
+		CurrentSession: curSess,
+		CurrentPaneID:  curPane,
+	}, nil
 }
 
 // CapturePane returns the visible text of a pane, including up to lines

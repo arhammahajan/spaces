@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -21,6 +22,7 @@ type fakeResult struct {
 // fakeRunner records calls and serves scripted results keyed by the joined
 // argv, falling back to handler or an empty success.
 type fakeRunner struct {
+	mu      sync.Mutex
 	calls   [][]string
 	results map[string]fakeResult
 	handler func(args []string) (string, string, int, error)
@@ -45,12 +47,16 @@ func (f *fakeRunner) stubOutput(args []string, stdout string) {
 }
 
 func (f *fakeRunner) Run(_ context.Context, args ...string) (string, string, int, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, append([]string(nil), args...))
-	if res, ok := f.results[f.key(args)]; ok {
+	res, ok := f.results[f.key(args)]
+	handler := f.handler
+	f.mu.Unlock()
+	if ok {
 		return res.stdout, res.stderr, res.exitCode, res.err
 	}
-	if f.handler != nil {
-		return f.handler(args)
+	if handler != nil {
+		return handler(args)
 	}
 	return "", "", 0, nil
 }

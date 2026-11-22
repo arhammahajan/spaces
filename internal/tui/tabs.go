@@ -1401,7 +1401,9 @@ func (m Model) renderTabsList(items []TabItem, width, height int) []string {
 	lines := make([]string, height)
 	if len(items) == 0 {
 		msg := "No tabs match this filter."
-		if _, sp := m.tabsSpace(); sp == nil {
+		if m.spacesLoading && len(m.spaces) == 0 {
+			msg = "Loading tabs…"
+		} else if _, sp := m.tabsSpace(); sp == nil {
 			msg = "No running workspace found."
 		} else if _, _, all := m.allWorkspaceTabs(); len(all) == 0 {
 			msg = "No open tabs in this workspace."
@@ -1907,7 +1909,11 @@ func (m Model) renderTabFooterLines(sp *model.Space, items []TabItem, width, max
 	}
 
 	if sp == nil || len(items) == 0 || m.selected < 0 || m.selected >= len(items) {
-		empty := st(ColorOverlay0, false).Render("No tabs available.")
+		label := "No tabs available."
+		if m.spacesLoading && len(m.spaces) == 0 {
+			label = "Loading tabs…"
+		}
+		empty := st(ColorOverlay0, false).Render(label)
 		if maxLines <= 1 {
 			return []string{padLine(empty)}
 		}

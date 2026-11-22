@@ -730,7 +730,9 @@ func (m Model) renderInboxList(items []InboxItem, width, height int) []string {
 	lines := make([]string, height)
 	if len(items) == 0 {
 		msg := "No active agents match this filter."
-		if m.totalAgentCount() == 0 && len(m.outcomes) == 0 {
+		if m.spacesLoading && len(m.spaces) == 0 && len(m.outcomes) == 0 {
+			msg = "Loading agents…"
+		} else if m.totalAgentCount() == 0 && len(m.outcomes) == 0 {
 			msg = "No running agents found."
 		}
 		lines[0] = fitCellWidth(styleMuted.Render("  "+truncate(msg, width-2)), width)
@@ -1028,7 +1030,11 @@ func (m Model) renderInboxDetailLines(items []InboxItem, width, maxLines int) []
 	}
 
 	if len(items) == 0 || m.selected < 0 || m.selected >= len(items) {
-		empty := st(ColorOverlay0, false).Render("No active agents.")
+		label := "No active agents."
+		if m.spacesLoading && len(m.spaces) == 0 && len(m.outcomes) == 0 {
+			label = "Loading agents…"
+		}
+		empty := st(ColorOverlay0, false).Render(label)
 		if maxLines <= 1 {
 			return []string{padLine(empty)}
 		}

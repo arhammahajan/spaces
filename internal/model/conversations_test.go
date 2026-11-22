@@ -425,6 +425,49 @@ func TestFetchConversationTitlesNative(t *testing.T) {
 	}
 }
 
+func TestFetchConversationTitlesLiveRefreshOverStaleDiskCache(t *testing.T) {
+	homeDir, _ := setupNativeConvStoreEnv(t)
+
+	existingPath := filepath.Join(homeDir, ".claude", "projects", "repo-live", "sess-existing.jsonl")
+	writeConvTestFile(t, existingPath, strings.Join([]string{
+		`{"type":"user","sessionId":"sess-existing","cwd":"/repo/live","timestamp":1700000100000,"message":{"role":"user","content":"Initial raw user prompt"}}`,
+	}, "\n")+"\n")
+
+	// Populate conversations-cache.json with the initial state (simulating an earlier mod+y open).
+	if _, err := FetchConversations(context.Background(), true, false); err != nil {
+		t.Fatalf("initial FetchConversations error: %v", err)
+	}
+
+	// Now simulate the agent generating a real title for sess-existing AND starting a brand-new
+	// conversation sess-brand-new on disk, without reopening mod+y.
+	writeConvTestFile(t, existingPath, strings.Join([]string{
+		`{"type":"user","sessionId":"sess-existing","cwd":"/repo/live","timestamp":1700000100000,"message":{"role":"user","content":"Initial raw user prompt"}}`,
+		`{"type":"summary","sessionId":"sess-existing","cwd":"/repo/live","summary":"Generated AI Title","timestamp":1700000105000}`,
+	}, "\n")+"\n")
+	newPath := filepath.Join(homeDir, ".claude", "projects", "repo-live", "sess-brand-new.jsonl")
+	writeConvTestFile(t, newPath, strings.Join([]string{
+		`{"type":"summary","sessionId":"sess-brand-new","cwd":"/repo/live","summary":"Brand New Live Chat","timestamp":1700000200000}`,
+		`{"type":"user","sessionId":"sess-brand-new","cwd":"/repo/live","timestamp":1700000201000,"message":{"role":"user","content":"hello"}}`,
+	}, "\n")+"\n")
+
+	// Simulate a fresh popup process (empty in-memory cache, stale conversations-cache.json on disk).
+	ResetConversationStoreCache()
+
+	titles, err := FetchConversationTitles(context.Background(), []TitleQuery{
+		{Key: "pane-existing", Agent: "claude-code", CWD: "/repo/live", SessionID: "sess-existing"},
+		{Key: "pane-new", Agent: "claude-code", CWD: "/repo/live", SessionID: "sess-brand-new"},
+	})
+	if err != nil {
+		t.Fatalf("FetchConversationTitles error: %v", err)
+	}
+	if titles["pane-existing"] != "Generated AI Title" {
+		t.Errorf("pane-existing = %q, want %q", titles["pane-existing"], "Generated AI Title")
+	}
+	if titles["pane-new"] != "Brand New Live Chat" {
+		t.Errorf("pane-new = %q, want %q", titles["pane-new"], "Brand New Live Chat")
+	}
+}
+
 func TestConversationDiskCacheInstantReload(t *testing.T) {
 	homeDir, _ := setupNativeConvStoreEnv(t)
 	cachePath := ConversationCachePathFn()

@@ -70,10 +70,11 @@ type Model struct {
 	width  int
 	height int
 
-	spaces    []model.Space
-	exited    []model.ExitedSpace
-	outcomes  []model.OutcomeEntry
-	spacesSeq uint64
+	spaces        []model.Space
+	exited        []model.ExitedSpace
+	outcomes      []model.OutcomeEntry
+	spacesSeq     uint64
+	spacesLoading bool
 	filter    model.AttentionFilter
 	query     string
 	cursor    int
@@ -267,6 +268,9 @@ func New(backend Backend, opts Options) Model {
 	if m.mode == ModeShared {
 		m.sharedLoading = true
 	}
+	if m.mode == ModeNavigate || m.mode == ModeSearch || m.mode == ModeInbox || m.mode == ModeTabs || m.mode == ModeWorktrees {
+		m.spacesLoading = true
+	}
 	return m
 }
 
@@ -302,7 +306,7 @@ func (m Model) Init() tea.Cmd {
 		return m.loadSpacesCmd()
 	}
 	if m.mode == ModeWorktrees {
-		return tea.Batch(m.loadSpacesCmd(), m.loadAllWorktreesCmd())
+		return m.loadSpacesCmd()
 	}
 	return tea.Batch(m.tickCmd(), m.loadSpacesCmd())
 }
@@ -323,6 +327,8 @@ func (m *Model) nextLoadSpacesCmd() tea.Cmd {
 
 func (m Model) loadSpacesCmdWithSeq(seq uint64) tea.Cmd {
 	backend := m.backend
+	wantExited := m.mode == ModeNavigate || m.mode == ModeSearch
+	wantOutcomes := m.mode == ModeInbox
 	return func() tea.Msg {
 		ctx := context.Background()
 		spaces, err := backend.LoadSpaces(ctx)
@@ -330,15 +336,19 @@ func (m Model) loadSpacesCmdWithSeq(seq uint64) tea.Cmd {
 			return spacesMsg{seq: seq, err: err.Error()}
 		}
 		var exited []model.ExitedSpace
-		if rb, ok := backend.(ResurrectBackend); ok {
-			if list, eErr := rb.LoadExited(ctx); eErr == nil {
-				exited = list
+		if wantExited {
+			if rb, ok := backend.(ResurrectBackend); ok {
+				if list, eErr := rb.LoadExited(ctx); eErr == nil {
+					exited = list
+				}
 			}
 		}
 		var outcomes []model.OutcomeEntry
-		if ob, ok := backend.(OutcomesBackend); ok {
-			if list, oErr := ob.LoadOutcomes(ctx); oErr == nil {
-				outcomes = list
+		if wantOutcomes {
+			if ob, ok := backend.(OutcomesBackend); ok {
+				if list, oErr := ob.LoadOutcomes(ctx); oErr == nil {
+					outcomes = list
+				}
 			}
 		}
 		return spacesMsg{seq: seq, spaces: spaces, exited: exited, outcomes: outcomes}
@@ -468,7 +478,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq > 0 && msg.seq < m.spacesSeq {
 			return m, nil
 		}
+		m.spacesLoading = false
 		if msg.err != "" {
+			if m.mode == ModeWorktrees && len(m.worktrees) == 0 {
+				m.worktreesLoading = false
+			}
 			if m.mode != ModeConversations {
 				m.toast = msg.err
 			}
@@ -498,6 +512,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.loadAllWorktreesCmd(); cmd != nil {
 				m.worktreesLoading = true
 				cmds = append(cmds, cmd)
+			} else {
+				m.worktreesLoading = false
 			}
 		}
 		if m.mode == ModeRename && m.renameStandalone && m.renameOld == "" {

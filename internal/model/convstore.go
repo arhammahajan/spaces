@@ -15,11 +15,12 @@ import (
 )
 
 const (
-	maxConvScanWorkers      = 8
-	maxConvSnippetRunes     = 140
-	maxConvTitleRunes       = 120
-	maxConvPreviewRunes     = 200
-	currentConvCacheVersion = 3
+	maxConvScanWorkers       = 8
+	maxConvSnippetRunes      = 140
+	maxConvTitleRunes        = 120
+	maxConvPreviewRunes      = 200
+	currentConvCacheVersion  = 3
+	titleLiveRefreshInterval = 1 * time.Second
 )
 
 // ConversationHomeDirFn resolves the real user home directory used when
@@ -103,6 +104,8 @@ type conversationCacheState struct {
 	entries         []ConversationEntry
 	syncedMs        int64
 	indexedMessages int
+	allScannedAt    time.Time
+	agentScannedAt  map[string]time.Time
 }
 
 var (
@@ -120,6 +123,8 @@ func ResetConversationStoreCache() {
 	convCache.entries = nil
 	convCache.syncedMs = 0
 	convCache.indexedMessages = 0
+	convCache.allScannedAt = time.Time{}
+	convCache.agentScannedAt = nil
 }
 
 func loadConversationDiskCache() (cachedConvSnapshot, bool) {
@@ -350,6 +355,10 @@ func profileStorePointsToRealHome(store agent.ConversationStore, profileHome, re
 }
 
 func scanAllConversations(ctx context.Context) ([]ConversationEntry, int, error) {
+	return scanConversationsForAgents(ctx, nil)
+}
+
+func scanConversationsForAgents(ctx context.Context, onlyAgents map[string]bool) ([]ConversationEntry, int, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, 0, err
 	}
@@ -360,6 +369,9 @@ func scanAllConversations(ctx context.Context) ([]ConversationEntry, int, error)
 
 	var jobs []convScanJob
 	for _, p := range reg.RuntimePlugins() {
+		if len(onlyAgents) > 0 && !onlyAgents[reg.ConversationID(p.Spec().ID)] {
+			continue
+		}
 		store := p.ConversationStore()
 		if store == nil {
 			continue
@@ -377,6 +389,9 @@ func scanAllConversations(ctx context.Context) ([]ConversationEntry, int, error)
 
 	if realHome != "" {
 		for _, pr := range reg.DiscoverProfileRoots(realHome) {
+			if len(onlyAgents) > 0 && !onlyAgents[reg.ConversationID(pr.Agent)] {
+				continue
+			}
 			p, ok := reg.ResolveRuntime(pr.Agent)
 			if !ok {
 				continue
@@ -634,7 +649,8 @@ func fetchConversationsNative(ctx context.Context, refresh, includeArchived bool
 	if err != nil {
 		return ConversationSnapshot{}, err
 	}
-	nowMs := time.Now().UnixMilli()
+	now := time.Now()
+	nowMs := now.UnixMilli()
 	cacheCopy := append([]ConversationEntry(nil), entries...)
 
 	convCache.mu.Lock()
@@ -642,6 +658,16 @@ func fetchConversationsNative(ctx context.Context, refresh, includeArchived bool
 	convCache.entries = cacheCopy
 	convCache.syncedMs = nowMs
 	convCache.indexedMessages = indexedMessages
+	convCache.allScannedAt = now
+	if convCache.agentScannedAt == nil {
+		convCache.agentScannedAt = make(map[string]time.Time)
+	}
+	reg := agent.DefaultRegistry()
+	for _, p := range reg.RuntimePlugins() {
+		if cid := reg.ConversationID(p.Spec().ID); cid != "" {
+			convCache.agentScannedAt[cid] = now
+		}
+	}
 	convCache.mu.Unlock()
 
 	_ = saveConversationDiskCache(cachedConvSnapshot{
@@ -993,6 +1019,98 @@ func recencyBonus(tsMs int64) float64 {
 	return b
 }
 
+func ensureConversationCacheLoadedFromDisk() {
+	convCache.mu.RLock()
+	loaded := convCache.loaded
+	convCache.mu.RUnlock()
+	if loaded {
+		return
+	}
+	if diskSnap, ok := loadConversationDiskCache(); ok {
+		entries := mergeConversationOverlay(diskSnap.Conversations)
+		cacheCopy := append([]ConversationEntry(nil), entries...)
+		convCache.mu.Lock()
+		if !convCache.loaded {
+			convCache.loaded = true
+			convCache.entries = cacheCopy
+			convCache.syncedMs = diskSnap.SyncedMs
+			convCache.indexedMessages = diskSnap.IndexedMessages
+		}
+		convCache.mu.Unlock()
+	}
+}
+
+func mergeFreshIntoConvCache(fresh []ConversationEntry, scannedAgents map[string]bool, scannedAll bool, now time.Time) {
+	convCache.mu.Lock()
+	defer convCache.mu.Unlock()
+
+	byKey := make(map[convDedupKey]ConversationEntry, len(convCache.entries)+len(fresh))
+	for _, entry := range convCache.entries {
+		idKey := strings.TrimSpace(entry.ID)
+		if idKey == "" {
+			idKey = strings.TrimSpace(entry.SourcePath)
+		}
+		if idKey == "" {
+			continue
+		}
+		byKey[convDedupKey{agent: entry.Agent, id: idKey}] = entry
+	}
+	for _, entry := range fresh {
+		idKey := strings.TrimSpace(entry.ID)
+		if idKey == "" {
+			idKey = strings.TrimSpace(entry.SourcePath)
+		}
+		if idKey == "" {
+			continue
+		}
+		k := convDedupKey{agent: entry.Agent, id: idKey}
+		if prev, exists := byKey[k]; exists {
+			// Fresh live scan is authoritative; only preserve non-empty fields
+			// that were absent in the fresh record.
+			if strings.TrimSpace(entry.Title) == "" {
+				entry.Title = prev.Title
+			}
+			if strings.TrimSpace(entry.Space) == "" {
+				entry.Space = prev.Space
+			}
+			if prev.LastOpenedMs > entry.LastOpenedMs {
+				entry.LastOpenedMs = prev.LastOpenedMs
+			}
+			if strings.TrimSpace(entry.LastOutcome) == "" {
+				entry.LastOutcome = prev.LastOutcome
+			}
+			if len(entry.LaunchCmd) == 0 && len(prev.LaunchCmd) > 0 {
+				entry.LaunchCmd = cloneStringSlice(prev.LaunchCmd)
+			}
+		}
+		byKey[k] = entry
+	}
+
+	merged := make([]ConversationEntry, 0, len(byKey))
+	for _, entry := range byKey {
+		merged = append(merged, entry)
+	}
+	sortConversationEntries(merged)
+	convCache.loaded = true
+	convCache.entries = merged
+	if convCache.agentScannedAt == nil {
+		convCache.agentScannedAt = make(map[string]time.Time)
+	}
+	if scannedAll {
+		convCache.allScannedAt = now
+		reg := agent.DefaultRegistry()
+		for _, p := range reg.RuntimePlugins() {
+			if cid := reg.ConversationID(p.Spec().ID); cid != "" {
+				convCache.agentScannedAt[cid] = now
+			}
+		}
+	} else {
+		for a := range scannedAgents {
+			convCache.agentScannedAt[a] = now
+		}
+	}
+}
+
 func fetchConversationTitlesSnapshot(ctx context.Context, queries []TitleQuery) (TitleSnapshot, error) {
 	if len(queries) == 0 {
 		return TitleSnapshot{OK: true}, nil
@@ -1001,15 +1119,67 @@ func fetchConversationTitlesSnapshot(ctx context.Context, queries []TitleQuery) 
 		return TitleSnapshot{}, err
 	}
 
-	// Checks in-memory cache first, then disk cache, before falling back to a full scan.
-	snap, err := fetchConversationsNative(ctx, false, true)
-	if err != nil {
-		return TitleSnapshot{}, err
+	// Seed from disk cache first so deleted/archived entries remain available as
+	// fallback, then live-scan only the queried agents whose cached snapshot is
+	// older than titleLiveRefreshInterval so new/updated titles appear immediately.
+	ensureConversationCacheLoadedFromDisk()
+
+	wantAgents := make(map[string]bool, len(queries))
+	scanAll := false
+	for _, q := range queries {
+		if strings.TrimSpace(q.Key) == "" {
+			continue
+		}
+		canon := CanonicalConversationAgent(q.Agent)
+		if canon == "" {
+			scanAll = true
+		} else {
+			wantAgents[canon] = true
+		}
 	}
 
-	byAgentSession := make(map[string]string, len(snap.Conversations))
-	bySessionOnly := make(map[string]string, len(snap.Conversations))
-	for _, entry := range snap.Conversations {
+	now := time.Now()
+	needScanAll := false
+	var staleAgents map[string]bool
+	convCache.mu.RLock()
+	if scanAll {
+		if convCache.allScannedAt.IsZero() || now.Sub(convCache.allScannedAt) >= titleLiveRefreshInterval {
+			needScanAll = true
+		}
+	} else {
+		for a := range wantAgents {
+			last := convCache.agentScannedAt[a]
+			if last.IsZero() || now.Sub(last) >= titleLiveRefreshInterval {
+				if staleAgents == nil {
+					staleAgents = make(map[string]bool, len(wantAgents))
+				}
+				staleAgents[a] = true
+			}
+		}
+	}
+	convCache.mu.RUnlock()
+
+	if needScanAll {
+		if fresh, _, err := scanConversationsForAgents(ctx, nil); err == nil {
+			mergeFreshIntoConvCache(fresh, nil, true, now)
+		} else if err == context.Canceled || err == context.DeadlineExceeded {
+			return TitleSnapshot{}, err
+		}
+	} else if len(staleAgents) > 0 {
+		if fresh, _, err := scanConversationsForAgents(ctx, staleAgents); err == nil {
+			mergeFreshIntoConvCache(fresh, staleAgents, false, now)
+		} else if err == context.Canceled || err == context.DeadlineExceeded {
+			return TitleSnapshot{}, err
+		}
+	}
+
+	convCache.mu.RLock()
+	entries := append([]ConversationEntry(nil), convCache.entries...)
+	convCache.mu.RUnlock()
+
+	byAgentSession := make(map[string]string, len(entries))
+	bySessionOnly := make(map[string]string, len(entries))
+	for _, entry := range entries {
 		title := strings.TrimSpace(entry.Title)
 		if title == "" {
 			continue
@@ -1054,9 +1224,9 @@ func fetchConversationTitlesSnapshot(ctx context.Context, queries []TitleQuery) 
 		}
 		cleanCWD := filepath.Clean(wantCWD)
 
-		// snap.Conversations is sorted newest-first; prefer non-archived, fallback to archived.
+		// entries is sorted newest-first; prefer non-archived, fallback to archived.
 		var archivedFallback string
-		for _, entry := range snap.Conversations {
+		for _, entry := range entries {
 			if canonAgent != "" && entry.Agent != canonAgent {
 				continue
 			}

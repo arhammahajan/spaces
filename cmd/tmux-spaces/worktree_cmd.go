@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/arhammahajan/spaces/internal/cli"
@@ -239,16 +240,43 @@ func (b *tuiBackend) ListAllWorktrees(ctx context.Context, spaces []model.Space)
 		}
 	}
 
+	type dirResult struct {
+		repo *worktree.RepoInfo
+		wts  []worktree.Worktree
+	}
+	results := make([]dirResult, len(candidateDirs))
+	if len(candidateDirs) > 0 {
+		const maxWorkers = 8
+		sem := make(chan struct{}, maxWorkers)
+		var wg sync.WaitGroup
+		for i, dir := range candidateDirs {
+			if ctx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(idx int, d string) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				repo, wts, err := b.wt.List(ctx, d)
+				if err != nil || repo == nil {
+					return
+				}
+				results[idx] = dirResult{repo: repo, wts: wts}
+			}(i, dir)
+		}
+		wg.Wait()
+	}
+
 	seenRepos := map[string]bool{}
 	seenPaths := map[string]bool{}
 	var out []model.WorktreeEntry
-	for _, dir := range candidateDirs {
-		repo, wts, err := b.wt.List(ctx, dir)
-		if err != nil || repo == nil || seenRepos[repo.RepoKey] {
+	for _, res := range results {
+		if res.repo == nil || seenRepos[res.repo.RepoKey] {
 			continue
 		}
-		seenRepos[repo.RepoKey] = true
-		for _, wt := range wts {
+		seenRepos[res.repo.RepoKey] = true
+		for _, wt := range res.wts {
 			if wt.IsBare {
 				continue
 			}

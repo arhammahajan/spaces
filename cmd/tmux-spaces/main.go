@@ -28,6 +28,7 @@ import (
 const (
 	defaultTmuxTimeout    = 5 * time.Second
 	screenCaptureInterval = 5 * time.Second
+	titleRefreshInterval  = 1 * time.Second
 	maxCapturePanes       = 64
 	defaultCaptureLines   = 200
 )
@@ -445,6 +446,8 @@ type tuiBackend struct {
 	cachedTitles         map[string]string
 	cachedTitleQueries   map[string]model.TitleQuery
 	recordedLiveProfiles map[string]string
+	lastRunningAt        time.Time
+	lastRunningSessions  map[string]bool
 	lastOutcomes         []model.OutcomeEntry
 	hasOutcomes          bool
 }
@@ -556,6 +559,14 @@ func (b *tuiBackend) loadResolved(ctx context.Context) (tmux.ServerSnapshot, []m
 	}
 	now := b.now()
 	nowMs := now.UnixMilli()
+	running := make(map[string]bool, len(snap.Sessions))
+	for _, s := range snap.Sessions {
+		running[s.Name] = true
+	}
+	b.mu.Lock()
+	b.lastRunningSessions = running
+	b.lastRunningAt = now
+	b.mu.Unlock()
 	spaces := model.BuildSpaces(snap, nowMs)
 
 	var hookSnap *model.HookSnapshot
@@ -574,6 +585,7 @@ func (b *tuiBackend) loadResolved(ctx context.Context) (tmux.ServerSnapshot, []m
 	readings := b.screenReadings(ctx, spaces, now)
 	b.arbitrator.Apply(spaces, hookSnap, readings, nowMs)
 	b.populateSessionStoreTitles(ctx, spaces, now)
+	b.enrichOutcomeTitles(ctx)
 	newlyDone := b.arbitrator.TakeNewlyDone()
 	b.syncScreenStateToTmux(ctx, spaces, readings, newlyDone, nowMs)
 	if len(newlyDone) > 0 {
@@ -720,6 +732,7 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 
 	var queries []model.TitleQuery
 	var skipped []string
+	exactSIDPanes := make(map[string]bool)
 	for si := range spaces {
 		for pi := range spaces[si].Panes {
 			p := &spaces[si].Panes[pi]
@@ -759,7 +772,12 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 					}
 				}
 			}
-			if strings.TrimSpace(p.ConversationTitle) != "" {
+			// When we have an exact session ID, always query the native
+			// conversation store so generated/updated titles immediately
+			// supersede preliminary prompt fallbacks or stale @spaces_title.
+			// When we lack a session ID, only do CWD-based lookup if no title
+			// is set yet.
+			if sid == "" && strings.TrimSpace(p.ConversationTitle) != "" {
 				continue
 			}
 			// When multiple panes of a plugin that suppresses CWD-based title fallback
@@ -770,6 +788,9 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 				sid == "" && multiPaneCounts[agentCWDKey{agentID: plugin.Spec().ID, cwd: p.CWD}] > 1 {
 				skipped = append(skipped, p.ID)
 				continue
+			}
+			if sid != "" {
+				exactSIDPanes[p.ID] = true
 			}
 			queries = append(queries, model.TitleQuery{
 				Key:       p.ID,
@@ -796,7 +817,7 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 		delete(b.cachedTitles, id)
 		delete(b.cachedTitleQueries, id)
 	}
-	useCache := !b.lastTitlesAt.IsZero() && now.Sub(b.lastTitlesAt) < screenCaptureInterval
+	useCache := !b.lastTitlesAt.IsZero() && now.Sub(b.lastTitlesAt) < titleRefreshInterval
 	if useCache {
 		for _, q := range queries {
 			prevQ, ok := b.cachedTitleQueries[q.Key]
@@ -804,7 +825,7 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 				useCache = false
 				break
 			}
-			if _, ok := b.cachedTitles[q.Key]; !ok {
+			if cached, ok := b.cachedTitles[q.Key]; !ok || strings.TrimSpace(cached) == "" {
 				useCache = false
 				break
 			}
@@ -838,11 +859,62 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 	for si := range spaces {
 		for pi := range spaces[si].Panes {
 			p := &spaces[si].Panes[pi]
-			if strings.TrimSpace(p.ConversationTitle) == "" {
-				if t := strings.TrimSpace(titles[p.ID]); t != "" {
+			if t := strings.TrimSpace(titles[p.ID]); t != "" {
+				if exactSIDPanes[p.ID] || strings.TrimSpace(p.ConversationTitle) == "" {
 					p.ConversationTitle = t
 				}
 			}
+		}
+	}
+}
+
+func (b *tuiBackend) enrichOutcomeTitles(ctx context.Context) {
+	b.mu.Lock()
+	if len(b.lastOutcomes) == 0 {
+		b.mu.Unlock()
+		return
+	}
+	outcomes := append([]model.OutcomeEntry(nil), b.lastOutcomes...)
+	b.mu.Unlock()
+
+	var queries []model.TitleQuery
+	for i, o := range outcomes {
+		sid := strings.TrimSpace(o.SessionID)
+		if sid == "" {
+			continue
+		}
+		agentName := strings.TrimSpace(o.Agent)
+		if agentName == "" {
+			agentName = strings.TrimSpace(o.App)
+		}
+		if agentName == "" {
+			continue
+		}
+		queries = append(queries, model.TitleQuery{
+			Key:       strconv.Itoa(i),
+			Agent:     agentName,
+			CWD:       o.CWD,
+			SessionID: sid,
+		})
+	}
+	if len(queries) == 0 {
+		return
+	}
+	titles, err := model.FetchConversationTitles(ctx, queries)
+	if err != nil || len(titles) == 0 {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for i := range b.lastOutcomes {
+		if i >= len(outcomes) {
+			break
+		}
+		if b.lastOutcomes[i].SessionID != outcomes[i].SessionID {
+			continue
+		}
+		if t := strings.TrimSpace(titles[strconv.Itoa(i)]); t != "" {
+			b.lastOutcomes[i].Title = t
 		}
 	}
 }
@@ -878,33 +950,61 @@ func (b *tuiBackend) screenReadings(ctx context.Context, spaces []model.Space, n
 	}
 	b.mu.Unlock()
 
-	readings := make(map[string]model.ScreenReading)
-	captured := 0
+	var targets []model.Pane
 	for _, sp := range spaces {
 		for _, pane := range sp.Panes {
-			if captured >= maxCapturePanes {
+			if len(targets) >= maxCapturePanes {
 				break
 			}
 			if pane.IsDead || !agent.DefaultRegistry().HasScreenManifest(pane.App) {
 				continue
 			}
-			viewport, err := b.client.CapturePane(ctx, pane.ID, defaultCaptureLines)
-			if err != nil {
-				continue
-			}
-			captured++
-			detected := agent.DefaultRegistry().DetectScreen(pane.App, viewport, pane.Title)
-			readings[pane.ID] = model.ScreenReading{
-				App:             pane.App,
-				State:           detected.State.String(),
-				VisibleIdle:     detected.VisibleIdle,
-				VisibleBlocker:  detected.VisibleBlocker,
-				VisibleWorking:  detected.VisibleWorking,
-				SkipStateUpdate: detected.SkipStateUpdate,
-				OSCAuthority:    agent.DefaultRegistry().IsOSCAuthority(pane.App),
-				Title:           detected.Title,
-			}
+			targets = append(targets, pane)
 		}
+		if len(targets) >= maxCapturePanes {
+			break
+		}
+	}
+
+	readings := make(map[string]model.ScreenReading, len(targets))
+	if len(targets) > 0 {
+		const maxWorkers = 8
+		sem := make(chan struct{}, maxWorkers)
+		var (
+			wg sync.WaitGroup
+			mu sync.Mutex
+		)
+		reg := agent.DefaultRegistry()
+		for _, pane := range targets {
+			if ctx.Err() != nil {
+				break
+			}
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(p model.Pane) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				viewport, err := b.client.CapturePane(ctx, p.ID, defaultCaptureLines)
+				if err != nil {
+					return
+				}
+				detected := reg.DetectScreen(p.App, viewport, p.Title)
+				r := model.ScreenReading{
+					App:             p.App,
+					State:           detected.State.String(),
+					VisibleIdle:     detected.VisibleIdle,
+					VisibleBlocker:  detected.VisibleBlocker,
+					VisibleWorking:  detected.VisibleWorking,
+					SkipStateUpdate: detected.SkipStateUpdate,
+					OSCAuthority:    reg.IsOSCAuthority(p.App),
+					Title:           detected.Title,
+				}
+				mu.Lock()
+				readings[p.ID] = r
+				mu.Unlock()
+			}(pane)
+		}
+		wg.Wait()
 	}
 
 	b.mu.Lock()
@@ -1002,9 +1102,21 @@ func (b *tuiBackend) KillSpace(ctx context.Context, name string) error {
 }
 
 func (b *tuiBackend) LoadExited(ctx context.Context) ([]model.ExitedSpace, error) {
+	now := b.now()
+	b.mu.Lock()
+	if !b.lastRunningAt.IsZero() && now.Sub(b.lastRunningAt) < screenCaptureInterval {
+		running := make(map[string]bool, len(b.lastRunningSessions))
+		for k, v := range b.lastRunningSessions {
+			running[k] = v
+		}
+		b.mu.Unlock()
+		return b.store.ListExited(running)
+	}
+	b.mu.Unlock()
+
 	running := map[string]bool{}
-	if snap, err := b.client.Snapshot(ctx); err == nil {
-		for _, s := range snap.Sessions {
+	if sessions, err := b.client.ListSessions(ctx); err == nil {
+		for _, s := range sessions {
 			running[s.Name] = true
 		}
 	}

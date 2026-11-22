@@ -62,9 +62,6 @@ func summaryRecord(record map[string]any) map[string]any {
 	event, _ := record["event"].(string)
 	text, _ := record["text"].(string)
 	title := record["title"]
-	if !truthy(title) && truthy(record["prompt"]) {
-		title = fieldStr(record["prompt"], MaxText, false)
-	}
 	if !truthy(title) && SpaceHookTitleResolver != nil {
 		cwd, _ := record["cwd"].(string)
 		sid, _ := record["session_id"].(string)
@@ -73,6 +70,9 @@ func summaryRecord(record map[string]any) map[string]any {
 				title = resolved
 			}
 		}
+	}
+	if !truthy(title) && truthy(record["prompt"]) {
+		title = fieldStr(record["prompt"], MaxText, false)
 	}
 	out := map[string]any{
 		"agent":           agent,

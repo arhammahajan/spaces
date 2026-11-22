@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,11 +19,14 @@ import (
 )
 
 type fakeRunner struct {
+	mu      sync.Mutex
 	calls   [][]string
 	handler func(args []string) (string, string, int, error)
 }
 
 func (f *fakeRunner) Run(_ context.Context, args ...string) (string, string, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	cp := append([]string(nil), args...)
 	f.calls = append(f.calls, cp)
 	if f.handler != nil {
@@ -350,6 +354,76 @@ func TestMultipleAntigravityPanesResolveDistinctTitles(t *testing.T) {
 	}
 	if got := spaces[0].Panes[1].ConversationTitle; got != "Alpha Conversation" {
 		t.Errorf("pane %%2 updated ConversationTitle = %q, want Alpha Conversation", got)
+	}
+}
+
+func TestPopulateSessionStoreTitlesSupersedesPromptAndRefreshesOutcomes(t *testing.T) {
+	tmpHome := t.TempDir()
+	agyDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(agyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agyDir, "conv-live.json"), []byte(
+		`{"id":"conv-live","title":"Proper Generated Title","cwd":"/repo","updated_at":"2026-11-23T04:00:00Z","messages":[{"role":"user","content":"raw prompt text"}]}`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origHome := model.ConversationHomeDirFn
+	origOverlay := model.ConversationOverlayPathFn
+	origCache := model.ConversationCachePathFn
+	model.ConversationHomeDirFn = func() string { return tmpHome }
+	model.ConversationOverlayPathFn = func() string { return filepath.Join(tmpHome, "overlay.json") }
+	model.ConversationCachePathFn = func() string { return filepath.Join(tmpHome, "cache.json") }
+	model.ResetConversationStoreCache()
+	defer func() {
+		model.ConversationHomeDirFn = origHome
+		model.ConversationOverlayPathFn = origOverlay
+		model.ConversationCachePathFn = origCache
+		model.ResetConversationStoreCache()
+	}()
+
+	b := newTUIBackend(nil)
+	now := time.UnixMilli(1700000001000)
+	spaces := []model.Space{
+		{
+			Name: "work",
+			Panes: []model.Pane{
+				{
+					ID:                "%1",
+					App:               "antigravity",
+					CWD:               "/repo",
+					ConversationTitle: "raw prompt text",
+					Hook: &model.HookSummary{
+						SessionID: "conv-live",
+						Title:     "raw prompt text",
+					},
+				},
+			},
+		},
+	}
+	b.lastOutcomes = []model.OutcomeEntry{
+		{
+			Session:   "work",
+			Pane:      "1",
+			Agent:     "antigravity",
+			App:       "antigravity",
+			Outcome:   "done",
+			Title:     "raw prompt text",
+			SessionID: "conv-live",
+			CWD:       "/repo",
+		},
+	}
+	b.hasOutcomes = true
+
+	b.populateSessionStoreTitles(context.Background(), spaces, now)
+	b.enrichOutcomeTitles(context.Background())
+
+	if got := spaces[0].Panes[0].ConversationTitle; got != "Proper Generated Title" {
+		t.Errorf("pane %%1 ConversationTitle = %q, want Proper Generated Title", got)
+	}
+	if got := b.lastOutcomes[0].Title; got != "Proper Generated Title" {
+		t.Errorf("outcome[0].Title = %q, want Proper Generated Title", got)
 	}
 }
 

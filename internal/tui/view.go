@@ -345,7 +345,11 @@ func (m Model) renderNavigator(width, height int) string {
 	if len(rows) == 0 {
 		msg := "No spaces match this filter."
 		if len(m.spaces) == 0 {
-			msg = "No running spaces. Press n to create one."
+			if m.spacesLoading {
+				msg = "Loading spaces…"
+			} else {
+				msg = "No running spaces. Press n to create one."
+			}
 		}
 		b.WriteString(fitCellWidth(styleMuted.Render("  "+truncate(msg, width-2)), width))
 		b.WriteString("\n")

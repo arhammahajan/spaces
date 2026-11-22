@@ -307,6 +307,38 @@ func TestViewAgentsEmptyAndLoading(t *testing.T) {
 	}
 }
 
+func TestViewInitialLoadingStates(t *testing.T) {
+	cases := []struct {
+		name        string
+		mode        Mode
+		wantLoading string
+		wantEmpty   string
+	}{
+		{name: "spaces", mode: ModeNavigate, wantLoading: "Loading spaces", wantEmpty: "No running spaces"},
+		{name: "inbox", mode: ModeInbox, wantLoading: "Loading agents", wantEmpty: "No running agents"},
+		{name: "tabs", mode: ModeTabs, wantLoading: "Loading tabs", wantEmpty: "No running workspace"},
+		{name: "worktrees", mode: ModeWorktrees, wantLoading: "Loading git worktrees", wantEmpty: "No git worktrees"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := New(&fakeBackend{}, Options{InitialMode: tc.mode})
+			m.width, m.height = 100, 24
+			v := m.View()
+			if !strings.Contains(v, tc.wantLoading) {
+				t.Fatalf("%s initial view should show %q, got:\n%s", tc.name, tc.wantLoading, v)
+			}
+			if strings.Contains(v, tc.wantEmpty) {
+				t.Fatalf("%s initial view should not flash %q:\n%s", tc.name, tc.wantEmpty, v)
+			}
+			u, _ := m.Update(spacesMsg{seq: m.spacesSeq})
+			m = u.(Model)
+			if v2 := m.View(); !strings.Contains(v2, tc.wantEmpty) {
+				t.Fatalf("%s post-load empty view should show %q, got:\n%s", tc.name, tc.wantEmpty, v2)
+			}
+		})
+	}
+}
+
 func TestViewToastAndHints(t *testing.T) {
 	m := viewModel()
 	m.toast = "boom happened"
