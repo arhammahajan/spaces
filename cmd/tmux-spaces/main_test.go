@@ -3,8 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -221,10 +222,45 @@ func TestCLIThreeLayerStatusAndHarnessResolution(t *testing.T) {
 	}
 }
 
+func TestMain(m *testing.M) {
+	tmp, err := os.MkdirTemp("", "tmux-spaces-cmd-test-*")
+	if err == nil {
+		defer os.RemoveAll(tmp)
+		model.ConversationHomeDirFn = func() string { return tmp }
+		model.ConversationOverlayPathFn = func() string { return filepath.Join(tmp, "conversations-overlay.json") }
+		model.ResetConversationStoreCache()
+	}
+	os.Exit(m.Run())
+}
+
 func TestMultipleAntigravityPanesResolveDistinctTitles(t *testing.T) {
+	tmpHome := t.TempDir()
+	agyDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(agyDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agyDir, "conv-alpha.json"), []byte(
+		`{"id":"conv-alpha","title":"Alpha Conversation","cwd":"/repo","updated_at":"2026-11-22T10:00:00Z","messages":[{"role":"user","content":"alpha"}]}`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agyDir, "conv-beta.json"), []byte(
+		`{"id":"conv-beta","title":"Beta Conversation","cwd":"/repo","updated_at":"2026-11-22T11:00:00Z","messages":[{"role":"user","content":"beta"}]}`,
+	), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	origHome := model.ConversationHomeDirFn
+	origOverlay := model.ConversationOverlayPathFn
 	origExec := model.ExecFn
 	origProcAgy := resurrect.ProcAntigravitySessionFunc
+	model.ConversationHomeDirFn = func() string { return tmpHome }
+	model.ConversationOverlayPathFn = func() string { return filepath.Join(tmpHome, "overlay.json") }
+	model.ResetConversationStoreCache()
 	defer func() {
+		model.ConversationHomeDirFn = origHome
+		model.ConversationOverlayPathFn = origOverlay
+		model.ResetConversationStoreCache()
 		model.ExecFn = origExec
 		resurrect.ProcAntigravitySessionFunc = origProcAgy
 	}()
@@ -240,25 +276,7 @@ func TestMultipleAntigravityPanesResolveDistinctTitles(t *testing.T) {
 		}
 	}
 
-	var gotQueries []model.TitleQuery
 	model.ExecFn = func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if len(args) >= 2 && args[0] == "__space-hooks" && args[1] == "--titles" {
-			if err := json.Unmarshal([]byte(args[2]), &gotQueries); err != nil {
-				return nil, err
-			}
-			titles := map[string]string{}
-			for _, q := range gotQueries {
-				switch q.SessionID {
-				case "conv-alpha":
-					titles[q.Key] = "Alpha Conversation"
-				case "conv-beta":
-					titles[q.Key] = "Beta Conversation"
-				case "":
-					titles[q.Key] = "Fallback Newest"
-				}
-			}
-			return json.Marshal(map[string]any{"ok": true, "titles": titles})
-		}
 		return []byte(`{"ok":true,"version":1,"now_ms":0,"panes":{}}`), nil
 	}
 
@@ -306,9 +324,6 @@ func TestMultipleAntigravityPanesResolveDistinctTitles(t *testing.T) {
 	}
 	if got := spaces[0].Panes[2].ConversationTitle; got != "" {
 		t.Errorf("pane %%3 ConversationTitle = %q, want empty (no shared fallback when multiple agy panes in same CWD)", got)
-	}
-	if len(gotQueries) != 2 {
-		t.Fatalf("expected 2 title queries (skipping unresolved %%3), got %d: %+v", len(gotQueries), gotQueries)
 	}
 
 	// Switching conversation in pane %1 within screenCaptureInterval must invalidate cache.

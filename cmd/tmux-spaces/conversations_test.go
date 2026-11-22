@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -75,22 +77,18 @@ func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
 }
 
 func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T) {
-	origExec := model.ExecFn
-	defer func() { model.ExecFn = origExec }()
-	t.Setenv("SPACES_BIN", "/usr/local/bin/spaces")
-
-	var recorded []map[string]any
-	model.ExecFn = func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if len(args) >= 3 && args[0] == "__space-conversations" && args[1] == "--record" {
-			var m map[string]any
-			if err := json.Unmarshal([]byte(args[2]), &m); err != nil {
-				return nil, err
-			}
-			recorded = append(recorded, m)
-			return []byte(`{"ok":true}`), nil
-		}
-		return []byte(`{"ok":true}`), nil
-	}
+	tmpHome := t.TempDir()
+	overlayPath := filepath.Join(tmpHome, "conversations-overlay.json")
+	origHome := model.ConversationHomeDirFn
+	origOverlay := model.ConversationOverlayPathFn
+	model.ConversationHomeDirFn = func() string { return tmpHome }
+	model.ConversationOverlayPathFn = func() string { return overlayPath }
+	model.ResetConversationStoreCache()
+	defer func() {
+		model.ConversationHomeDirFn = origHome
+		model.ConversationOverlayPathFn = origOverlay
+		model.ResetConversationStoreCache()
+	}()
 
 	var newWindows [][]string
 	var switchedTo []string
@@ -161,8 +159,22 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 	if len(switchedTo) != 0 {
 		t.Errorf("should not switch-client when opening in current session alpha, got %v", switchedTo)
 	}
-	if len(recorded) != 1 || recorded[0]["session_id"] != "conv-id-1" || recorded[0]["space"] != "alpha" {
-		t.Errorf("unexpected recorded open payload: %+v", recorded)
+	rawOverlay, err := os.ReadFile(overlayPath)
+	if err != nil {
+		t.Fatalf("expected native overlay file at %s: %v", overlayPath, err)
+	}
+	var overlay struct {
+		Entries map[string]struct {
+			SessionID string `json:"session_id"`
+			Space     string `json:"space"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(rawOverlay, &overlay); err != nil {
+		t.Fatalf("unmarshal overlay: %v", err)
+	}
+	rec, ok := overlay.Entries["claude:conv-id-1"]
+	if !ok || rec.SessionID != "conv-id-1" || rec.Space != "alpha" {
+		t.Errorf("unexpected recorded overlay payload: %s", string(rawOverlay))
 	}
 
 	// When CurrentSession is unavailable, falls back to conv.Space ("beta"), skips missing CWD, and switches to beta.
