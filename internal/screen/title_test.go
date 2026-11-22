@@ -72,4 +72,17 @@ func TestExtractTitleFromViewports(t *testing.T) {
 			t.Errorf("claude prompt title = %q", d.Title)
 		}
 	})
+
+	t.Run("deepseek prompt fallback", func(t *testing.T) {
+		viewport := "❯ Add deepseek screen manifest rules\n" +
+			"Done.\n" +
+			"───────────────\n" +
+			"❯\n" +
+			"───────────────\n" +
+			"deepseek-reasoner · ~/dev/spaces · /help\n"
+		d := Detect("dsh-tui", viewport, "")
+		if d.Title != "Add deepseek screen manifest rules" {
+			t.Errorf("deepseek prompt title = %q", d.Title)
+		}
+	})
 }

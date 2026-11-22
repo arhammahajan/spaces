@@ -22,14 +22,14 @@ func bundleManifests(t *testing.T) manifestFile {
 
 func TestBundledManifestsLoad(t *testing.T) {
 	file := bundleManifests(t)
-	if len(file.Manifests) != 22 {
-		t.Fatalf("got %d manifests, want 22", len(file.Manifests))
+	if len(file.Manifests) != 23 {
+		t.Fatalf("got %d manifests, want 23", len(file.Manifests))
 	}
 	eng := engine()
-	if len(eng.manifests) != 22 {
-		t.Fatalf("engine has %d manifests, want 22", len(eng.manifests))
+	if len(eng.manifests) != 23 {
+		t.Fatalf("engine has %d manifests, want 23", len(eng.manifests))
 	}
-	for _, id := range []string{"claude", "agy", "cursor", "codex", "opencode", "copilot", "gemini", "amp"} {
+	for _, id := range []string{"agy", "claude", "codex", "cursor", "deepseek", "kilo", "kimi", "muse", "opencode", "copilot", "gemini", "amp"} {
 		if eng.lookup[id] == nil {
 			t.Errorf("missing manifest %q", id)
 		}
@@ -46,6 +46,12 @@ func TestBundledManifestsLoad(t *testing.T) {
 	}
 	if engine().manifest("github-copilot") != engine().manifest("copilot") {
 		t.Error("github-copilot should resolve to copilot")
+	}
+	if engine().manifest("dsh") != engine().manifest("deepseek") {
+		t.Error("dsh should resolve to deepseek")
+	}
+	if engine().manifest("dsh-tui") != engine().manifest("deepseek") {
+		t.Error("dsh-tui should resolve to deepseek")
 	}
 }
 
@@ -175,12 +181,12 @@ func TestCanonicalApp(t *testing.T) {
 }
 
 func TestAgentIsKnown(t *testing.T) {
-	for _, app := range []string{"claude", "claude-code", "cursor-agent", "gemini", "codex", "opencode", "amp", "antigravity"} {
+	for _, app := range []string{"claude", "claude-code", "cursor-agent", "deepseek", "dsh", "dsh-tui", "gemini", "codex", "opencode", "amp", "antigravity", "kilo", "kimi", "muse"} {
 		if !AgentIsKnown(app) {
 			t.Errorf("AgentIsKnown(%q) = false", app)
 		}
 	}
-	for _, app := range []string{"deepseek", "dsh-tui", "some-unknown-app", ""} {
+	for _, app := range []string{"some-unknown-app", ""} {
 		if AgentIsKnown(app) {
 			t.Errorf("AgentIsKnown(%q) = true, want false", app)
 		}
@@ -629,5 +635,168 @@ func TestAntigravityIdlePromptAndWorkingPriority(t *testing.T) {
 	dw := Detect("antigravity", workingViewport, "")
 	if dw.State != StateWorking || !dw.VisibleWorking {
 		t.Fatalf("working antigravity viewport: got %+v, want StateWorking + VisibleWorking", dw)
+	}
+}
+
+func TestNineProviderManifestsBlockedWorkingIdle(t *testing.T) {
+	type sample struct {
+		screen   string
+		oscTitle string
+	}
+	cases := []struct {
+		id      string
+		alias   string
+		blocked sample
+		working sample
+		idle    sample
+	}{
+		{
+			id:    "agy",
+			alias: "antigravity",
+			blocked: sample{
+				screen: "Requesting permission for: rm -rf tmp\n↑↓ navigate · Tab amend · Enter confirm\n",
+			},
+			working: sample{
+				screen: "⠋ Thinking...\n───────────────\n>\n─── esc to cancel ───\n",
+			},
+			idle: sample{
+				screen: "Done.\n───────────────\n>\n───────────────\n? for shortcuts · auto\n",
+			},
+		},
+		{
+			id:    "claude",
+			alias: "claude-code",
+			blocked: sample{
+				screen: "───────────────\nAllow Bash command?\nEnter to confirm · Esc to cancel\n",
+			},
+			working: sample{
+				screen: "✽ Working… (12s)\n───────────────\n❯\n───────────────\n  ⏵ auto mode · esc to interrupt\n",
+			},
+			idle: sample{
+				screen: "Done.\n───────────────\n❯\n───────────────\n",
+			},
+		},
+		{
+			id:    "codex",
+			alias: "codex",
+			blocked: sample{
+				screen: "› run tests\n• Running command\npress enter to confirm or esc to cancel\n",
+			},
+			working: sample{
+				screen:   "› run tests\n",
+				oscTitle: "⠋ codex",
+			},
+			idle: sample{
+				screen:   "› \n",
+				oscTitle: "codex",
+			},
+		},
+		{
+			id:    "cursor",
+			alias: "cursor-agent",
+			blocked: sample{
+				screen: "Waiting for approval to run this command?\n  Run (once) (y)\n  Skip (esc or n)\n→ Add a follow-up\n/ commands · @ files\n",
+			},
+			working: sample{
+				screen: "⠋ Thinking about changes\n→ Add a follow-up\n/ commands · @ files · ctrl+c to stop\n",
+			},
+			idle: sample{
+				screen: "Done editing file.\n→ Add a follow-up\n/ commands · @ files · ! shell\n",
+			},
+		},
+		{
+			id:    "deepseek",
+			alias: "dsh-tui",
+			blocked: sample{
+				screen: "Permission required to run shell command\nAllow once · Deny\nEnter to confirm · Esc to cancel\n❯\ndeepseek-reasoner · /help\n",
+			},
+			working: sample{
+				screen: "⠋ Reasoning through the diff...\n❯\nesc to interrupt · deepseek-reasoner\n",
+			},
+			idle: sample{
+				screen: "Completed.\n───────────────\n❯\n───────────────\ndeepseek-reasoner · ~/repo · /help for commands\n",
+			},
+		},
+		{
+			id:    "kilo",
+			alias: "kilo-code",
+			blocked: sample{
+				screen: "△ Permission required\n↑↓ select · enter confirm · esc dismiss\n┃  Ask anything...\n╹▀▀▀▀▀▀\n",
+			},
+			working: sample{
+				screen: "┃  Ask anything...\n╹▀▀▀▀▀▀\n  esc interrupt · tab agents\n",
+			},
+			idle: sample{
+				screen: "   ┃\n   ┃  Ask anything...\n   ┃  Build  claude-sonnet · medium\n   ╹▀▀▀▀▀▀\n   tab agents  ctrl+p commands\n",
+			},
+		},
+		{
+			id:    "kimi",
+			alias: "kimi-code",
+			blocked: sample{
+				screen: "Run this command?\n▶ Approve once\n  Reject\n1/2 choose · ↵ confirm\n✨\nkimi-k2 · context: 12%\n",
+			},
+			working: sample{
+				screen: "⠙ thinking...\n✨\nkimi-k2 thinking [1 agent running]\n",
+			},
+			idle: sample{
+				screen: "All set.\n───────────────\n✨\n───────────────\nkimi-k2.5 · context: 12% · ctrl-x: mode · /help\n",
+			},
+		},
+		{
+			id:    "muse",
+			alias: "muse-code",
+			blocked: sample{
+				screen: "Allow once\nAllow for this session\n⟩\n",
+			},
+			working: sample{
+				screen: "Working on task\n⟩\nesc to interrupt\n",
+			},
+			idle: sample{
+				screen: "Done.\n⟩\nmuse-spark · high · ~/repo · Summary\n",
+			},
+		},
+		{
+			id:    "opencode",
+			alias: "open-code",
+			blocked: sample{
+				screen: "△ Permission required\n↑↓ select · enter confirm · esc dismiss\n┃  Ask anything...\n╹▀▀▀▀▀▀\n",
+			},
+			working: sample{
+				screen: "■■■■■■ working\n┃  Ask anything...\n╹▀▀▀▀▀▀\n  esc to interrupt · ctrl+p commands\n",
+			},
+			idle: sample{
+				screen: "   ┃\n   ┃  Ask anything...\n   ┃  Build  gpt-5.4 OpenAI · high\n   ╹▀▀▀▀▀▀\n   tab agents  ctrl+p commands\n",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.id, func(t *testing.T) {
+			if !HasManifest(tc.id) {
+				t.Fatalf("HasManifest(%q) = false, want true", tc.id)
+			}
+			if !HasManifest(tc.alias) {
+				t.Fatalf("HasManifest(%q) = false, want true", tc.alias)
+			}
+			if !AgentIsKnown(tc.id) {
+				t.Fatalf("AgentIsKnown(%q) = false, want true", tc.id)
+			}
+
+			db := Detect(tc.alias, tc.blocked.screen, tc.blocked.oscTitle)
+			if db.State != StateBlocked || !db.VisibleBlocker {
+				t.Errorf("%s blocked: got %+v, want StateBlocked + VisibleBlocker", tc.id, db)
+			}
+
+			dw := Detect(tc.alias, tc.working.screen, tc.working.oscTitle)
+			if dw.State != StateWorking || !dw.VisibleWorking {
+				t.Errorf("%s working: got %+v, want StateWorking + VisibleWorking", tc.id, dw)
+			}
+
+			di := Detect(tc.alias, tc.idle.screen, tc.idle.oscTitle)
+			if di.State != StateIdle || !di.VisibleIdle {
+				t.Errorf("%s idle: got %+v, want StateIdle + VisibleIdle", tc.id, di)
+			}
+		})
 	}
 }

@@ -7,6 +7,11 @@ import (
 
 // ExtractTitle parses a captured pane viewport for agent-specific header,
 // tab-bar, status-line, or prompt lines showing the conversation/session title.
+//
+// This function is the low-level fallback used when calling screen.Detect
+// directly. Callers with access to internal/agent should prefer
+// Registry.ExtractTitle / plugin TitleExtractor, which is the source of truth
+// for per-agent title extraction.
 func ExtractTitle(app, viewport string) string {
 	if strings.TrimSpace(viewport) == "" {
 		return ""
