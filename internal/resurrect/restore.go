@@ -2,17 +2,12 @@ package resurrect
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/arhammahajan/spaces/internal/agent"
-	"github.com/arhammahajan/spaces/internal/model"
 )
 
 // TmuxRestorer is the minimal tmux mutation surface needed to recreate a
@@ -46,12 +41,16 @@ type RestoreOptions struct {
 	SelfPath string
 	// Switch switches/attaches the client to the restored space when true.
 	Switch bool
-	// SpacesBinary returns the argv prefix for zj helpers (defaults to model.SpacesBinary).
+	// HarnessBinary is the optional path/name of the `harness` CLI used to
+	// launch profiled agents (defaults to "harness").
+	HarnessBinary string
+	// SpacesBinary is deprecated and unused; kept for backwards compatibility.
 	SpacesBinary func() []string
 	// ResolveSession resolves an unclaimed session/conversation ID for
 	// (agent, cwd, profile, title) while excluding already-claimed IDs.
 	// Returns (id, ok) where ok=false means resolution was unavailable.
-	// Defaults to invoking `spaces resume-command <agent> ...`.
+	// Defaults to querying native plugin conversation stores via
+	// agent.DefaultRegistry().FindUnclaimedConversation.
 	ResolveSession agent.SessionLookupFunc
 	// ResolveAntigravity resolves an unclaimed Antigravity conversation ID for
 	// (cwd, profile, title) while excluding already-claimed IDs. Kept for
@@ -81,14 +80,29 @@ var safeRestoreCommands = map[string]bool{
 }
 
 // BuildPaneCommand decides what command (if any) to run when recreating pane p:
-//   - AI agent with profile -> `tmux-spaces __shim <agent> spaces __shim-profile <agent>/<profile>`
-//   - AI agent (with or without explicit session ID) ->
-//     `tmux-spaces __shim <agent> spaces __resume-wrap <b64(cmd)> [sessionID]`
-//     so spaceresume attaches the exact conversation (or discovers the latest in CWD).
+//   - AI agent -> `tmux-spaces __shim [--profile <profile>] <agent> <cmd...> [native resume args...]`
 //   - Safe interactive TUI (nvim, lazygit, btop, ...) -> restarts the command in CWD.
 //   - Plain shell or arbitrary command -> returns nil (clean login shell in CWD).
 func BuildPaneCommand(p PaneSnapshot, opts RestoreOptions) []string {
 	return buildPaneCommand(p, opts, false)
+}
+
+func appendResumeArgs(cmd []string, agentName, sessionID string, skipResume bool) []string {
+	out := append([]string(nil), cmd...)
+	sid := strings.TrimSpace(sessionID)
+	if skipResume || sid == "" {
+		return out
+	}
+	if plugin, ok := agent.DefaultRegistry().ResolveRuntime(agentName); ok {
+		if plugin.SessionResolver().ExtractSessionIDFromArgs(out) != "" {
+			return out
+		}
+	}
+	resumeArgs := agent.DefaultRegistry().ResumeArgs(agentName, sid)
+	if len(resumeArgs) == 0 {
+		return out
+	}
+	return append(out, resumeArgs...)
 }
 
 func buildPaneCommand(p PaneSnapshot, opts RestoreOptions, skipResume bool) []string {
@@ -96,42 +110,47 @@ func buildPaneCommand(p PaneSnapshot, opts RestoreOptions, skipResume bool) []st
 	if self == "" {
 		self = "tmux-spaces"
 	}
-	zjFn := opts.SpacesBinary
-	if zjFn == nil {
-		zjFn = model.SpacesBinary
-	}
 
 	if p.Agent != "" {
-		zj := zjFn()
-		if skipResume {
-			if len(p.FullCommand) > 0 && isHarnessLauncher(p.FullCommand) {
-				return append([]string{self, "__shim", p.Agent}, p.FullCommand...)
-			}
-			if p.Profile != "" {
-				cmd := append([]string{self, "__shim", "--profile", p.Profile, p.Agent}, zj...)
-				return append(cmd, "__shim-profile", p.Agent+"/"+p.Profile)
-			}
-			if len(p.FullCommand) > 0 && CanonicalAgent(p.FullCommand[0]) == p.Agent {
-				return append([]string{self, "__shim", p.Agent}, p.FullCommand...)
-			}
-			return []string{self, "__shim", p.Agent, p.Agent}
+		var resumeArgs []string
+		if !skipResume && strings.TrimSpace(p.SessionID) != "" {
+			resumeArgs = agent.DefaultRegistry().ResumeArgs(p.Agent, p.SessionID)
 		}
-		baseCmd := p.Agent
+		harnessBin := opts.HarnessBinary
+		if harnessBin == "" {
+			harnessBin = "harness"
+		}
+
+		// Case 1: Harness launcher (e.g. `harness agy profile saucerf166`).
 		if len(p.FullCommand) > 0 && isHarnessLauncher(p.FullCommand) {
-			baseCmd = shlexJoin(p.FullCommand)
-		} else if p.Profile != "" {
-			shimProfile := append(append([]string(nil), zj...), "__shim-profile", p.Agent+"/"+p.Profile)
-			baseCmd = shlexJoin(shimProfile)
-		} else if len(p.FullCommand) > 0 && CanonicalAgent(p.FullCommand[0]) == p.Agent {
-			baseCmd = shlexJoin(p.FullCommand)
+			cmdWithResume := appendResumeArgs(p.FullCommand, p.Agent, p.SessionID, skipResume)
+			cmd := []string{self, "__shim"}
+			if p.Profile != "" {
+				cmd = append(cmd, "--profile", p.Profile)
+			}
+			cmd = append(cmd, p.Agent)
+			return append(cmd, cmdWithResume...)
 		}
-		encoded := base64.StdEncoding.EncodeToString([]byte(baseCmd))
-		cmd := append([]string{self, "__shim", p.Agent}, zj...)
-		cmd = append(cmd, "__resume-wrap", encoded)
-		if p.SessionID != "" {
-			cmd = append(cmd, p.SessionID)
+
+		// Case 2: Profiled agent pane.
+		if p.Profile != "" {
+			cmd := []string{self, "__shim", "--profile", p.Profile, p.Agent, harnessBin, p.Agent, "profile", p.Profile}
+			return append(cmd, resumeArgs...)
 		}
-		return cmd
+
+		// Case 3: Direct agent invocation captured in FullCommand.
+		if len(p.FullCommand) > 0 && CanonicalAgent(p.FullCommand[0]) == p.Agent {
+			cmdWithResume := appendResumeArgs(p.FullCommand, p.Agent, p.SessionID, skipResume)
+			return append([]string{self, "__shim", p.Agent}, cmdWithResume...)
+		}
+
+		// Case 4: Fallback to plugin binary name.
+		bin := agent.DefaultRegistry().BinaryName(p.Agent)
+		if bin == "" {
+			bin = p.Agent
+		}
+		cmd := []string{self, "__shim", p.Agent, bin}
+		return append(cmd, resumeArgs...)
 	}
 
 	// Non-agent panes: only restore allowlisted interactive TUIs.
@@ -376,30 +395,6 @@ func restoreWindowWorktreeOptions(ctx context.Context, r tmuxRichRestorer, winTa
 	}
 }
 
-func shlexJoin(argv []string) string {
-	quoted := make([]string, len(argv))
-	for i, a := range argv {
-		if a == "" {
-			quoted[i] = "''"
-			continue
-		}
-		safe := true
-		for _, r := range a {
-			if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
-				r == '_' || r == '-' || r == '.' || r == '/' || r == ':' || r == '=' || r == '@') {
-				safe = false
-				break
-			}
-		}
-		if safe {
-			quoted[i] = a
-		} else {
-			quoted[i] = "'" + strings.ReplaceAll(a, "'", "'\"'\"'") + "'"
-		}
-	}
-	return strings.Join(quoted, " ")
-}
-
 func paneResolveKey(wi, pi int) string {
 	return fmt.Sprintf("%d:%d", wi, pi)
 }
@@ -451,7 +446,7 @@ func resolveAgentSessions(ctx context.Context, snap SpaceSnapshot, opts RestoreO
 		if agentID == "antigravity" && opts.ResolveAntigravity != nil {
 			return opts.ResolveAntigravity(ctx, cwd, profile, title, exclude)
 		}
-		return defaultResolveAgentSession(ctx, opts.SpacesBinary, agentID, cwd, profile, title, exclude)
+		return defaultResolveAgentSession(ctx, agentID, cwd, profile, title, exclude)
 	}
 
 	for _, agentID := range agentOrder {
@@ -472,39 +467,6 @@ func resolveAgentSessions(ctx context.Context, snap SpaceSnapshot, opts RestoreO
 	return assigned, skipResume
 }
 
-func defaultResolveAgentSession(ctx context.Context, zjFn func() []string, agentID, cwd, profile, title string, exclude map[string]bool) (string, bool) {
-	if zjFn == nil {
-		zjFn = model.SpacesBinary
-	}
-	zj := zjFn()
-	if len(zj) == 0 || agentID == "" {
-		return "", false
-	}
-	args := append([]string(nil), zj[1:]...)
-	args = append(args, "resume-command", agentID, cwd)
-	if profile != "" {
-		args = append(args, "--profile", profile)
-	}
-	if title != "" {
-		args = append(args, "--title", title)
-	}
-	if len(exclude) > 0 {
-		ids := make([]string, 0, len(exclude))
-		for id := range exclude {
-			ids = append(ids, id)
-		}
-		sort.Strings(ids)
-		args = append(args, "--exclude", strings.Join(ids, ","))
-	}
-	out, err := exec.CommandContext(ctx, zj[0], args...).Output()
-	if err != nil {
-		return "", false
-	}
-	var res struct {
-		SessionID string `json:"session_id"`
-	}
-	if err := json.Unmarshal(out, &res); err != nil {
-		return "", false
-	}
-	return res.SessionID, true
+func defaultResolveAgentSession(ctx context.Context, agentID, cwd, profile, title string, exclude map[string]bool) (string, bool) {
+	return agent.DefaultRegistry().FindUnclaimedConversation(ctx, "", agentID, cwd, profile, title, exclude)
 }

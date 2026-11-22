@@ -2,7 +2,6 @@ package resurrect
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -154,35 +153,56 @@ func (f *fakeRestorer) SwitchToSpace(_ context.Context, session string) error {
 
 func TestBuildPaneCommandAndRestore(t *testing.T) {
 	opts := RestoreOptions{
-		SelfPath:     "/bin/tmux-spaces",
-		Switch:       true,
-		SpacesBinary: func() []string { return []string{"spaces"} },
+		SelfPath: "/bin/tmux-spaces",
+		Switch:   true,
 	}
 
-	// 1. Agent with explicit session_id uses __resume-wrap with b64 command + session_id.
+	// 1. Agent with explicit session_id uses native resume flags.
 	cmd := BuildPaneCommand(PaneSnapshot{Agent: "claude", SessionID: "s-42"}, opts)
-	wantB64 := base64.StdEncoding.EncodeToString([]byte("claude"))
-	if strings.Join(cmd, " ") != "/bin/tmux-spaces __shim claude spaces __resume-wrap "+wantB64+" s-42" {
+	if strings.Join(cmd, " ") != "/bin/tmux-spaces __shim claude claude --resume s-42" {
 		t.Fatalf("agent resume cmd = %v", cmd)
 	}
+	// 1b. When skipResume is true, no resume args are appended.
+	skipCmd := buildPaneCommand(PaneSnapshot{Agent: "claude", SessionID: "s-42"}, opts, true)
+	if strings.Join(skipCmd, " ") != "/bin/tmux-spaces __shim claude claude" {
+		t.Fatalf("skipResume cmd = %v", skipCmd)
+	}
 
-	// 2. Agent with profile wraps __shim-profile in __resume-wrap so it also resumes.
+	// 2. Agent with profile launches directly via `harness <agent> profile <profile>`.
 	profCmd := BuildPaneCommand(PaneSnapshot{Agent: "codex", Profile: "codex-work"}, opts)
-	wantProfB64 := base64.StdEncoding.EncodeToString([]byte("spaces __shim-profile codex/codex-work"))
-	if strings.Join(profCmd, " ") != "/bin/tmux-spaces __shim codex spaces __resume-wrap "+wantProfB64 {
+	if strings.Join(profCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex harness codex profile codex-work" {
 		t.Fatalf("profile resume cmd = %v", profCmd)
+	}
+	profResumeCmd := BuildPaneCommand(PaneSnapshot{Agent: "codex", Profile: "codex-work", SessionID: "c-9"}, opts)
+	if strings.Join(profResumeCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex harness codex profile codex-work resume c-9" {
+		t.Fatalf("profile resume cmd with session = %v", profResumeCmd)
 	}
 
 	// 2b. Harness profile launcher (e.g. `harness agy profile saucerf166`) is preserved
-	// even when @spaces_profile is also captured on the pane.
+	// with optional --profile and native resume flag without duplication.
 	agyCmd := BuildPaneCommand(PaneSnapshot{
 		Agent:       "antigravity",
 		Profile:     "saucerf166",
 		FullCommand: []string{"harness", "agy", "profile", "saucerf166"},
 	}, opts)
-	wantAgyB64 := base64.StdEncoding.EncodeToString([]byte("harness agy profile saucerf166"))
-	if strings.Join(agyCmd, " ") != "/bin/tmux-spaces __shim antigravity spaces __resume-wrap "+wantAgyB64 {
+	if strings.Join(agyCmd, " ") != "/bin/tmux-spaces __shim --profile saucerf166 antigravity harness agy profile saucerf166" {
 		t.Fatalf("harness antigravity cmd = %v", agyCmd)
+	}
+	agyResumeCmd := BuildPaneCommand(PaneSnapshot{
+		Agent:       "antigravity",
+		SessionID:   "agy-1",
+		FullCommand: []string{"harness", "agy", "profile", "saucerf166"},
+	}, opts)
+	if strings.Join(agyResumeCmd, " ") != "/bin/tmux-spaces __shim antigravity harness agy profile saucerf166 --conversation agy-1" {
+		t.Fatalf("harness antigravity resume cmd = %v", agyResumeCmd)
+	}
+	agyDedupCmd := BuildPaneCommand(PaneSnapshot{
+		Agent:       "antigravity",
+		SessionID:   "agy-1",
+		FullCommand: []string{"harness", "agy", "profile", "saucerf166", "--conversation", "agy-1"},
+	}, opts)
+	if strings.Join(agyDedupCmd, " ") != "/bin/tmux-spaces __shim antigravity harness agy profile saucerf166 --conversation agy-1" {
+		t.Fatalf("harness antigravity dedup cmd = %v", agyDedupCmd)
 	}
 
 	// 3. Safe TUI restarts; unsafe command does NOT restart.
@@ -222,7 +242,7 @@ func TestBuildPaneCommandAndRestore(t *testing.T) {
 	}
 	joined := strings.Join(fr.ops, "\n")
 	for _, want := range []string{
-		"new-session:work:/repo:agent:/bin/tmux-spaces __shim claude spaces __resume-wrap " + wantB64 + " s-42",
+		"new-session:work:/repo:agent:/bin/tmux-spaces __shim claude claude --resume s-42",
 		"split:work:1:/repo/sub:nvim x.go",
 		"layout:work:1:lay1",
 		"select-pane:work:1.1",
@@ -291,8 +311,7 @@ func TestRestoreMultipleAntigravityPanesDistinctConversations(t *testing.T) {
 
 	var calls []string
 	opts := RestoreOptions{
-		SelfPath:     "/bin/tmux-spaces",
-		SpacesBinary: func() []string { return []string{"spaces"} },
+		SelfPath: "/bin/tmux-spaces",
 		ResolveAntigravity: func(_ context.Context, cwd, profile, title string, exclude map[string]bool) (string, bool) {
 			calls = append(calls, cwd+"|"+profile+"|"+title)
 			if title != "" {
@@ -324,7 +343,7 @@ func TestRestoreMultipleAntigravityPanesDistinctConversations(t *testing.T) {
 					{Index: 1, CWD: "/repo", Agent: "antigravity", FullCommand: []string{"harness", "agy", "profile", "saucerf166", "--conversation", "conv-older"}},
 					// Pane 2 has no SessionID -> must resolve conv-newest (excluding conv-older).
 					{Index: 2, CWD: "/repo", Agent: "antigravity", FullCommand: []string{"harness", "agy", "profile", "saucerf166"}},
-					// Pane 3 has no SessionID and all convs are claimed -> must NOT __resume-wrap.
+					// Pane 3 has no SessionID and all convs are claimed -> must NOT append resume args.
 					{Index: 3, CWD: "/repo", Agent: "antigravity", FullCommand: []string{"harness", "agy", "profile", "saucerf166"}},
 				},
 			},
@@ -337,15 +356,18 @@ func TestRestoreMultipleAntigravityPanesDistinctConversations(t *testing.T) {
 	if len(calls) != 2 {
 		t.Fatalf("resolver calls = %v, want 2", calls)
 	}
-	wantAgyB64 := base64.StdEncoding.EncodeToString([]byte("harness agy profile saucerf166"))
 	joined := strings.Join(fr.ops, "\n")
-	if !strings.Contains(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity spaces __resume-wrap "+wantAgyB64+" conv-newest") {
+	if !strings.Contains(joined, "new-session:work:/repo:agy:/bin/tmux-spaces __shim antigravity harness agy profile saucerf166 --conversation conv-older") {
+		t.Fatalf("pane 1 did not preserve conv-older:\n%s", joined)
+	}
+	if !strings.Contains(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity harness agy profile saucerf166 --conversation conv-newest") {
 		t.Fatalf("pane 2 did not get distinct conv-newest:\n%s", joined)
 	}
-	if !strings.Contains(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity harness agy profile saucerf166") {
+	if !strings.Contains(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity harness agy profile saucerf166\n") &&
+		!strings.HasSuffix(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity harness agy profile saucerf166") {
 		t.Fatalf("pane 3 did not skip resume when all conversations claimed:\n%s", joined)
 	}
-	if strings.Count(joined, "__resume-wrap "+wantAgyB64+" conv-newest") != 1 {
+	if strings.Count(joined, "--conversation conv-newest") != 1 {
 		t.Fatalf("conv-newest resumed more than once:\n%s", joined)
 	}
 }
@@ -358,8 +380,7 @@ func TestRestoreMultipleNonAntigravityPanesDistinctConversations(t *testing.T) {
 
 	var calls []string
 	opts := RestoreOptions{
-		SelfPath:     "/bin/tmux-spaces",
-		SpacesBinary: func() []string { return []string{"spaces"} },
+		SelfPath: "/bin/tmux-spaces",
 		ResolveSession: func(_ context.Context, agentID, cwd, profile, title string, exclude map[string]bool) (string, bool) {
 			calls = append(calls, agentID+"|"+cwd)
 			for _, id := range pools[agentID] {
@@ -403,14 +424,14 @@ func TestRestoreMultipleNonAntigravityPanesDistinctConversations(t *testing.T) {
 	if len(calls) != 4 {
 		t.Fatalf("resolver calls = %v, want 4", calls)
 	}
-	wantClaudeB64 := base64.StdEncoding.EncodeToString([]byte("claude"))
-	wantCodexB64 := base64.StdEncoding.EncodeToString([]byte("codex"))
 	joined := strings.Join(fr.ops, "\n")
 
 	for _, want := range []string{
-		"split:multi-agent:1:/repo:/bin/tmux-spaces __shim claude spaces __resume-wrap " + wantClaudeB64 + " claude-newest",
+		"new-session:multi-agent:/repo:claude:/bin/tmux-spaces __shim claude claude --resume claude-older",
+		"split:multi-agent:1:/repo:/bin/tmux-spaces __shim claude claude --resume claude-newest",
 		"split:multi-agent:1:/repo:/bin/tmux-spaces __shim claude claude",
-		"split:multi-agent:2:/repo:/bin/tmux-spaces __shim codex spaces __resume-wrap " + wantCodexB64 + " codex-newest",
+		"new-window:multi-agent:/repo:codex:/bin/tmux-spaces __shim codex codex resume codex-older",
+		"split:multi-agent:2:/repo:/bin/tmux-spaces __shim codex codex resume codex-newest",
 		"split:multi-agent:2:/repo:/bin/tmux-spaces __shim codex codex",
 	} {
 		if !strings.Contains(joined, want) {
