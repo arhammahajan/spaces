@@ -513,8 +513,6 @@ func (m *Model) usageHandleLeftRight(delta int) {
 		if m.usageDayIdx >= len(days) {
 			m.usageDayIdx = len(days) - 1
 		}
-	case usageTabPlan:
-		m.usagePlanWindow = (m.usagePlanWindow + 1) % 2
 	}
 }
 
@@ -796,15 +794,6 @@ func (m Model) renderUsageControls(width int) []string {
 				tokPart = styleAccent.Render("Tokens")
 			}
 			segs = append(segs, keySt.Render("c ")+costPart+styleMuted.Render("/")+tokPart)
-		case usageTabPlan:
-			w5 := styleMuted.Render("5h")
-			ww := styleMuted.Render("Weekly")
-			if m.usagePlanWindow == 0 {
-				w5 = styleAccent.Render("5h")
-			} else {
-				ww = styleAccent.Render("Weekly")
-			}
-			segs = append(segs, keySt.Render("←/→ ")+w5+styleMuted.Render(" / ")+ww)
 		case usageTabSessions:
 			sorts := []usageSessionSort{usageSortCost, usageSortTokens, usageSortRecent}
 			parts := make([]string, len(sorts))
@@ -866,9 +855,9 @@ func (m Model) renderUsageFooter(width int) (string, string) {
 			}
 		case usageTabPlan:
 			ctxPairs = [][2]string{
-				{"←/→", "5h/weekly"},
 				{"↑/↓", "5h period"},
 				{"enter", "details"},
+				{"p", "provider"},
 				{"esc", "back"},
 			}
 		case usageTabModels:
@@ -1537,14 +1526,7 @@ func (m Model) renderLimitAccountCard(acc usage.LimitAccount, now time.Time, car
 		if lblText == "" {
 			lblText = w.ID
 		}
-		paddedLbl := fmt.Sprintf("%-*s", labelW, truncate(lblText, labelW))
-		highlight := (m.usagePlanWindow == 0 && w.Kind == agent.LimitWindowSession) ||
-			(m.usagePlanWindow == 1 && w.Kind == agent.LimitWindowWeekly)
-		if highlight {
-			paddedLbl = styleAccent.Render(paddedLbl)
-		} else {
-			paddedLbl = styleMuted.Render(paddedLbl)
-		}
+		paddedLbl := styleSubtext.Render(fmt.Sprintf("%-*s", labelW, truncate(lblText, labelW)))
 
 		bar := renderCodexQuotaBar(w.UsedPercent, barSegs)
 		rem := 100.0 - w.UsedPercent
@@ -1663,10 +1645,10 @@ func (m Model) renderQuotaCard(q agent.QuotaInfo, now time.Time) []string {
 	}
 
 	if q.Primary != nil {
-		out = append(out, formatRow("5h limit", q.Primary, m.usagePlanWindow == 0))
+		out = append(out, formatRow("5h limit", q.Primary, false))
 	}
 	if q.Secondary != nil {
-		out = append(out, formatRow("Weekly limit", q.Secondary, m.usagePlanWindow == 1))
+		out = append(out, formatRow("Weekly limit", q.Secondary, false))
 	}
 	return out
 }
