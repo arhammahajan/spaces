@@ -103,6 +103,10 @@ func convertHookUsage(u *hookcore.Usage) *HookUsage {
 	if u == nil {
 		return nil
 	}
+	total := u.TotalTokens
+	if total <= 0 {
+		total = u.InputTokens + u.OutputTokens + u.ReasoningTokens
+	}
 	return &HookUsage{
 		InputTokens:      u.InputTokens,
 		OutputTokens:     u.OutputTokens,
@@ -110,6 +114,80 @@ func convertHookUsage(u *hookcore.Usage) *HookUsage {
 		CacheReadTokens:  u.CacheReadTokens,
 		CacheWriteTokens: u.CacheWriteTokens,
 		CostUSD:          u.CostUSD,
+		TotalTokens:      total,
+	}
+}
+
+func convertToolExecutions(in []hookcore.ToolExecution) []HookToolExecution {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]HookToolExecution, len(in))
+	for i, t := range in {
+		out[i] = HookToolExecution{
+			CallID: t.CallID, Name: t.Name, Input: t.Input, Status: t.Status,
+			StartedMs: t.StartedMs, DurationMs: t.DurationMs, Error: t.Error,
+		}
+	}
+	return out
+}
+
+func convertFileTouches(in []hookcore.FileTouch) []HookFileTouch {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]HookFileTouch, len(in))
+	for i, f := range in {
+		out[i] = HookFileTouch{
+			Path: f.Path, Action: f.Action, Additions: f.Additions,
+			Deletions: f.Deletions, TsMs: f.TsMs,
+		}
+	}
+	return out
+}
+
+func convertTodos(in []hookcore.TodoItem) []HookTodoItem {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]HookTodoItem, len(in))
+	for i, t := range in {
+		out[i] = HookTodoItem{ID: t.ID, Content: t.Content, Status: t.Status, Priority: t.Priority}
+	}
+	return out
+}
+
+func convertMCPServers(in []hookcore.MCPServerStatus) []HookMCPServerStatus {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]HookMCPServerStatus, len(in))
+	for i, m := range in {
+		out[i] = HookMCPServerStatus{Name: m.Name, Status: m.Status, Tools: m.Tools, Error: m.Error}
+	}
+	return out
+}
+
+func convertLSP(d *hookcore.LSPDiagnostics) *HookLSPDiagnostics {
+	if d == nil {
+		return nil
+	}
+	if d.Errors == 0 && d.Warnings == 0 && d.Files == 0 {
+		return nil
+	}
+	return &HookLSPDiagnostics{Errors: d.Errors, Warnings: d.Warnings, Files: d.Files}
+}
+
+func convertPending(p *hookcore.PendingInteraction) *HookPendingInteraction {
+	if p == nil {
+		return nil
+	}
+	if p.ID == "" && p.Tool == "" && p.Title == "" && p.Description == "" {
+		return nil
+	}
+	return &HookPendingInteraction{
+		ID: p.ID, Kind: p.Kind, Tool: p.Tool, Title: p.Title,
+		Description: p.Description, Options: append([]string(nil), p.Options...), TsMs: p.TsMs,
 	}
 }
 
@@ -138,6 +216,38 @@ func convertHookSummary(s hookcore.PaneSummary) HookSummary {
 		Children:        convertHookChildren(s.Children),
 		BackgroundTasks: convertHookChildren(s.BackgroundTasks),
 		HasDetail:       s.HasDetail,
+		PluginName:         s.PluginName,
+		PluginVersion:      s.PluginVersion,
+		PluginCapabilities: append([]string(nil), s.PluginCapabilities...),
+		PluginTsMs:         s.PluginTsMs,
+		PID:                s.PID,
+		HarnessVersion:     s.HarnessVersion,
+		Provider:           s.Provider,
+		Effort:             s.Effort,
+		Mode:               s.Mode,
+		SandboxMode:        s.SandboxMode,
+		GitBranch:          s.GitBranch,
+		ContextTokens:      s.ContextTokens,
+		ContextWindow:      s.ContextWindow,
+		ContextPercent:     s.ContextPercent,
+		TurnCount:          s.TurnCount,
+		CompactionCount:    s.CompactionCount,
+		LastCompactionMs:   s.LastCompactionMs,
+		LastCompactionReason: s.LastCompactionReason,
+		ToolCallCount:      s.ToolCallCount,
+		ToolErrorCount:     s.ToolErrorCount,
+		RetryCount:         s.RetryCount,
+		RateLimited:        s.RateLimited,
+		RateLimitResetMs:   s.RateLimitResetMs,
+		RateLimitMessage:   s.RateLimitMessage,
+		ActiveTools:        convertToolExecutions(s.ActiveTools),
+		RecentTools:        convertToolExecutions(s.RecentTools),
+		FilesTouched:       convertFileTouches(s.FilesTouched),
+		Todos:              convertTodos(s.Todos),
+		MCPServers:         convertMCPServers(s.MCPServers),
+		LSPDiagnostics:     convertLSP(s.LSPDiagnostics),
+		PendingPermission:  convertPending(s.PendingPermission),
+		LastError:          s.LastError,
 	}
 }
 
@@ -237,6 +347,7 @@ func FetchHookDetail(ctx context.Context, session string, paneNum int) (HookDeta
 			Children:        sum.Children,
 			BackgroundTasks: sum.BackgroundTasks,
 			Background:      sum.Background,
+			Extras:          raw.Record.Extras,
 		}
 		if raw.Record.Tool != nil {
 			det.Tool = &HookTool{

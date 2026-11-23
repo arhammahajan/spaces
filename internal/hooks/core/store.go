@@ -58,7 +58,7 @@ func LoadStore() map[string]any {
 				for k, val := range rec {
 					cp[k] = val
 				}
-				kept[stringKey(pane)] = cp
+				kept[normalizePaneKey(pane)] = cp
 			}
 		}
 		out[stringKey(session)] = kept
@@ -158,12 +158,17 @@ func foldEventIntoStore(store map[string]any, session string, pane any, event ma
 		sessionPanes = map[string]any{}
 		panes[session] = sessionPanes
 	}
-	key := stringKey(pane)
+	key := normalizePaneKey(pane)
 	var previous map[string]any
 	previousState := ""
 	if p, ok := sessionPanes[key].(map[string]any); ok {
 		previous = p
 		previousState, _ = p["state"].(string)
+	} else if p, ok := sessionPanes[stringKey(pane)].(map[string]any); ok {
+		previous = p
+		previousState, _ = p["state"].(string)
+		// Migrate legacy "%N" keys to normalized form.
+		delete(sessionPanes, stringKey(pane))
 	}
 	merged, applied := mergeEventApplied(previous, event, now)
 	sessionPanes[key] = merged
@@ -335,8 +340,13 @@ func PaneState(session string, pane any) string {
 	if !ok {
 		return ""
 	}
-	rec, ok := sessionPanes[stringKey(pane)].(map[string]any)
-	if !ok {
+	var rec map[string]any
+	if r, ok := sessionPanes[normalizePaneKey(pane)].(map[string]any); ok {
+		rec = r
+	} else {
+		rec, _ = sessionPanes[stringKey(pane)].(map[string]any)
+	}
+	if rec == nil {
 		return ""
 	}
 	s, _ := rec["state"].(string)

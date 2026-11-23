@@ -443,6 +443,33 @@ func (r *Registry) DaemonWatcher(name string) DaemonWatcher {
 	return p.DaemonWatcher()
 }
 
+// CompanionPlugin returns the resolved runtime plugin's CompanionPlugin
+// capability, or nil when the agent is unknown or has no companion support.
+func (r *Registry) CompanionPlugin(name string) CompanionPlugin {
+	p, ok := r.ResolveRuntime(name)
+	if !ok {
+		return nil
+	}
+	return p.CompanionPlugin()
+}
+
+// CompanionPlugins returns all registered runtime plugins that provide a
+// non-nil CompanionPlugin capability.
+func (r *Registry) CompanionPlugins() []Plugin {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Plugin
+	for _, p := range r.ordered {
+		if p.Spec().WorktreeOnly {
+			continue
+		}
+		if p.CompanionPlugin() != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // DetectProcess inspects proc against all registered runtime plugins and
 // returns the matching plugin's canonical ID (or "" if none matches).
 func (r *Registry) DetectProcess(proc ProcessInfo) string {

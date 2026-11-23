@@ -52,7 +52,7 @@ const (
 	MaxEventBytes   = 16 * 1024
 	MaxSpoolBytes   = 1024 * 1024
 	MaxSpoolLines   = 2048
-	MaxBody         = 256 * 1024
+	MaxBody         = 512 * 1024
 	DedupeMS        = 500
 	OutcomeDedupeMS = 15_000
 	// StartThrottleS bounds ensure_server relaunches: at most one spawn

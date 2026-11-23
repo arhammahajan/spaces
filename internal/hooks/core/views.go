@@ -54,7 +54,16 @@ func summaryRecord(record map[string]any) map[string]any {
 		usage != nil ||
 		childCount > 0 ||
 		len(bgTasks) > 0 ||
-		bgCount > 0
+		bgCount > 0 ||
+		truthy(record["active_tools"]) ||
+		truthy(record["recent_tools"]) ||
+		truthy(record["files_touched"]) ||
+		truthy(record["todos"]) ||
+		truthy(record["mcp_servers"]) ||
+		truthy(record["lsp_diagnostics"]) ||
+		truthy(record["pending_permission"]) ||
+		truthy(record["last_error"]) ||
+		truthy(record["extras"])
 	agent, _ := record["agent"].(string)
 	app, _ := record["app"].(string)
 	source, _ := record["source"].(string)
@@ -96,6 +105,23 @@ func summaryRecord(record map[string]any) map[string]any {
 		"finite_active":   len(activeFinite),
 		"service_active":  len(activeServices),
 		"has_detail":      hasDetail,
+	}
+	// Preserve rich v2 companion telemetry in the summary shape.
+	for _, k := range []string{
+		"plugin_name", "plugin_version", "plugin_capabilities", "plugin_ts_ms",
+		"pid", "harness_version",
+		"provider", "effort", "mode", "sandbox_mode", "git_branch",
+		"context_tokens", "context_window", "context_percent",
+		"turn_count", "compaction_count", "last_compaction_ms", "last_compaction_reason",
+		"tool_call_count", "tool_error_count", "retry_count",
+		"rate_limited", "rate_limit_reset_ms", "rate_limit_message",
+		"active_tools", "recent_tools", "files_touched", "todos", "mcp_servers",
+		"lsp_diagnostics", "pending_permission",
+		"last_error", "extras",
+	} {
+		if v, ok := record[k]; ok && v != nil {
+			out[k] = v
+		}
 	}
 	if source != "" {
 		out["source"] = source
@@ -220,7 +246,11 @@ func SpaceHooksDetail(session string, pane any) map[string]any {
 	var record map[string]any
 	if storePanes, ok := store["panes"].(map[string]any); ok {
 		if sessionPanes, ok := storePanes[session].(map[string]any); ok {
-			record, _ = sessionPanes[stringKey(pane)].(map[string]any)
+			if r, ok := sessionPanes[normalizePaneKey(pane)].(map[string]any); ok {
+				record = r
+			} else {
+				record, _ = sessionPanes[stringKey(pane)].(map[string]any)
+			}
 		}
 	}
 	if record == nil {
@@ -253,7 +283,16 @@ func SpaceHooksDetail(session string, pane any) map[string]any {
 		normalizeUsage(detail["usage"]) != nil ||
 		len(children) > 0 ||
 		len(bgTasks) > 0 ||
-		toInt64(detail["background"]) > 0
+		toInt64(detail["background"]) > 0 ||
+		truthy(detail["active_tools"]) ||
+		truthy(detail["recent_tools"]) ||
+		truthy(detail["files_touched"]) ||
+		truthy(detail["todos"]) ||
+		truthy(detail["mcp_servers"]) ||
+		truthy(detail["lsp_diagnostics"]) ||
+		truthy(detail["pending_permission"]) ||
+		truthy(detail["last_error"]) ||
+		truthy(detail["extras"])
 	return map[string]any{"ok": true, "version": Version, "record": detail}
 }
 

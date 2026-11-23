@@ -339,8 +339,10 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 			if hook != nil {
 				hookSource := strings.TrimSpace(hook.Source)
 				isDaemonSSE := strings.EqualFold(hookSource, "daemon_sse")
+				isPlugin := strings.EqualFold(hookSource, "plugin")
 				hookSilence := saturatingSub(nowMs, hook.TsMs)
-				screenFinishedNewerTurn := !isDaemonSSE && len(a.newlyDone) > prevNewlyDoneLen &&
+				freshPluginWorking := isPlugin && hook.State == "working" && hook.IsFreshPlugin(nowMs)
+				screenFinishedNewerTurn := !isDaemonSSE && !isPlugin && len(a.newlyDone) > prevNewlyDoneLen &&
 					status == StatusDone &&
 					(codexTurnEnded || (pane.BaseAgeMs > 0 && pane.BaseAgeMs < hookSilence))
 				var policy agent.HookPolicy = agent.BaseHookPolicy{StaleLocalCmdMs: hookWorkingStaleMs}
@@ -351,7 +353,10 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 				if hasReading {
 					screenState = reading.State
 				}
-				yieldWorkingToIdle := !isDaemonSSE && policy.ShouldYieldWorkingHookToIdle(agent.HookArbitrationInput{
+				if freshPluginWorking {
+					screenFinishedNewerTurn = false
+				}
+				yieldWorkingToIdle := !isDaemonSSE && !isPlugin && !freshPluginWorking && policy.ShouldYieldWorkingHookToIdle(agent.HookArbitrationInput{
 					HookState:                 hook.State,
 					HookSilenceMs:             hookSilence,
 					HasActiveFiniteWork:       hook.HasActiveFiniteWork(),

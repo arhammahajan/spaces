@@ -749,11 +749,11 @@ func TestAntigravityClearsStaleWorkingHooksWhenVisiblyIdle(t *testing.T) {
 
 func TestHookUsageHelpers(t *testing.T) {
 	var nilUsage *HookUsage
-	if nilUsage.HasData() || nilUsage.TotalTokens() != 0 {
+	if nilUsage.HasData() || nilUsage.TotalTokensOrDerived() != 0 {
 		t.Fatalf("nil HookUsage should report no data and 0 total")
 	}
 	empty := &HookUsage{}
-	if empty.HasData() || empty.TotalTokens() != 0 {
+	if empty.HasData() || empty.TotalTokensOrDerived() != 0 {
 		t.Fatalf("empty HookUsage should report no data and 0 total")
 	}
 	full := &HookUsage{
@@ -767,16 +767,16 @@ func TestHookUsageHelpers(t *testing.T) {
 	if !full.HasData() {
 		t.Fatalf("full HookUsage.HasData() = false, want true")
 	}
-	if got := full.TotalTokens(); got != 16_000 {
-		t.Fatalf("full HookUsage.TotalTokens() = %d, want 16000", got)
+	if got := full.TotalTokensOrDerived(); got != 16_000 {
+		t.Fatalf("full HookUsage.TotalTokensOrDerived() = %d, want 16000", got)
 	}
 	costOnly := &HookUsage{CostUSD: 0.01}
 	if !costOnly.HasData() {
 		t.Fatalf("cost-only HookUsage.HasData() = false, want true")
 	}
 	cacheOnly := &HookUsage{CacheReadTokens: 2048}
-	if !cacheOnly.HasData() || cacheOnly.TotalTokens() != 0 {
-		t.Fatalf("cache-only HookUsage: hasData=%v total=%d, want true/0", cacheOnly.HasData(), cacheOnly.TotalTokens())
+	if !cacheOnly.HasData() || cacheOnly.TotalTokensOrDerived() != 0 {
+		t.Fatalf("cache-only HookUsage: hasData=%v total=%d, want true/0", cacheOnly.HasData(), cacheOnly.TotalTokensOrDerived())
 	}
 }
 
@@ -815,7 +815,7 @@ func TestDaemonSSESourceAttributionAndArbitration(t *testing.T) {
 	if got1.Panes[0].Source != "daemon_sse" {
 		t.Fatalf("daemon_sse source = %q, want %q", got1.Panes[0].Source, "daemon_sse")
 	}
-	if got1.Panes[0].Hook == nil || got1.Panes[0].Hook.Usage == nil || got1.Panes[0].Hook.Usage.TotalTokens() != 15_500 {
+	if got1.Panes[0].Hook == nil || got1.Panes[0].Hook.Usage == nil || got1.Panes[0].Hook.Usage.TotalTokensOrDerived() != 15_500 {
 		t.Fatalf("daemon_sse usage not preserved on pane.Hook: %+v", got1.Panes[0].Hook)
 	}
 
@@ -929,5 +929,40 @@ func TestCodexIdleScreenCompletesMissedStop(t *testing.T) {
 				t.Fatalf("newly done = %v", done)
 			}
 		})
+	}
+}
+
+func TestPluginSourceHighestAuthorityAndFresh(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	h := HookSummary{
+		Agent: "opencode", App: "opencode", State: "working",
+		Event: "working", Source: "plugin", TsMs: t0, StateSinceMs: t0,
+		Text: "plugin working", PluginTsMs: t0,
+	}
+	if !h.IsFreshPlugin(t0 + 1_000) {
+		t.Fatalf("IsFreshPlugin = false, want true")
+	}
+	if h.IsFreshPlugin(t0 + hookWorkingStaleMs + 1) {
+		t.Fatalf("IsFreshPlugin stale = true, want false")
+	}
+	nonPlugin := HookSummary{Agent: "opencode", State: "working", Source: "hook", TsMs: t0, PluginTsMs: t0}
+	if nonPlugin.IsFreshPlugin(t0 + 1_000) {
+		t.Fatalf("non-plugin IsFreshPlugin = true, want false")
+	}
+	// Fresh plugin working beats screen idle and suppresses newlyDone.
+	arb := NewArbitrator()
+	hooks := &HookSnapshot{
+		OK: true, Version: 1, NowMs: t0 + 1_000,
+		Panes: map[string]map[string]HookSummary{"dots": {"1": h}},
+	}
+	idleReading := map[string]ScreenReading{
+		"%%1": {App: "opencode", State: "idle", VisibleIdle: true},
+	}
+	got := applyOne(t, arb, arbSpace("dots", "opencode", StatusIdle, false), hooks, idleReading, t0+1_000)
+	if got.Panes[0].Status != StatusWorking {
+		t.Fatalf("fresh plugin working with idle screen: got %v want StatusWorking", got.Panes[0].Status)
+	}
+	if newlyDone := arb.TakeNewlyDone(); len(newlyDone) != 0 {
+		t.Fatalf("fresh plugin must suppress newlyDone, got %v", newlyDone)
 	}
 }
