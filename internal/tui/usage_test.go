@@ -284,6 +284,17 @@ func newLoadedUsageModel(t *testing.T, fb *fakeUsageBackend, w, h int) Model {
 		t.Fatal("Init() returned nil cmd for ModeUsage")
 	}
 	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		cur := m
+		for _, sub := range batch {
+			if sub == nil {
+				continue
+			}
+			next, _ := cur.Update(sub())
+			cur = next.(Model)
+		}
+		return cur
+	}
 	next, _ := m.Update(msg)
 	return next.(Model)
 }
@@ -501,6 +512,7 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 	}
 
 	// Force refresh: R
+	beforeForce := fb.forceCalls
 	var cmd tea.Cmd
 	m, cmd = sendKey(m, runeKey("R"))
 	if cmd == nil {
@@ -511,8 +523,8 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		n, c := m.Update(msg)
 		return n.(Model), c
 	}()
-	if fb.forceCalls != 1 {
-		t.Fatalf("expected 1 force refresh call, got %d", fb.forceCalls)
+	if fb.forceCalls != beforeForce+1 {
+		t.Fatalf("expected force refresh call to increment from %d to %d, got %d", beforeForce, beforeForce+1, fb.forceCalls)
 	}
 
 	// Esc at top level quits
