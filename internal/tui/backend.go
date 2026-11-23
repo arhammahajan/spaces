@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/arhammahajan/spaces/internal/model"
+	"github.com/arhammahajan/spaces/internal/usage"
 )
 
 // Backend abstracts all I/O the TUI needs so it compiles and tests
@@ -138,6 +139,12 @@ type TelemetryBackend interface {
 	KillOrphanPorts(ctx context.Context, orphans []model.OrphanPort) (int, error)
 }
 
+// UsageBackend is an optional extension of Backend for loading aggregated
+// multi-provider token/cost usage and burndown reports.
+type UsageBackend interface {
+	LoadUsage(ctx context.Context, force bool) (usage.Report, error)
+}
+
 // Mode selects which screen the TUI shows.
 type Mode int
 
@@ -156,6 +163,7 @@ const (
 	ModeTabs
 	ModeWorktrees
 	ModeConfirmRemoveWorktree
+	ModeUsage
 )
 
 // Options configures a TUI run.

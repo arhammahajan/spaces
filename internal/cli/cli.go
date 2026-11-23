@@ -88,6 +88,8 @@ type Env struct {
 	RunShared func(Env, []string) int
 	// RunTabs launches the Current-Workspace Tabs TUI (wired by cmd/tmux-spaces).
 	RunTabs func(Env, []string) int
+	// RunUsage launches the Usage & Burndown TUI (wired by cmd/tmux-spaces).
+	RunUsage func(Env, []string) int
 	// RunChild runs the __shim child process, returning its exit code.
 	RunChild func(bin string, args []string) int
 	// RunHarnessChild resolves a harness profile in-process, materializes
@@ -399,6 +401,8 @@ func Run(args []string, env Env) int {
 		return cmdShared(rest, env)
 	case "tabs", "tab":
 		return cmdTabs(rest, env)
+	case "usage":
+		return cmdUsage(rest, env)
 	case "resurrect":
 		if env.RunResurrect == nil {
 			env.errf("tmux-spaces resurrect: not wired\n")
@@ -447,6 +451,7 @@ Spaces & TUI:
   inbox                            open the Attention Inbox TUI
   conversations|chats [--query Q]  search & resume agent conversations
   shared|skills|mcp [--dir D]      browse shared MCP servers and skills
+  usage                            open the Usage & Burndown TUI
 
 Harness & Hooks:
   <agent> [profile <P>] [args...]  launch a coding harness directly
@@ -506,6 +511,8 @@ func cmdHelp(args []string, env Env) int {
 		env.outf("usage: tmux-spaces shared [--dir DIR] [--query Q]\n")
 	case "tabs", "tab":
 		env.outf("usage: tmux-spaces tabs [--new] [--session SPACE] [--query Q]\n")
+	case "usage":
+		env.outf("usage: tmux-spaces usage\n")
 	default:
 		env.errf("tmux-spaces: unknown command %q\n", args[0])
 		return ExitUsage
