@@ -437,6 +437,7 @@ type tuiBackend struct {
 	store      *resurrect.Store
 	git        *gitinfo.Collector
 	wt         *worktree.Manager
+	telemetry  *model.TelemetryCollector
 	now              func() time.Time
 	dirExists        func(string) bool
 	profileExists    func(agentName, profile string) bool
@@ -514,6 +515,7 @@ func newTUIBackend(client *tmux.Client) *tuiBackend {
 		store:              resurrect.DefaultStore(),
 		git:                gitinfo.NewCollector(),
 		wt:                 worktree.NewManager(),
+		telemetry:          model.NewTelemetryCollector(agent.DefaultRegistry()),
 		now:                time.Now,
 		dirExists:          isExistingDir,
 		profileExists:      isExistingHarnessProfile,
@@ -566,6 +568,21 @@ func (b *tuiBackend) LoadPRStatus(ctx context.Context, gitByCWD map[string]*mode
 		return nil
 	}
 	return b.git.FetchPR(ctx, gitByCWD, force)
+}
+
+func (b *tuiBackend) LoadTelemetry(ctx context.Context, spaces []model.Space, force bool) (model.TelemetrySnapshot, error) {
+	if b.telemetry == nil {
+		return model.TelemetrySnapshot{}, nil
+	}
+	home, _ := os.UserHomeDir()
+	return b.telemetry.Collect(ctx, spaces, home, force), nil
+}
+
+func (b *tuiBackend) KillOrphanPorts(ctx context.Context, orphans []model.OrphanPort) (int, error) {
+	if b.telemetry == nil {
+		return 0, nil
+	}
+	return b.telemetry.KillOrphanPorts(ctx, orphans)
 }
 
 // ResolveSnapshot returns a tmux.ServerSnapshot whose panes have been enriched
