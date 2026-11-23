@@ -789,10 +789,10 @@ func (m Model) renderInboxList(items []InboxItem, width, height int) []string {
 }
 
 // renderInboxOutcomeRow renders one recent completion/failure entry aligned
-// with the live agent columns:
+// with the live agent Inbox columns:
 //
-//	Left:  `▌   <icon>  <Agent [— Profile]>  <Workspace>  <Title or summary>`
-//	Right: `[model]  ↺ <status (fixed)> <relative time>`
+//	Left:  `▌   <icon>  <Title or summary>`
+//	Right: `<Workspace>  <Agent>  [git]  [model]  ↺ <relative time>`
 func (m Model) renderInboxOutcomeRow(o model.OutcomeEntry, selected, altBG bool, width int) string {
 	_ = altBG
 	bg := ColorBase
@@ -819,36 +819,6 @@ func (m Model) renderInboxOutcomeRow(o model.OutcomeEntry, selected, altBG bool,
 	status := o.Status()
 	now := m.opts.NowOrDefault()
 	timeStr := formatOutcomeTime(o.TsMs, now)
-
-	tailStyled := renderStatusTail(status, timeStr, true, bg, st)
-	tailW := ansi.StringWidth(tailStyled)
-
-	var rb strings.Builder
-	usedRight := tailW
-	if g := m.gitInfo[o.CWD]; g != nil && innerW >= 72 {
-		if brBadge := renderGitBranchBadge(g, 18, st); brBadge != "" {
-			if w := ansi.StringWidth(brBadge) + 2; usedRight+w+42 <= innerW {
-				rb.WriteString(brBadge)
-				rb.WriteString(st(bg, false).Render("  "))
-				usedRight += w
-			}
-		}
-	}
-	if mdl := strings.TrimSpace(o.Model); mdl != "" && innerW >= 78 {
-		modelBadge := st(ColorSubtext0, false).Render(truncate(mdl, 20))
-		if w := ansi.StringWidth(modelBadge) + 2; usedRight+w+40 <= innerW {
-			rb.WriteString(modelBadge)
-			rb.WriteString(st(bg, false).Render("  "))
-		}
-	}
-	rb.WriteString(tailStyled)
-	rightStyled := rb.String()
-	rightW := ansi.StringWidth(rightStyled)
-
-	maxLeft := innerW - rightW - 2
-	if maxLeft < 10 {
-		maxLeft = 10
-	}
 
 	baseApp := o.DisplayApp()
 	if baseApp == "" {
@@ -878,6 +848,45 @@ func (m Model) renderInboxOutcomeRow(o model.OutcomeEntry, selected, altBG bool,
 		spaceFg = ColorLavender
 	}
 
+	tailStyled := renderInboxAgeTail(timeStr, true, bg, st)
+	tailW := ansi.StringWidth(tailStyled)
+
+	var metaBuf strings.Builder
+	metaBuf.WriteString(st(spaceFg, selected || isCurrentSpace).Render(spaceCol))
+	metaBuf.WriteString(st(bg, false).Render("  "))
+	metaBuf.WriteString(renderStyledAppCol(baseApp, "", appColW, maxAppW, selected, bg, st))
+	metaStyled := metaBuf.String()
+	metaW := ansi.StringWidth(metaStyled) + 2
+
+	var rb strings.Builder
+	usedRight := metaW + tailW
+	if g := m.gitInfo[o.CWD]; g != nil && innerW >= 72 {
+		if brBadge := renderGitBranchBadge(g, 18, st); brBadge != "" {
+			if w := ansi.StringWidth(brBadge) + 2; usedRight+w+26 <= innerW {
+				rb.WriteString(brBadge)
+				rb.WriteString(st(bg, false).Render("  "))
+				usedRight += w
+			}
+		}
+	}
+	if mdl := strings.TrimSpace(o.Model); mdl != "" && innerW >= 78 {
+		modelBadge := st(ColorSubtext0, false).Render(truncate(mdl, 20))
+		if w := ansi.StringWidth(modelBadge) + 2; usedRight+w+24 <= innerW {
+			rb.WriteString(modelBadge)
+			rb.WriteString(st(bg, false).Render("  "))
+		}
+	}
+	rb.WriteString(metaStyled)
+	rb.WriteString(st(bg, false).Render("  "))
+	rb.WriteString(tailStyled)
+	rightStyled := rb.String()
+	rightW := ansi.StringWidth(rightStyled)
+
+	maxLeft := innerW - rightW - 2
+	if maxLeft < 10 {
+		maxLeft = 10
+	}
+
 	summary := strings.TrimSpace(o.Title)
 	if summary == "" {
 		summary = strings.TrimSpace(o.Text)
@@ -890,13 +899,8 @@ func (m Model) renderInboxOutcomeRow(o model.OutcomeEntry, selected, altBG bool,
 	lb.WriteString(st(bg, false).Render("  "))
 	lb.WriteString(st(StatusColor(status), true).Render(status.Icon()))
 	lb.WriteString(st(bg, false).Render("  "))
-	lb.WriteString(renderStyledAppCol(baseApp, o.Profile, appColW, maxAppW, selected, bg, st))
-	lb.WriteString(st(bg, false).Render("  "))
-	lb.WriteString(st(spaceFg, selected || isCurrentSpace).Render(spaceCol))
-	usedW := 5 + appColW + 2 + spaceColW
-	titleBudget := maxLeft - usedW - 2
+	titleBudget := maxLeft - 5
 	if summary != "" && titleBudget > 3 {
-		lb.WriteString(st(bg, false).Render("  "))
 		lb.WriteString(st(ColorText, selected || status.IsAttention()).Render(ansi.Truncate(summary, titleBudget, "…")))
 	}
 	leftStyled := lb.String()

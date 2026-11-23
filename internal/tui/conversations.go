@@ -1482,14 +1482,36 @@ func (m Model) renderConvPrimaryRow(it convItem, selected bool, width int) strin
 
 	icon := "·"
 	iconColor := ColorOverlay0
-	if it.Live == nil {
+	iconBold := false
+	if it.Live != nil {
+		switch it.Live.Status {
+		case model.StatusWorking:
+			icon = "◐"
+			iconColor = ColorYellow
+			iconBold = true
+		case model.StatusDone:
+			icon = "✓"
+			iconColor = ColorGreen
+			iconBold = true
+		case model.StatusFailed:
+			icon = "✗"
+			iconColor = ColorRed
+			iconBold = true
+		case model.StatusNeedsYou:
+			icon = "●"
+			iconColor = ColorBlue
+			iconBold = true
+		}
+	} else {
 		switch strings.ToLower(strings.TrimSpace(it.Conv.LastOutcome)) {
 		case "done":
 			icon = "✓"
 			iconColor = ColorGreen
+			iconBold = true
 		case "failed", "error":
 			icon = "✗"
 			iconColor = ColorRed
+			iconBold = true
 		}
 	}
 
@@ -1595,7 +1617,7 @@ func (m Model) renderConvPrimaryRow(it convItem, selected bool, width int) strin
 
 	var lb strings.Builder
 	lb.WriteString(st(bg, false).Render("  "))
-	lb.WriteString(st(iconColor, false).Render(icon))
+	lb.WriteString(st(iconColor, iconBold).Render(icon))
 	lb.WriteString(st(bg, false).Render("  "))
 
 	titleBudget := maxLeft - indentAndIconW

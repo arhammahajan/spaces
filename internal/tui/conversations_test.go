@@ -301,10 +301,14 @@ func TestConversationsLivePaneDetectionEnterVsCtrlO(t *testing.T) {
 		t.Fatalf("expected first item sess-claude-1 to be detected as live, got %+v", items)
 	}
 
-	// A running conversation shows its space and available actions.
+	// A running working conversation shows the working status symbol (◐), its
+	// space name, and focus action without the old "live·" / "live in" text badges.
 	plain := ansi.Strip(m.View())
-	if strings.Contains(plain, "◐") || strings.Contains(plain, "live·") || strings.Contains(plain, "live in") {
-		t.Errorf("unexpected live status indicator in view:\n%s", plain)
+	if !strings.Contains(plain, "◐") {
+		t.Errorf("expected working status symbol ◐ in view:\n%s", plain)
+	}
+	if strings.Contains(plain, "live·") || strings.Contains(plain, "live in") {
+		t.Errorf("unexpected live badge text in view:\n%s", plain)
 	}
 	if !strings.Contains(plain, "work · claude-code") || !strings.Contains(plain, "Enter focus live pane") {
 		t.Errorf("expected space name and focus action in view:\n%s", plain)

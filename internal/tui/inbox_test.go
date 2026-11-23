@@ -248,10 +248,16 @@ func TestInboxRendersUnifiedColumnarRowsAndActionSubline(t *testing.T) {
 	if len(vLines) < 6 {
 		t.Fatalf("unexpectedly short view:\n%s", plain)
 	}
-	// Line 4 is primary columnar row (status icon + app + space + title + bg badge + fixed status/age),
+	// Line 4 is primary columnar row (status icon + title on left, space + harness + subs + age on right, no per-row status label),
 	// Line 5 is 2nd metadata/action line (live action on left, model + pane + cwd on right).
-	if !strings.Contains(vLines[4], "●") || !strings.Contains(vLines[4], "claude") || !strings.Contains(vLines[4], "beta") || !strings.Contains(vLines[4], "auth") || !strings.Contains(vLines[4], "+2 subs") || !strings.Contains(vLines[4], "needs you") {
-		t.Errorf("expected primary row to show status icon, aligned app, space, title, subs, and status, got: %q", vLines[4])
+	if !strings.Contains(vLines[4], "●") || !strings.Contains(vLines[4], "auth") || !strings.Contains(vLines[4], "beta") || !strings.Contains(vLines[4], "claude") || !strings.Contains(vLines[4], "+2 subs") {
+		t.Errorf("expected primary row to show status icon, title, space, harness, and subs, got: %q", vLines[4])
+	}
+	if strings.Contains(vLines[4], "needs you") {
+		t.Errorf("primary inbox row must not repeat per-listing status label, got: %q", vLines[4])
+	}
+	if strings.Index(vLines[4], "auth") > strings.Index(vLines[4], "claude") {
+		t.Errorf("expected thread title before harness name in inbox row, got: %q", vLines[4])
 	}
 	if !strings.Contains(vLines[5], "↳ permission: Allow bash?") || !strings.Contains(vLines[5], "claude-opus-4") || !strings.Contains(vLines[5], "~/beta") {
 		t.Errorf("expected 2nd action line to show live action, model, and cwd, got: %q", vLines[5])
@@ -406,19 +412,30 @@ func TestInboxRecentOutcomesRenderFilterSearchAndClickOpensNewTab(t *testing.T) 
 	for _, want := range []string{
 		"FAILED · 1",
 		"DONE · 2",
-		"claude-code — work",
+		"claude-code",
 		"gamma",
 		"Fix billing migration",
-		"failed",
 		"2m",
 		"codex",
 		"delta",
 		"Implement ATT-7",
-		"done",
 		"5m",
 	} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("inbox view missing %q:\n%s", want, plain)
+		}
+	}
+	for _, line := range strings.Split(plain, "\n") {
+		if strings.Contains(line, "Fix billing migration") {
+			if strings.Contains(line, "— work") {
+				t.Errorf("inbox outcome row must not show profile name: %q", line)
+			}
+			if strings.Contains(line, "failed") {
+				t.Errorf("inbox outcome row must not repeat per-listing status: %q", line)
+			}
+			if strings.Index(line, "Fix billing migration") > strings.Index(line, "claude-code") {
+				t.Errorf("expected thread title before harness name in outcome row: %q", line)
+			}
 		}
 	}
 
@@ -557,7 +574,7 @@ func TestInboxRecentOutcomesVisibleWhenNoLiveAgents(t *testing.T) {
 	}
 }
 
-func TestInboxShowsProfileAlongsideLiveAgentAndMatchesSearch(t *testing.T) {
+func TestInboxOmitsProfileInListingAndMatchesSearch(t *testing.T) {
 	spaces := inboxTestSpaces()
 	spaces[0].Panes[1].App = "antigravity"
 	spaces[0].Panes[1].Profile = "pratham"
@@ -567,11 +584,14 @@ func TestInboxShowsProfileAlongsideLiveAgentAndMatchesSearch(t *testing.T) {
 	m = update(m, spacesMsg{spaces: spaces})
 
 	plain := ansi.Strip(m.View())
-	if !strings.Contains(plain, "antigravity — pratham") {
-		t.Fatalf("expected live inbox row to show app — profile, got:\n%s", plain)
+	if strings.Contains(plain, "antigravity — pratham") {
+		t.Fatalf("expected live inbox listing row to omit profile name, got:\n%s", plain)
+	}
+	if !strings.Contains(plain, "antigravity") {
+		t.Fatalf("expected live inbox listing row to show harness name, got:\n%s", plain)
 	}
 
-	// Search by profile name finds the live agent and detail line shows app — profile.
+	// Search by profile name still finds the live agent and detail line shows app — profile.
 	m = update(m, keyRunes("/"))
 	for _, r := range "pratham" {
 		m = update(m, keyRunes(string(r)))
