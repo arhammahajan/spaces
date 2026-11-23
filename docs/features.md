@@ -36,7 +36,9 @@ and config provenance.
 | Git worktrees & PR/git telemetry | `internal/worktree`, `internal/gitinfo`, §2.6 |
 | Navigator, Inbox, Tabs, Conversations, Shared & Worktrees TUI | `internal/tui`, `internal/cli`, `cmd/tmux-spaces` |
 | Proposed Docker sandboxes | `internal/harness/sandbox`, §13 |
-| Feature plans | §1 through §13 |
+| Proposed harness companion plugins | `plugins/<agent>-spaces`, §14 |
+| Proposed `~/dev/router` live telemetry bridge | `internal/harness/routerctl`, `internal/hooks/core`, §15 |
+| Feature plans | §1 through §15 |
 
 ## Tracker
 
@@ -96,6 +98,12 @@ and config provenance.
 | SBX-3 | sandbox | Profile credential projection and Unix socket router bridge | Proposed | §13.4 |
 | SBX-4 | sandbox | Base image builder, doctor checks, and attention supervision | Proposed | §13.5 |
 | SBX-5 | sandbox | `tmux-spaces` status/hook relay and interactive sandbox management | Proposed | §13.6 |
+| PLUG-1 | telemetry | Versioned companion plugin telemetry push contract, tiered fallback, and subagent isolation | Proposed | §14.1 |
+| PLUG-2 | telemetry | OpenCode JS/TS companion plugin for native bus events, context/token telemetry, and permissions | Proposed | §14.2 |
+| PLUG-3 | telemetry | Pi TypeScript companion extension for turn/tool lifecycle and live context usage | Proposed | §14.3 |
+| PLUG-4 | telemetry | Claude Code distributable companion plugin (`plugin.json`, hooks, and `statusLine`/OTel bridge) | Proposed | §14.4 |
+| PLUG-5 | telemetry | Codex companion bridge and `tmux-spaces doctor` companion plugin diagnostics | Proposed | §14.5 |
+| RTR-1 | telemetry | Live turn, prompt, tool execution, and routing extraction from `~/dev/router` (`routerd`) | Proposed | §15 |
 
 ## 0. Shipped baseline
 
@@ -487,6 +495,8 @@ JSON output.
 | Spaces, later | Launch a profiled agent in a new worktree, see setup progress in the Inbox, and review the task diff. |
 | Automations, first | Create a weekday cron job or a heartbeat in the popup, test it with Run now, and inspect a scheduled run after closing tmux. |
 | Passive telemetry | View exact models, turn timings, token usage, tool calls, and native daemon events in `tmux-spaces` from `model-router` (`TEL-1`), OTLP (`TEL-2`), and OpenCode SSE (`TEL-3`) while humans stay on native CLIs. |
+| Harness companion plugins | Install thin in-process companion plugins for OpenCode, Pi, Claude Code, and Codex that push exact session bindings, context fill, token/cost metrics, compactions, and lifecycle events directly into `spacecore` with automatic fallback to external scrapers. |
+| Router live extraction | Query or subscribe to `~/dev/router` (`routerd`) for real-time turn status, active prompts, requested/in-flight tool executions, model/dialect routing, reasoning effort, token/cost accounting, and upstream errors across any routed harness pane. |
 | Mobile, prototype | Read structured agent chats, answer approvals, queue prompts, and drop into a live tmux terminal from a mobile-first PWA over Tailscale. |
 | Mobile, native | Receive push alerts for Attention Inbox blockers and completions, dictate follow-ups, attach photos and files offline, and review worktree diffs in a native mobile app. |
 | Terminal plugins, Kitty | Receive clickable OSC 99 alerts that focus the exact Kitty window and tmux pane, clear unread items only on real OS focus, and launch harness profiles or pick models from Kitty overlays. |
@@ -1587,3 +1597,261 @@ Testing bar:
   socket, including hook-relay forwarding and pane/sandbox metadata attribution.
 - Test `binary.go` symlink resolution, staging cache reuse, and strategy selection across
   all agent categories.
+
+
+## 14. Harness companion plugins
+
+**Proposed.** Builds on `ATT-1` (§1.1), `ATT-10` (§1.9), `TSK-2` (§2.2), `TEL-4` (§10.1),
+`internal/hooks/core`, `internal/model/telemetry.go`, and `internal/cli/doctor.go`. The
+implementation phases are in §14.6.
+
+Today, `spaces` reconstructs much of its per-session telemetry and lifecycle state from
+the outside: tailing JSONL transcripts in `internal/agent/plugins/telemetry_claude.go` and
+`telemetry_codex.go`, querying SQLite schemas and `/proc` FDs in `telemetry_opencode.go`
+and `opencode_sse.go`, and running `tmux capture-pane` regex rules in `internal/screen`
+and `internal/model/arbitrate.go`. Meanwhile, `internal/hooks/core/serve.go` already runs a
+local Unix-socket/HTTP ingestion daemon (`POST /v1/hook[/<agent>]`) with token and
+`SO_PEERCRED` auth.
+
+Shipping thin, in-process **companion plugins** for harnesses that expose native plugin,
+extension, or hook+telemetry APIs (OpenCode, Pi, Claude Code, Codex, and future agents)
+shifts telemetry from external scraping to authoritative push while keeping external
+scrapers as a zero-config fallback.
+
+What companion plugins unlock:
+
+- **Exact `(tmux_pane <-> session_id)` binding.** Because the plugin runs inside the
+  harness process, it inherits `$TMUX_PANE` and knows the exact `session_id`—eliminating
+  `/proc` FD scanning and "most recent SQLite/JSONL row in CWD" collisions when multiple
+  panes run the same agent in the same repository.
+- **Real-time context, token, and cost telemetry.** Plugins push `model`, `effort`,
+  `context_tokens`, `context_window`, `usage`, `compaction_count`, `cost_usd`, and
+  `turn_count` directly on every turn or step instead of polling and tailing multi-megabyte
+  transcripts.
+- **True lifecycle and subagent visibility.** Direct access to tool start/end, permission
+  prompts, elicitation questions, rate-limit retries, and parent/child subagent trees
+  without `capture-pane` heuristics.
+- **Lower CPU and I/O overhead.** Pushing over the existing UDS socket lets `spaces` skip
+  periodic `capture-pane`, JSONL re-scans, and SQLite reads for instrumented panes.
+
+### 14.1 Shared telemetry push contract, tiered fallback, and invariants (PLUG-1)
+
+**Proposed.**
+
+Keep all rollup, TTL, arbitration, and UI logic in Go inside `spacecore` and
+`internal/model`, and keep every companion plugin a stateless adapter over one shared
+contract:
+
+- **Versioned push envelope (`v2`).** Extend `POST /v1/hook[/<agent>]` (or add a sibling
+  `POST /v1/telemetry` route) in `internal/hooks/core/serve.go` and `store.go` to accept
+  a versioned payload carrying both lifecycle and `SessionRow` telemetry fields:
+  - **Identity:** `v`, `agent`, `session_id`, `tmux_session`, `tmux_pane`, `pid`, `cwd`,
+    `title`, `version`.
+  - **Lifecycle:** `state` (`working` | `blocked` | `done` | `failed` | `idle`), `kind`
+    (`permission` | `question` | `auth`), `tool`, `waiting_on`, `rate_limited`,
+    `background_tasks`, `subagents`.
+  - **Metrics:** `model`, `effort`, `usage` (input, output, cache read/write, cost USD),
+    `context_tokens`, `context_window`, `compaction_count`, `turn_count`.
+- **Tiered source precedence and fallback.** Do not delete the existing scrapers; layer
+  sources by authority and attribute every field for `ATT-10`:
+  1. **Companion plugin push (`plugin`)** — highest authority; while fresh for a pane,
+     `internal/model/telemetry.go` and `internal/model/arbitrate.go` skip JSONL/SQLite
+     scraping and screen-inferred `working`/`idle` transitions for that pane.
+  2. **Basic hooks / daemon SSE (`hook`, `daemon_sse`)** — existing structured feeds.
+  3. **External scrapers (`jsonl`, `sqlite`, `screen`)** — zero-config fallback for
+     uninstrumented harnesses or users who have not installed a companion plugin.
+- **Fail-open, non-blocking dispatch.** Companion plugins must never block a tool call or
+  crash a harness when `spacecore` is stopped or slow: use async fire-and-forget dispatch
+  with a short socket timeout (50–100 ms) and silently no-op when `$TMUX_PANE` is unset.
+- **Subagent isolation.** Tag child/subagent events with `parent_session_id` and
+  `is_subagent: true` so a spawned subagent running in the same pane cannot overwrite the
+  main session's `session_id`, `model`, or `context_tokens`.
+- **Schema stability.** Keep `v2` payloads backward-compatible so older companion plugins
+  continue working cleanly with newer `tmux-spaces` binaries across harness API drift.
+
+[Hook server](../internal/hooks/core/serve.go) ·
+[Hook store](../internal/hooks/core/store.go) ·
+[Telemetry types](../internal/model/telemetry_types.go) ·
+[Arbitrator](../internal/model/arbitrate.go)
+
+### 14.2 OpenCode companion plugin (PLUG-2)
+
+**Proposed.**
+
+Ship a thin JS/TS OpenCode plugin (`plugins/opencode-spaces`, installable in
+`~/.config/opencode/plugins/` or as an npm package) that subscribes directly to OpenCode's
+internal event bus (`session.updated`, `message.updated`, `permission.asked`,
+`session.compacted`, tool execution, and child sessions):
+
+- Push normalized `v2` lifecycle and telemetry envelopes to the `spaces` UDS socket on
+  each bus event.
+- Replace both `internal/agent/plugins/opencode_sse.go` (`/proc` port discovery + SSE
+  attachment) and `internal/agent/plugins/telemetry_opencode.go` (read-only SQLite schema
+  polling) whenever the companion plugin is active, falling back to them only when not
+  installed.
+
+### 14.3 Pi companion extension (PLUG-3)
+
+**Proposed.**
+
+Ship a native TypeScript Pi extension (`plugins/pi-spaces`) using Pi's extension API
+(`turn_start`, `turn_end`, `tool_call`, `session_compact`, and `ctx.getContextUsage()`):
+
+- Provide a direct 1:1 push of full turn/tool lifecycle, exact model and session ID,
+  compaction counts, and live context-window occupancy with zero screen scraping.
+
+### 14.4 Claude Code companion plugin (PLUG-4)
+
+**Proposed.**
+
+Package a distributable Claude Code companion plugin (`plugins/claude-spaces` with
+`plugin.json` and `hooks.json`) that bundles:
+
+- **Lifecycle hooks:** `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`,
+  `PermissionRequest`, `Notification`, `PreCompact`, `SubagentStart`/`SubagentStop`,
+  `Stop`, and `SessionEnd` forwarded to `spacecore`.
+- **Live metrics bridge:** Wire Claude Code's `statusLine` JSON pipe (which receives live
+  `context_window`, `cost`, `model`, and `session_id` on every turn) and/or OpenTelemetry
+  export (`TEL-2`) into the same `v2` telemetry payload, eliminating incremental JSONL
+  transcript tailing in `internal/agent/plugins/telemetry_claude.go` for active panes.
+- **One-command install:** Make setup distributable via Claude Code's native plugin install
+  flow rather than manual `settings.json` hook editing.
+
+### 14.5 Codex companion bridge and plugin diagnostics (PLUG-5)
+
+**Proposed.**
+
+- **Codex companion bridge (`plugins/codex-spaces`).** Because Codex currently exposes a
+  thinner native plugin surface than OpenCode or Pi, ship a lightweight bridge combining
+  Codex lifecycle hooks (`notify` / hook callbacks) with its OpenTelemetry exporter
+  (`config.toml` -> `TEL-2`) so active Codex panes report turn, tool, token, and
+  rate-limit telemetry without rollout JSONL scraping in
+  `internal/agent/plugins/telemetry_codex.go`.
+- **Installation and health checks in `tmux-spaces doctor`.** Extend
+  `internal/cli/doctor.go` and `internal/harness/doctor/` to report which detected
+  harnesses have an active companion plugin (with version and freshness) versus falling
+  back to basic hooks or external scrapers, and provide a `tmux-spaces plugins install
+  <agent>` (or `harness` equivalent) helper to install or update companion adapters.
+
+[CLI doctor](../internal/cli/doctor.go) ·
+[Harness doctor](../internal/harness/doctor/checks.go)
+
+### 14.6 Package layout, phasing, and testing bar
+
+Keep companion plugins isolated under `plugins/` as thin, dependency-light adapters and
+keep all ingestion, merging, and fallback logic in the root Go module:
+
+```text
+plugins/
+  opencode-spaces/     OpenCode JS/TS bus adapter -> spacecore v2 UDS push (PLUG-2)
+  pi-spaces/           Pi TypeScript extension -> spacecore v2 UDS push (PLUG-3)
+  claude-spaces/       Claude Code plugin.json, hooks.json, and statusLine bridge (PLUG-4)
+  codex-spaces/        Codex hook/OTel config bridge and installer metadata (PLUG-5)
+```
+
+Phases:
+
+1. **Phase 1.** Implement `PLUG-1` (`v2` telemetry push schema in `internal/hooks/core`,
+   `SessionRow` merge in `internal/model/telemetry.go`, tiered fallback skipping external
+   scrapers while plugin telemetry is fresh, and `is_subagent` isolation).
+2. **Phase 2.** Ship `PLUG-2` (OpenCode) or `PLUG-3` (Pi) as the first end-to-end
+   proof-of-concept companion plugin.
+3. **Phase 3.** Ship `PLUG-4` (Claude Code distributable plugin with hooks + `statusLine`
+   metrics bridge).
+4. **Phase 4.** Ship `PLUG-5` (Codex bridge, `tmux-spaces doctor` companion status checks,
+   and install/update helper).
+
+Testing bar:
+
+- Unit-test `internal/hooks/core` and `internal/model/telemetry.go` with `v2` push
+  fixtures: verify exact `(session, pane)` binding, `plugin > hook/sse > scraper`
+  precedence, fallback to scrapers once plugin telemetry goes stale, and subagent
+  isolation (`is_subagent: true` never overwrites parent `session_id` or `context_tokens`).
+- Unit-test each companion plugin against synthetic harness event fixtures and a mock UDS
+  server, verifying non-blocking fail-open behavior when the socket is missing or slow and
+  silent no-op when `$TMUX_PANE` is unset.
+- Test `tmux-spaces doctor` reporting across mixed states (companion active, stale,
+  missing/fallback).
+
+
+## 15. Live telemetry and turn extraction from `~/dev/router` (RTR-1)
+
+**Proposed.** Builds on `TEL-1` (§10.2), `TEL-4` (§10.1), `PLUG-1` (§14.1),
+`internal/harness/routerctl`, `internal/hooks/core`, and the standalone `router` / `routerd`
+project (`~/dev/router`).
+
+While `TEL-1` (§10.2) covers basic per-turn token and model accounting, `~/dev/router`
+(`routerd`) sits directly in the request/response path for every routed harness profile
+across all four supported API dialects (OpenAI Chat, OpenAI Responses, Anthropic Messages,
+and Gemini). Communicating directly with `~/dev/router` unlocks rich, real-time execution
+state for routed panes—including harnesses that lack native companion plugins or rich hook
+APIs—without scraping terminal viewports or tailing multi-megabyte transcripts.
+
+### 15.1 What `spaces` extracts from `~/dev/router`
+
+- **Session-to-pane correlation.** Reuse `routerd`'s native session affinity extraction
+  (`x-claude-code-session-id`, `session-id`, `session_id`, `thread-id`, `conversation_id`,
+  `x-session-id`, `x-mavis-session-id` in `~/dev/router/internal/router/session.go`) and
+  `harnessenv.NewRouterSession()` bindings registered at launch so every proxied request
+  maps cleanly to `(tmux_session, tmux_pane, agent, profile)`.
+- **Turn status and lifecycle.** Track live turn transitions per session:
+  `turn_start` (request received), `streaming` (active SSE/JSON-array generation with
+  TTFT and chunk progress), `awaiting_tool` (upstream response finished with `tool_use` /
+  `function_call` blocks while the harness executes tools locally), `turn_end` (terminal
+  stop/finish reason), and `turn_error` (upstream HTTP 4xx/5xx, 429 rate limits, timeouts,
+  or stream truncation).
+- **Active prompt and conversation preview.** Extract bounded, sanitized metadata for the
+  latest user prompt (first-line preview / title seed, message count, and turn index) from
+  the ingress request so `tmux-spaces` can populate pane titles and Inbox summaries even
+  before a harness writes its local session store.
+- **Current tool execution tracking.** Extract requested tool names, call IDs, and bounded
+  argument previews from upstream `tool_use` / `function_call` response blocks, and pair
+  them with matching `tool_result` / `function_response` blocks on the next request to
+  surface currently executing tools, tool durations, and tool error flags.
+- **Routing, dialect, and reasoning metadata.** Surface the requested model alias,
+  canonical model ID, selected upstream provider and dialect, native passthrough vs.
+  translated route status, effective `reasoning_effort` / thinking budget, and any
+  `x-model-router-loss` translation loss diagnostics.
+- **Live usage, context, and rate-limit signals.** Stream authoritative input, output,
+  reasoning, and cache read/write token counts, estimated USD cost, request latency, retry
+  attempts, and upstream 429 reset headers directly into `spacecore`.
+
+### 15.2 Communication contract, precedence, and boundaries
+
+- **Local authenticated transport.** Communicate with `~/dev/router` over its authenticated
+  local diagnostics/telemetry interface (HTTP/SSE stream or UDS push to `spacecore`'s
+  `h.sock`), using bounded non-blocking queues so telemetry delivery never stalls proxy
+  streaming or adds latency to model requests.
+- **Tiered source precedence.** Integrate `router` observations into `spacecore` alongside
+  existing sources:
+  1. **Companion plugin (`plugin`)** remains highest authority when installed and fresh.
+  2. **Router live feed (`router`)** enriches routed panes with authoritative model,
+     provider, dialect, reasoning effort, token/cost, active prompt, and tool-request
+     signals, and fills in `working`/`done`/`failed` turn state when a harness lacks a
+     companion plugin or native hooks.
+  3. **Hooks, daemon SSE, OSC 7501, and screen rules** continue to own terminal-only
+     blockers (`permission`, `question`, `auth`) and serve as zero-config fallbacks for
+     direct (`--no-router`) profiles.
+- **Privacy and safety bounds.** Never transmit provider credentials, API keys, or
+  unbounded request/response bodies. Keep prompt and tool-argument previews opt-in and
+  length-capped in line with `spacecore` field limits (`MaxText` / `MaxField`).
+
+### 15.3 Phasing and testing bar
+
+1. **Phase 1.** Define the local session-event stream / push contract between
+   `~/dev/router` (`routerd`) and `spaces` (`internal/hooks/core` +
+   `internal/harness/routerctl`), correlating `router_session` and native session headers
+   to live tmux panes.
+2. **Phase 2.** Extract live turn status, active prompt preview, requested/in-flight tool
+   executions (`tool_use` ↔ `tool_result` pairing), model/provider/dialect/effort, and
+   usage/error/429 telemetry into `spacecore` `v2` pane records.
+3. **Phase 3.** Surface router-extracted fields in the TUI (`H` detail overlay and
+   `ATT-10` source attribution) and `tmux-spaces doctor` / `harness-doctor`.
+
+Testing bar:
+
+- Unit-test `spacecore` ingestion of `router` events against synthetic OpenAI Chat,
+  Responses, Anthropic, and Gemini turn/tool sequences, verifying `plugin > router/hook >
+  screen` precedence and non-blocking degradation when `routerd` is stopped or unreachable.
+- Verify `tool_use` → `tool_result` pairing accurately surfaces in-flight tool execution
+  without clearing an active hook or screen `blocked` (`permission`/`question`) state.
