@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -15,7 +17,19 @@ import (
 	"github.com/arhammahajan/spaces/internal/agent"
 )
 
-const codexMCPActiveMtimeSecs = 30 * 60 // 30 minutes (1800s)
+const (
+	codexMCPActiveMtimeSecs     = 30 * 60 // 30 minutes (1800s)
+	codexWhamTTLSecs            = 60
+	codexWhamThrottleDuration   = 60 * time.Second
+	codexWhamHTTPTimeout        = 4 * time.Second
+	codexWeeklyWindowMinSeconds = 86_400
+	codexWhamOriginator         = "codex_cli_rs"
+)
+
+var (
+	codexWhamEndpoint   = "https://chatgpt.com/backend-api/wham/usage"
+	codexWhamHTTPClient = &http.Client{Timeout: codexWhamHTTPTimeout}
+)
 
 type codexRateLimitStore struct {
 	mu     sync.RWMutex
@@ -158,7 +172,7 @@ func (p *codexTelemetryProvider) CollectSessionMetrics(ctx context.Context, q ag
 		ctxWindow = agent.ContextWindowForModel(model, "", maxCtx)
 	}
 
-	return &agent.SessionMetrics{
+	m := &agent.SessionMetrics{
 		Agent:           "codex",
 		SessionID:       sessionID,
 		LaunchSurface:   agent.DetectLaunchSurface(q.Cmdline),
@@ -180,7 +194,12 @@ func (p *codexTelemetryProvider) CollectSessionMetrics(ctx context.Context, q ag
 		ContextHistory:  ctxHist,
 		StartedAtMs:     startedAtMs,
 		UpdatedAtMs:     updatedAtMs,
-	}, nil
+	}
+	if cost, ok := agent.EstimateCostUSD(m.Model, m.Usage); ok {
+		m.Usage.CostUSD = cost
+		m.Usage.CostPriced = true
+	}
+	return m, nil
 }
 
 func (p *codexTelemetryProvider) updateRolloutCacheLocked(path string) (*codexRolloutCacheEntry, *agent.QuotaInfo, bool) {
@@ -717,15 +736,20 @@ func writeCodexRateLimitCache(q *agent.QuotaInfo, homeDir string) {
 		return
 	}
 
+	src := q.Source
+	if src == "" {
+		src = "codex"
+	}
 	payload := rateLimitFileJSON{
-		Source:    "codex",
-		UpdatedAt: q.UpdatedAt,
+		Source:    src,
+		PlanType:  q.PlanType,
+		UpdatedAt: flexibleUnixSec(q.UpdatedAt),
 	}
 	if q.Primary != nil {
 		pct := q.Primary.UsedPct
 		payload.FiveHour = &rateLimitWindowJSON{
 			UsedPercentage: &pct,
-			ResetsAt:       q.Primary.ResetsAt,
+			ResetsAt:       flexibleUnixSec(q.Primary.ResetsAt),
 			WindowMinutes:  q.Primary.WindowMinutes,
 		}
 	}
@@ -733,7 +757,7 @@ func writeCodexRateLimitCache(q *agent.QuotaInfo, homeDir string) {
 		pct := q.Secondary.UsedPct
 		payload.SevenDay = &rateLimitWindowJSON{
 			UsedPercentage: &pct,
-			ResetsAt:       q.Secondary.ResetsAt,
+			ResetsAt:       flexibleUnixSec(q.Secondary.ResetsAt),
 			WindowMinutes:  q.Secondary.WindowMinutes,
 		}
 	}
@@ -743,17 +767,22 @@ func writeCodexRateLimitCache(q *agent.QuotaInfo, homeDir string) {
 		return
 	}
 
-	tmpPath := cachePath + ".tmp"
+	tmpPath := fmt.Sprintf("%s.tmp.%d", cachePath, os.Getpid())
 	if err := os.WriteFile(tmpPath, data, 0o600); err != nil {
 		return
 	}
-	_ = os.Rename(tmpPath, cachePath)
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		_ = os.Remove(tmpPath)
+	}
 }
 
 // codexQuotaProvider returns the freshest Codex QuotaInfo from in-memory live
-// rate limits, ~/.cache/spaces/codex-rate-limits.json, or ~/.cache/abtop/codex-rate-limits.json.
+// rate limits, ~/.cache/spaces/codex-rate-limits.json, ~/.cache/abtop/codex-rate-limits.json,
+// or a throttled live pull from ChatGPT's wham/usage endpoint.
 type codexQuotaProvider struct {
-	rateStore *codexRateLimitStore
+	rateStore         *codexRateLimitStore
+	mu                sync.Mutex
+	lastWhamAttemptAt time.Time
 }
 
 func newCodexQuotaProvider(store *codexRateLimitStore) *codexQuotaProvider {
@@ -798,7 +827,211 @@ func (p *codexQuotaProvider) FetchQuota(ctx context.Context, homeDirs []string) 
 			}
 		}
 	}
-	return best, nil
+
+	now := time.Now()
+	nowUnix := now.Unix()
+	if best != nil && bestFreshness > 0 && (nowUnix-bestFreshness) < codexWhamTTLSecs {
+		return best, nil
+	}
+
+	// 60s negative-cache throttle across both success and failure (401/403/network/missing auth).
+	p.mu.Lock()
+	if !p.lastWhamAttemptAt.IsZero() && now.Sub(p.lastWhamAttemptAt) < codexWhamThrottleDuration {
+		p.mu.Unlock()
+		return best, nil
+	}
+	p.lastWhamAttemptAt = now
+	p.mu.Unlock()
+
+	accessToken, accountID, authHome := readCodexAuthFromHomes(homes)
+	if accessToken == "" {
+		return best, nil
+	}
+
+	pulled, err := fetchCodexWhamUsage(ctx, accessToken, accountID, nowUnix)
+	if err != nil || pulled == nil {
+		return best, nil
+	}
+
+	cacheHome := authHome
+	if cacheHome == "" && len(homes) > 0 {
+		cacheHome = homes[0]
+	}
+	p.rateStore.update(pulled, cacheHome)
+	return pulled, nil
+}
+
+type codexAuthFile struct {
+	AccountID        string           `json:"account_id"`
+	ChatGPTAccountID string           `json:"chatgpt_account_id"`
+	Tokens           *codexAuthTokens `json:"tokens"`
+}
+
+type codexAuthTokens struct {
+	AccessToken      string `json:"access_token"`
+	AccountID        string `json:"account_id"`
+	ChatGPTAccountID string `json:"chatgpt_account_id"`
+}
+
+func readCodexAuthFromHomes(homes []string) (accessToken, accountID, matchedHome string) {
+	for _, h := range homes {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		authPath := filepath.Join(h, ".codex", "auth.json")
+		if isSymlinkPath(authPath) {
+			continue
+		}
+		data, err := os.ReadFile(authPath)
+		if err != nil {
+			continue
+		}
+		var doc codexAuthFile
+		if err := json.Unmarshal(data, &doc); err != nil || doc.Tokens == nil {
+			continue
+		}
+		tok := strings.TrimSpace(doc.Tokens.AccessToken)
+		if tok == "" {
+			continue
+		}
+		acct := firstNonEmpty(
+			strings.TrimSpace(doc.Tokens.AccountID),
+			strings.TrimSpace(doc.Tokens.ChatGPTAccountID),
+			strings.TrimSpace(doc.AccountID),
+			strings.TrimSpace(doc.ChatGPTAccountID),
+		)
+		return tok, acct, h
+	}
+	return "", "", ""
+}
+
+type whamUsageResponse struct {
+	PlanType  string         `json:"plan_type"`
+	RateLimit *whamRateLimit `json:"rate_limit"`
+}
+
+type whamRateLimit struct {
+	PrimaryWindow   *whamWindow `json:"primary_window"`
+	SecondaryWindow *whamWindow `json:"secondary_window"`
+}
+
+type whamWindow struct {
+	UsedPercent        *float64 `json:"used_percent"`
+	LimitWindowSeconds *int64   `json:"limit_window_seconds"`
+	ResetAt            *int64   `json:"reset_at"`
+	ResetAfterSeconds  *int64   `json:"reset_after_seconds"`
+}
+
+func fetchCodexWhamUsage(ctx context.Context, accessToken, accountID string, nowUnix int64) (*agent.QuotaInfo, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, codexWhamHTTPTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, codexWhamEndpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("originator", codexWhamOriginator)
+	req.Header.Set("Accept", "application/json")
+	if accountID != "" {
+		req.Header.Set("chatgpt-account-id", accountID)
+	}
+
+	client := codexWhamHTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: codexWhamHTTPTimeout}
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("codex wham/usage HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	return parseCodexWhamUsage(body, nowUnix)
+}
+
+func parseCodexWhamUsage(body []byte, nowUnix int64) (*agent.QuotaInfo, error) {
+	var doc whamUsageResponse
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+	if doc.RateLimit == nil {
+		return nil, nil
+	}
+
+	q := &agent.QuotaInfo{
+		Agent:     "codex",
+		Source:    "codex_wham",
+		PlanType:  strings.TrimSpace(doc.PlanType),
+		UpdatedAt: nowUnix,
+	}
+
+	slots := []struct {
+		w         *whamWindow
+		isPrimary bool
+	}{
+		{w: doc.RateLimit.PrimaryWindow, isPrimary: true},
+		{w: doc.RateLimit.SecondaryWindow, isPrimary: false},
+	}
+
+	for _, slot := range slots {
+		w := slot.w
+		if w == nil || w.UsedPercent == nil {
+			continue
+		}
+
+		isWeekly := !slot.isPrimary
+		var mins int
+		if w.LimitWindowSeconds != nil && *w.LimitWindowSeconds > 0 {
+			isWeekly = *w.LimitWindowSeconds >= codexWeeklyWindowMinSeconds
+			mins = int(*w.LimitWindowSeconds / 60)
+		}
+		if mins <= 0 {
+			if isWeekly {
+				mins = 10080
+			} else {
+				mins = 300
+			}
+		}
+
+		var resetsAt int64
+		if w.ResetAt != nil && *w.ResetAt > 0 {
+			resetsAt = *w.ResetAt
+		} else if w.ResetAfterSeconds != nil && *w.ResetAfterSeconds > 0 {
+			resetsAt = nowUnix + *w.ResetAfterSeconds
+		}
+
+		qw := &agent.QuotaWindow{
+			Label:         agent.FormatQuotaWindowLabel(mins),
+			WindowMinutes: mins,
+			UsedPct:       *w.UsedPercent,
+			ResetsAt:      resetsAt,
+		}
+
+		if isWeekly {
+			if q.Secondary == nil {
+				q.Secondary = qw
+			}
+		} else {
+			if q.Primary == nil {
+				q.Primary = qw
+			}
+		}
+	}
+
+	if q.Primary == nil && q.Secondary == nil {
+		return nil, nil
+	}
+	return q, nil
 }
 
 // codexMCPActivityProvider discovers live `codex mcp-server` processes and their open rollout threads.

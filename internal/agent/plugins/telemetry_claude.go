@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,8 +17,11 @@ import (
 )
 
 const (
-	telemetryMaxLineBytes = 10 * 1024 * 1024 // 10 MiB
-	telemetryMaxHistory   = 64
+	telemetryMaxLineBytes       = 10 * 1024 * 1024 // 10 MiB
+	telemetryMaxHistory         = 64
+	claudeTier2MaxFiles         = 32
+	claudeTier2DefaultLimit     = 2_500_000
+	claudeTier2BlockWindowHours = 5
 )
 
 type claudeTranscriptCacheEntry struct {
@@ -121,7 +125,7 @@ func (p *claudeTelemetryProvider) CollectSessionMetrics(ctx context.Context, q a
 	projectDir := filepath.Dir(transcriptPath)
 	memFiles, memLines := readClaudeMemoryStatus(filepath.Join(projectDir, "memory"))
 
-	return &agent.SessionMetrics{
+	m := &agent.SessionMetrics{
 		Agent:           "claude",
 		SessionID:       sessionID,
 		LaunchSurface:   agent.DetectLaunchSurface(q.Cmdline),
@@ -145,7 +149,12 @@ func (p *claudeTelemetryProvider) CollectSessionMetrics(ctx context.Context, q a
 		MemoryLines:     memLines,
 		StartedAtMs:     startedAtMs,
 		UpdatedAtMs:     updatedAtMs,
-	}, nil
+	}
+	if cost, ok := agent.EstimateCostUSD(m.Model, m.Usage); ok {
+		m.Usage.CostUSD = cost
+		m.Usage.CostPriced = true
+	}
+	return m, nil
 }
 
 func (p *claudeTelemetryProvider) updateTranscriptCacheLocked(path, configRoot string) (*claudeTranscriptCacheEntry, bool) {
@@ -777,18 +786,60 @@ func newClaudeQuotaProvider() *claudeQuotaProvider {
 	return &claudeQuotaProvider{}
 }
 
+// flexibleUnixSec unmarshals either numeric Unix epoch seconds or RFC3339 strings.
+type flexibleUnixSec int64
+
+func (f *flexibleUnixSec) UnmarshalJSON(data []byte) error {
+	s := strings.TrimSpace(string(data))
+	if s == "" || s == "null" {
+		*f = 0
+		return nil
+	}
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		*f = flexibleUnixSec(i)
+		return nil
+	}
+	if fl, err := strconv.ParseFloat(s, 64); err == nil {
+		*f = flexibleUnixSec(int64(fl))
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		str = strings.TrimSpace(str)
+		if str == "" {
+			*f = 0
+			return nil
+		}
+		if i, err := strconv.ParseInt(str, 10, 64); err == nil {
+			*f = flexibleUnixSec(i)
+			return nil
+		}
+		if t, err := time.Parse(time.RFC3339Nano, str); err == nil {
+			*f = flexibleUnixSec(t.Unix())
+			return nil
+		}
+		if t, err := time.Parse(time.RFC3339, str); err == nil {
+			*f = flexibleUnixSec(t.Unix())
+			return nil
+		}
+	}
+	*f = 0
+	return nil
+}
+
 type rateLimitWindowJSON struct {
-	UsedPercentage *float64 `json:"used_percentage"`
-	Pct            *float64 `json:"pct"`
-	ResetsAt       int64    `json:"resets_at"`
-	WindowMinutes  int      `json:"window_minutes"`
+	UsedPercentage *float64        `json:"used_percentage"`
+	Pct            *float64        `json:"pct"`
+	ResetsAt       flexibleUnixSec `json:"resets_at"`
+	WindowMinutes  int             `json:"window_minutes"`
 }
 
 type rateLimitFileJSON struct {
 	Source    string               `json:"source"`
+	PlanType  string               `json:"plan_type,omitempty"`
 	FiveHour  *rateLimitWindowJSON `json:"five_hour"`
 	SevenDay  *rateLimitWindowJSON `json:"seven_day"`
-	UpdatedAt int64                `json:"updated_at"`
+	UpdatedAt flexibleUnixSec      `json:"updated_at"`
 }
 
 func (p *claudeQuotaProvider) FetchQuota(ctx context.Context, homeDirs []string) (*agent.QuotaInfo, error) {
@@ -813,7 +864,232 @@ func (p *claudeQuotaProvider) FetchQuota(ctx context.Context, homeDirs []string)
 			}
 		}
 	}
-	return best, nil
+	if best != nil {
+		return best, nil
+	}
+
+	// Tier-2 fallback: estimate 5h UTC block usage from recent local Claude JSONL transcripts.
+	return estimateClaudeTier2Quota(ctx, dirs, time.Now().UTC()), nil
+}
+
+type claudeTier2Call struct {
+	ts           time.Time
+	activeTokens int64
+}
+
+func claudeTier2TokenLimit() int64 {
+	if raw := strings.TrimSpace(os.Getenv("SPACES_CLAUDE_5H_TOKEN_LIMIT")); raw != "" {
+		if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
+			return v
+		}
+	}
+	return claudeTier2DefaultLimit
+}
+
+func estimateClaudeTier2Quota(ctx context.Context, configDirs []string, now time.Time) *agent.QuotaInfo {
+	if len(configDirs) == 0 || ctx.Err() != nil {
+		return nil
+	}
+
+	cutoff := now.Add(-claudeTier2BlockWindowHours * time.Hour)
+	type candFile struct {
+		path    string
+		modTime time.Time
+	}
+	var files []candFile
+
+	for _, cfgDir := range configDirs {
+		projectsDir := filepath.Join(cfgDir, "projects")
+		projEntries, err := os.ReadDir(projectsDir)
+		if err != nil {
+			continue
+		}
+		for _, pe := range projEntries {
+			if pe.Type()&os.ModeSymlink != 0 || !pe.IsDir() {
+				continue
+			}
+			pDir := filepath.Join(projectsDir, pe.Name())
+			entries, err := os.ReadDir(pDir)
+			if err != nil {
+				continue
+			}
+			for _, e := range entries {
+				if e.IsDir() || e.Type()&os.ModeSymlink != 0 || !strings.HasSuffix(e.Name(), ".jsonl") {
+					continue
+				}
+				info, err := e.Info()
+				if err != nil {
+					continue
+				}
+				if info.ModTime().Before(cutoff) {
+					continue
+				}
+				files = append(files, candFile{
+					path:    filepath.Join(pDir, e.Name()),
+					modTime: info.ModTime(),
+				})
+			}
+		}
+	}
+
+	if len(files) == 0 {
+		return nil
+	}
+
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.After(files[j].modTime)
+	})
+	if len(files) > claudeTier2MaxFiles {
+		files = files[:claudeTier2MaxFiles]
+	}
+
+	var calls []claudeTier2Call
+	for _, cf := range files {
+		if ctx.Err() != nil {
+			return nil
+		}
+		calls = append(calls, scanClaudeTier2Calls(cf.path)...)
+	}
+	if len(calls) == 0 {
+		return nil
+	}
+
+	blockStart, totalTokens, ok := resolveActiveClaude5hBlock(calls, now)
+	if !ok {
+		return nil
+	}
+
+	limit := claudeTier2TokenLimit()
+	usedPct := (float64(totalTokens) / float64(limit)) * 100.0
+	if usedPct < 0 {
+		usedPct = 0
+	}
+	if usedPct > 100 {
+		usedPct = 100
+	}
+
+	blockEnd := blockStart.Add(claudeTier2BlockWindowHours * time.Hour)
+	return &agent.QuotaInfo{
+		Agent:     "claude",
+		Source:    "estimated_5h",
+		Estimated: true,
+		Primary: &agent.QuotaWindow{
+			Label:         "5h",
+			WindowMinutes: 300,
+			UsedPct:       usedPct,
+			ResetsAt:      blockEnd.Unix(),
+		},
+		UpdatedAt: now.Unix(),
+	}
+}
+
+func scanClaudeTier2Calls(path string) []claudeTier2Call {
+	if isSymlinkPath(path) {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var out []claudeTier2Call
+	reader := bufio.NewReaderSize(f, 64*1024)
+	for {
+		line, n, _, hitCap, err := readBoundedLine(reader, telemetryMaxLineBytes)
+		if n == 0 && err != nil {
+			break
+		}
+		if hitCap {
+			if err != nil {
+				break
+			}
+			continue
+		}
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || !strings.Contains(trimmed, `"usage"`) {
+			if err != nil {
+				break
+			}
+			continue
+		}
+		var raw map[string]any
+		if json.Unmarshal([]byte(trimmed), &raw) == nil && strField(raw, "type") == "assistant" {
+			tsMs := parseRFC3339Ms(strField(raw, "timestamp"))
+			if tsMs > 0 {
+				if msg, ok := raw["message"].(map[string]any); ok {
+					if usage, ok := msg["usage"].(map[string]any); ok {
+						active := int64Field(usage, "input_tokens") +
+							int64Field(usage, "output_tokens") +
+							int64Field(usage, "cache_creation_input_tokens")
+						if active > 0 {
+							out = append(out, claudeTier2Call{
+								ts:           time.UnixMilli(tsMs).UTC(),
+								activeTokens: active,
+							})
+						}
+					}
+				}
+			}
+		}
+		if err != nil {
+			break
+		}
+	}
+	return out
+}
+
+// resolveActiveClaude5hBlock implements the 5h UTC rolling block calculation:
+// block start is floored to the UTC hour of the first message in the block,
+// and rolls over when a new message is >= 5h after block start or >= 5h after
+// the previous message. Returns (blockStart, totalActiveTokens, active).
+func resolveActiveClaude5hBlock(calls []claudeTier2Call, now time.Time) (time.Time, int64, bool) {
+	if len(calls) == 0 {
+		return time.Time{}, 0, false
+	}
+	sorted := make([]claudeTier2Call, len(calls))
+	copy(sorted, calls)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].ts.Before(sorted[j].ts)
+	})
+
+	windowDur := claudeTier2BlockWindowHours * time.Hour
+	var (
+		hasBlock    bool
+		blockStart  time.Time
+		lastEntry   time.Time
+		totalTokens int64
+	)
+
+	for _, c := range sorted {
+		if !hasBlock {
+			hasBlock = true
+			blockStart = c.ts.UTC().Truncate(time.Hour)
+			lastEntry = c.ts
+			totalTokens = c.activeTokens
+			continue
+		}
+		rollsOver := c.ts.Sub(blockStart) >= windowDur
+		stale := c.ts.Sub(lastEntry) >= windowDur
+		if rollsOver || stale {
+			blockStart = c.ts.UTC().Truncate(time.Hour)
+			lastEntry = c.ts
+			totalTokens = c.activeTokens
+		} else {
+			lastEntry = c.ts
+			totalTokens += c.activeTokens
+		}
+	}
+
+	if !hasBlock {
+		return time.Time{}, 0, false
+	}
+	blockEnd := blockStart.Add(windowDur)
+	nowUTC := now.UTC()
+	if nowUTC.Before(blockStart) || nowUTC.After(blockEnd) || nowUTC.Sub(lastEntry) >= windowDur {
+		return time.Time{}, 0, false
+	}
+	return blockStart, totalTokens, true
 }
 
 func collectClaudeQuotaDirs(homeDirs []string) []string {
@@ -876,7 +1152,8 @@ func readRateLimitQuotaFile(path, agentID string) (*agent.QuotaInfo, int64) {
 	q := &agent.QuotaInfo{
 		Agent:     agentID,
 		Source:    rf.Source,
-		UpdatedAt: rf.UpdatedAt,
+		PlanType:  rf.PlanType,
+		UpdatedAt: int64(rf.UpdatedAt),
 	}
 	if q.Source == "" {
 		q.Source = agentID
@@ -892,7 +1169,7 @@ func readRateLimitQuotaFile(path, agentID string) (*agent.QuotaInfo, int64) {
 				Label:         agent.FormatQuotaWindowLabel(mins),
 				WindowMinutes: mins,
 				UsedPct:       pct,
-				ResetsAt:      rf.FiveHour.ResetsAt,
+				ResetsAt:      int64(rf.FiveHour.ResetsAt),
 			}
 		}
 	}
@@ -907,7 +1184,7 @@ func readRateLimitQuotaFile(path, agentID string) (*agent.QuotaInfo, int64) {
 				Label:         agent.FormatQuotaWindowLabel(mins),
 				WindowMinutes: mins,
 				UsedPct:       pct,
-				ResetsAt:      rf.SevenDay.ResetsAt,
+				ResetsAt:      int64(rf.SevenDay.ResetsAt),
 			}
 		}
 	}
@@ -915,7 +1192,7 @@ func readRateLimitQuotaFile(path, agentID string) (*agent.QuotaInfo, int64) {
 		return nil, 0
 	}
 
-	freshness := rf.UpdatedAt
+	freshness := int64(rf.UpdatedAt)
 	if freshness == 0 {
 		freshness = st.ModTime().Unix()
 	}
