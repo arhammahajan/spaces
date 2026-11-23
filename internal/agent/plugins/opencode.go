@@ -23,7 +23,7 @@ func NewOpenCode() agent.Plugin {
 			ScreenManifestID:        "opencode",
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
-			TitlePrefixes: []string{"OC | ", "OpenCode - ", "OpenCode: "},
+			TitlePrefixes:           []string{"OC | ", "OpenCode - ", "OpenCode: "},
 			WorktreeTitlePrefixes: []string{
 				"oc | ", "oc: ", "oc - ",
 				"opencode | ", "opencode - ", "opencode: ",
@@ -33,8 +33,9 @@ func NewOpenCode() agent.Plugin {
 		MCPTargets: []agent.MCPConfigTarget{
 			{HarnessLabel: "opencode", RelPath: ".config/opencode/opencode.json"},
 		},
-		CustomTitleExtractor: agent.TitleExtractorFunc(extractOpencodeTitle),
-		CustomDaemonWatcher:  NewOpenCodeDaemonWatcher(),
+		CustomTitleExtractor:  agent.TitleExtractorFunc(extractOpencodeTitle),
+		CustomDaemonWatcher:   NewOpenCodeDaemonWatcher(),
+		CustomCompanionPlugin: NewOpenCodeCompanion(),
 	}
 }
 

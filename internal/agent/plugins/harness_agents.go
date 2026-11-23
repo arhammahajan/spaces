@@ -86,6 +86,7 @@ func harnessManagedPlugins() []agent.Plugin {
 			MCPTargets: []agent.MCPConfigTarget{
 				{HarnessLabel: "pi", RelPath: ".pi/agent/mcp.json"},
 			},
+			CustomCompanionPlugin: NewPiCompanion(),
 		},
 		&agent.BasePlugin{
 			PluginSpec: agent.Spec{
