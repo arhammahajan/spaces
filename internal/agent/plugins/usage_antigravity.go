@@ -278,6 +278,7 @@ func parseAntigravityUsageLine(
 		Provider:        "antigravity",
 		TimestampMs:     tsMs,
 		Model:           model,
+		RateModel:       antigravityRateModel(model),
 		SessionID:       sessionID,
 		Project:         project,
 		ProjectPath:     projectPath,
@@ -286,6 +287,36 @@ func parseAntigravityUsageLine(
 		Speed:           agent.UsageSpeedStandard,
 		Tools:           tools,
 	}, true
+}
+
+// antigravityRateModel maps Antigravity effort/routing/orchestrator variants
+// onto their base pricing model ID (matching t3code's antigravityRateModel).
+func antigravityRateModel(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return ""
+	}
+	switch m {
+	case "gemini-3-flash-agent", "gemini-3-flash-agent-a", "gemini-3-flash-agent-b", "gemini-3-flash-a", "gemini-3-flash-b":
+		return "gemini-3.5-flash"
+	case "gemini-3.7-flash-safety-le":
+		return "gemini-3.7-flash"
+	case "gemini-pro-orchestrator-neon":
+		return "gemini-4-neon"
+	case "gemini-pro-orchestrator-g1-pro":
+		return "gemini-4-argon"
+	}
+	base := m
+	for _, suffix := range []string{"-extra-low", "-low", "-medium", "-high", "-tiered", "-control", "-thinking", "-agent", "-orchestrator"} {
+		if strings.HasSuffix(base, suffix) {
+			base = strings.TrimSuffix(base, suffix)
+			break
+		}
+	}
+	if base == "gemini-3-flash" {
+		return "gemini-3-flash-preview"
+	}
+	return base
 }
 
 func extractAntigravityUserRequest(raw string) string {

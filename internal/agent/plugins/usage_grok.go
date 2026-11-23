@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/arhammahajan/spaces/internal/agent"
@@ -188,7 +189,7 @@ func parseGrokUsageLine(line []byte, fallbackSessionID string) []agent.UsageReco
 		}
 		var dedupeKey string
 		if promptID != "" {
-			dedupeKey = "grok:" + sessionID + ":" + promptID + ":grok"
+			dedupeKey = "grok:" + sessionID + ":" + promptID + ":" + strconv.FormatInt(tsMs, 10) + ":grok"
 		}
 		return []agent.UsageRecord{{
 			Provider:        "grok",
@@ -245,7 +246,7 @@ func parseGrokUsageLine(line []byte, fallbackSessionID string) []agent.UsageReco
 		}
 		var dedupeKey string
 		if promptID != "" {
-			dedupeKey = "grok:" + sessionID + ":" + promptID + ":" + m
+			dedupeKey = "grok:" + sessionID + ":" + promptID + ":" + strconv.FormatInt(tsMs, 10) + ":" + m
 		}
 		results = append(results, agent.UsageRecord{
 			Provider:        "grok",

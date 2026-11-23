@@ -518,7 +518,7 @@ func TestUsageGrokReader(t *testing.T) {
 		t.Fatalf("expected 1 grok record, got %d", len(recs))
 	}
 	r := recs[0]
-	if r.Model != "grok-code-fast-1" || r.DedupeKey != "grok:grok-s1:p1:grok-code-fast-1" {
+	if r.Model != "grok-code-fast-1" || r.DedupeKey != "grok:grok-s1:p1:1780000001000:grok-code-fast-1" {
 		t.Fatalf("unexpected grok identity: %+v", r)
 	}
 	if r.Totals.UncachedInputTokens != 600 || r.Totals.CachedInputTokens != 300 ||
