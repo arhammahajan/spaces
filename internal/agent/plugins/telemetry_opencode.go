@@ -214,6 +214,13 @@ func (p *opencodeTelemetryProvider) CollectSessionMetrics(ctx context.Context, q
 	}
 	metrics.ContextWindow = agent.ContextWindowForModel(metrics.Model, "", maxContextTokens)
 
+	if metrics.Usage.CostUSD > 0 {
+		metrics.Usage.CostPriced = true
+	} else if cost, ok := agent.EstimateCostUSD(metrics.Model, metrics.Usage); ok {
+		metrics.Usage.CostUSD = cost
+		metrics.Usage.CostPriced = true
+	}
+
 	return metrics, nil
 }
 
