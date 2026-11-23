@@ -218,10 +218,13 @@ type Model struct {
 	telemetry           model.TelemetrySnapshot
 	telemetryLoaded     bool
 	telemetryFetching   bool
-	tabsMonitorMode     bool
-	tabsMonitorSelected int
-	tabsMonitorTab      int          // narrow (<100 col): 0=Work, 1=Usage, 2=System
-	tabsMonitorHidden   map[int]bool // panels 1..7 visibility toggles
+	tabsMonitorMode      bool
+	tabsMonitorSelected  int
+	tabsMonitorTab       int          // narrow (<100 col): 0=Work, 1=Usage, 2=System
+	tabsMonitorHidden    map[int]bool // panels 1..7 visibility toggles
+	tabsMonitorFilter    string
+	tabsMonitorFiltering bool
+	tabsMonitorSort      monitorSortMode
 
 	pendingTarget string
 	quitting      bool
