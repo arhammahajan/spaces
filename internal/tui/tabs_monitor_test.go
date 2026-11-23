@@ -255,6 +255,20 @@ func TestTelemetryWidgets(t *testing.T) {
 		t.Fatalf("fmtMemKB(1572864) = %q", got)
 	}
 
+	// fmtCostUSD
+	if got := fmtCostUSD(0, false); got != "—" {
+		t.Fatalf("fmtCostUSD(0, false) = %q, want —", got)
+	}
+	if got := fmtCostUSD(0, true); got != "$0.00" {
+		t.Fatalf("fmtCostUSD(0, true) = %q, want $0.00", got)
+	}
+	if got := fmtCostUSD(0.08, true); got != "$0.08" {
+		t.Fatalf("fmtCostUSD(0.08, true) = %q, want $0.08", got)
+	}
+	if got := fmtCostUSD(1.24, true); got != "$1.24" {
+		t.Fatalf("fmtCostUSD(1.24, true) = %q, want $1.24", got)
+	}
+
 	// fmtCountdown
 	now := int64(1_700_000_000)
 	if got := fmtCountdown(now-10, now); got != "" {
@@ -558,6 +572,336 @@ func TestTabsEnrichedHeaderAndInspector(t *testing.T) {
 	} {
 		if !strings.Contains(view, want) {
 			t.Errorf("enriched tabs popup missing %q\n--- VIEW ---\n%s", want, view)
+		}
+	}
+}
+
+func TestTabsMonitorLiveFilterAndJump(t *testing.T) {
+	fb := &fakeTelemetryTabsBackend{}
+	m := newTelemetryTestTabsModel(t, fb, 140, 42)
+
+	// Enter monitor mode.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m = next.(Model)
+
+	// Hints bar shows filter & sort hints.
+	initialView := ansi.Strip(m.View())
+	for _, want := range []string{"/ filter", "s sort"} {
+		if !strings.Contains(initialView, want) {
+			t.Errorf("monitor hints missing %q\n%s", want, initialView)
+		}
+	}
+
+	// Press '/' to start live filter and type "codexx", then Backspace -> "codex".
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	m = next.(Model)
+	if !m.tabsMonitorFiltering {
+		t.Fatalf("expected tabsMonitorFiltering=true after '/'")
+	}
+	for _, r := range "codexx" {
+		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = next.(Model)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m = next.(Model)
+	if m.tabsMonitorFilter != "codex" {
+		t.Fatalf("tabsMonitorFilter = %q, want %q", m.tabsMonitorFilter, "codex")
+	}
+
+	// Press Enter to commit filter (exits typing mode, keeps filter active).
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = next.(Model)
+	if m.tabsMonitorFiltering {
+		t.Fatalf("expected tabsMonitorFiltering=false after Enter")
+	}
+	if m.tabsMonitorFilter != "codex" {
+		t.Fatalf("expected filter to remain %q after Enter, got %q", "codex", m.tabsMonitorFilter)
+	}
+
+	// Panel 6 header shows active filter, Panel 6 & Panel 3 reflect only the filtered codex session (390k).
+	filteredView := ansi.Strip(m.View())
+	if !strings.Contains(filteredView, "/ codex") {
+		t.Errorf("expected active filter '/ codex' in view:\n%s", filteredView)
+	}
+	if !strings.Contains(filteredView, "390k") {
+		t.Errorf("expected Panel 3 Tokens to update to filtered session (390k):\n%s", filteredView)
+	}
+	if strings.Contains(filteredView, "Implement rich tabs popup") {
+		t.Errorf("expected non-matching claude session to be filtered out of Panel 6:\n%s", filteredView)
+	}
+
+	// Enter jumps to the filtered session's pane (%4 in @3), not the unfiltered index 0 (%1).
+	mJump := m
+	next, _ = mJump.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	mJump = next.(Model)
+	if !mJump.Quitting() {
+		t.Fatalf("expected Quitting() after Enter on filtered session")
+	}
+	if len(fb.focusedPanes) != 1 || fb.focusedPanes[0] != [3]string{"model-router", "@3", "%4"} {
+		t.Fatalf("focusedPanes = %+v, want [model-router @3 %%4]", fb.focusedPanes)
+	}
+
+	// Esc first clears active filter without exiting monitor mode; second Esc exits monitor mode.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.tabsMonitorFilter != "" || !m.tabsMonitorMode {
+		t.Fatalf("first Esc should clear filter and stay in monitor mode: filter=%q mode=%v", m.tabsMonitorFilter, m.tabsMonitorMode)
+	}
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.tabsMonitorMode {
+		t.Fatalf("second Esc should exit monitor mode")
+	}
+}
+
+func TestTabsMonitorSortCycle(t *testing.T) {
+	fb := &fakeTelemetryTabsBackend{}
+	m := newTelemetryTestTabsModel(t, fb, 140, 42)
+
+	// Replace sessions with 3 rows whose highest values differ for Context, Tokens, Memory, and Cost.
+	m.telemetry.Sessions = []model.SessionRow{
+		{
+			Key:         "%1",
+			Space:       "sp",
+			WindowID:    "@1",
+			PaneID:      "%1",
+			Agent:       "claude",
+			Project:     "alpha",
+			Summary:     "alpha-task",
+			Status:      model.StatusWorking,
+			ContextPct:  40.0,
+			TotalTokens: 100_000,
+			MemKB:       512_000,
+			Usage:       agent.TokenUsage{CostUSD: 4.50, CostPriced: true},
+		},
+		{
+			Key:         "%2",
+			Space:       "sp",
+			WindowID:    "@2",
+			PaneID:      "%2",
+			Agent:       "codex",
+			Project:     "beta",
+			Summary:     "beta-task",
+			Status:      model.StatusWorking,
+			ContextPct:  95.0,
+			TotalTokens: 200_000,
+			MemKB:       256_000,
+			Usage:       agent.TokenUsage{CostUSD: 1.10, CostPriced: true},
+		},
+		{
+			Key:         "%3",
+			Space:       "sp",
+			WindowID:    "@3",
+			PaneID:      "%3",
+			Agent:       "opencode",
+			Project:     "gamma",
+			Summary:     "gamma-task",
+			Status:      model.StatusWorking,
+			ContextPct:  60.0,
+			TotalTokens: 900_000,
+			MemKB:       2_048_000,
+			Usage:       agent.TokenUsage{CostUSD: 2.25, CostPriced: true},
+		},
+	}
+
+	// Enter monitor mode.
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m = next.(Model)
+
+	expectOrder := func(wantMode monitorSortMode, wantLabel string, wantFirstKey string) {
+		t.Helper()
+		if m.tabsMonitorSort != wantMode {
+			t.Fatalf("tabsMonitorSort = %v, want %v", m.tabsMonitorSort, wantMode)
+		}
+		got := m.monitorSessions()
+		if len(got) != 3 || got[0].Key != wantFirstKey {
+			t.Fatalf("sort=%s first session = %q, want %q", wantLabel, got[0].Key, wantFirstKey)
+		}
+		if wantMode != monitorSortDefault {
+			view := ansi.Strip(m.View())
+			if !strings.Contains(view, "sort:"+wantLabel) {
+				t.Errorf("expected 'sort:%s' indicator in monitor view:\n%s", wantLabel, view)
+			}
+		}
+	}
+
+	// default -> alpha (%1)
+	expectOrder(monitorSortDefault, "default", "%1")
+
+	// s -> context (beta 95%)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = next.(Model)
+	expectOrder(monitorSortContext, "context", "%2")
+
+	// s -> tokens (gamma 900k)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = next.(Model)
+	expectOrder(monitorSortTokens, "tokens", "%3")
+
+	// s -> memory (gamma 2G, then alpha 512M, then beta 256M)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = next.(Model)
+	expectOrder(monitorSortMemory, "memory", "%3")
+	if got := m.monitorSessions(); got[1].Key != "%1" || got[2].Key != "%2" {
+		t.Fatalf("memory sort tail = [%s, %s], want [%%1, %%2]", got[1].Key, got[2].Key)
+	}
+
+	// s -> cost (alpha $4.50)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = next.(Model)
+	expectOrder(monitorSortCost, "cost", "%1")
+
+	// s -> back to default
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = next.(Model)
+	expectOrder(monitorSortDefault, "default", "%1")
+}
+
+func TestTabsMonitorQuotaFreshnessAndPlanBadge(t *testing.T) {
+	now := tabsTestNow()
+	nowUnix := now.Unix()
+
+	// Case 1: Claude Last-Known (2h old) + Codex with PlanType ("plus")
+	fb := &fakeTelemetryTabsBackend{}
+	m := newTelemetryTestTabsModel(t, fb, 140, 42)
+	m.telemetry.Quotas = []agent.QuotaInfo{
+		{
+			Agent:     "claude",
+			Source:    "statusline",
+			UpdatedAt: nowUnix - 2*3600, // 2h old -> Last-Known (<= 24h)
+			Primary: &agent.QuotaWindow{
+				Label:    "5h",
+				UsedPct:  35.0,
+				ResetsAt: nowUnix + 2*3600 + 10*60,
+			},
+		},
+		{
+			Agent:     "codex",
+			Source:    "local",
+			PlanType:  "plus",
+			UpdatedAt: nowUnix - 60, // fresh
+			Primary: &agent.QuotaWindow{
+				Label:    "5h",
+				UsedPct:  20.0,
+				ResetsAt: nowUnix + 3*3600,
+			},
+		},
+	}
+
+	panel := ansi.Strip(strings.Join(m.renderPanelQuota(60, 9), "\n"))
+	for _, want := range []string{
+		"CLAUDE ~last",
+		"65%",
+		"in 2h 10m",
+		"CODEX (plus)",
+		"80%",
+		"in 3h 0m",
+	} {
+		if !strings.Contains(panel, want) {
+			t.Errorf("quota panel missing %q:\n%s", want, panel)
+		}
+	}
+
+	// Case 2: Estimated Claude (~est) + Stale Codex (>10m hides countdown)
+	m.telemetry.Quotas = []agent.QuotaInfo{
+		{
+			Agent:     "claude",
+			Source:    "estimated",
+			Estimated: true,
+			UpdatedAt: nowUnix - 1800,
+			Primary: &agent.QuotaWindow{
+				Label:    "5h",
+				UsedPct:  40.0,
+				ResetsAt: nowUnix + 4*3600,
+			},
+		},
+		{
+			Agent:     "codex",
+			Source:    "local",
+			PlanType:  "pro",
+			UpdatedAt: nowUnix - 1200, // 20m old -> stale for codex
+			Primary: &agent.QuotaWindow{
+				Label:    "5h",
+				UsedPct:  10.0,
+				ResetsAt: nowUnix + 5*3600,
+			},
+		},
+	}
+	panel2 := ansi.Strip(strings.Join(m.renderPanelQuota(60, 9), "\n"))
+	for _, want := range []string{"CLAUDE ~est", "60%", "in 4h 0m", "CODEX (pro)"} {
+		if !strings.Contains(panel2, want) {
+			t.Errorf("quota panel (estimated/stale) missing %q:\n%s", want, panel2)
+		}
+	}
+	if strings.Contains(panel2, "in 5h 0m") {
+		t.Errorf("stale codex quota should hide reset countdown:\n%s", panel2)
+	}
+
+	// Case 3: Claude > 24h old is stale and hides countdown.
+	m.telemetry.Quotas = []agent.QuotaInfo{
+		{
+			Agent:     "claude",
+			Source:    "statusline",
+			UpdatedAt: nowUnix - 25*3600,
+			Primary: &agent.QuotaWindow{
+				Label:    "5h",
+				UsedPct:  30.0,
+				ResetsAt: nowUnix + 3600,
+			},
+		},
+	}
+	panel3 := ansi.Strip(strings.Join(m.renderPanelQuota(60, 9), "\n"))
+	if strings.Contains(panel3, "~last") || strings.Contains(panel3, "in 1h 0m") {
+		t.Errorf("claude quota >24h should be stale (no ~last or countdown):\n%s", panel3)
+	}
+}
+
+func TestTabsMonitorCostAggregatesAndWorktreeBadge(t *testing.T) {
+	fb := &fakeTelemetryTabsBackend{}
+	m := newTelemetryTestTabsModel(t, fb, 140, 42)
+
+	// Populate cost, aggregate memory, avg context %, and worktree count.
+	m.telemetry.Context.TotalCostUSD = 1.89
+	m.telemetry.Context.TotalMemKB = 1_835_008 // ~1.8G
+	m.telemetry.Context.AvgContextPct = 85.0
+	m.telemetry.Projects[0].WorktreeCount = 2
+	m.telemetry.Sessions[0].Usage.CostUSD = 1.24
+	m.telemetry.Sessions[0].Usage.CostPriced = true
+	m.telemetry.Sessions[1].Usage.CostUSD = 0.65
+	m.telemetry.Sessions[1].Usage.CostPriced = true
+
+	// Check enriched inspector first (before entering monitor mode).
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'0'}})
+	m = next.(Model)
+	inspView := ansi.Strip(m.View())
+	if !strings.Contains(inspView, "Cost") || !strings.Contains(inspView, "$1.24") {
+		t.Errorf("enriched inspector missing Cost $1.24:\n%s", inspView)
+	}
+
+	// Enter monitor mode and check Panel 1, Panel 3, Panel 4, Panel 6.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'m'}})
+	m = next.(Model)
+	monView := ansi.Strip(m.View())
+	for _, want := range []string{
+		"$1.89",       // Panel 1 TotalCostUSD
+		"Σ1.8G",       // Panel 1 TotalMemKB
+		"avg 85%",     // Panel 1 AvgContextPct
+		"Cost: $1.24", // Panel 3 Tokens Cost
+		"⎇ 2",         // Panel 4 Projects WorktreeCount badge
+		"Cost",        // Panel 6 Cost header
+		"$1.24",       // Panel 6 session 0 cost
+		"$0.65",       // Panel 6 session 1 cost
+	} {
+		if !strings.Contains(monView, want) {
+			t.Errorf("monitor view missing %q:\n%s", want, monView)
+		}
+	}
+
+	// Also verify compact Panel 1 strip renders cost, memory, and avg context %.
+	compactCtx := ansi.Strip(strings.Join(m.renderPanelContext(120, 3), "\n"))
+	for _, want := range []string{"$1.89", "Σ1.8G", "avg 85%"} {
+		if !strings.Contains(compactCtx, want) {
+			t.Errorf("compact Panel 1 missing %q:\n%s", want, compactCtx)
 		}
 	}
 }

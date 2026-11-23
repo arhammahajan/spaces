@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -14,12 +15,105 @@ import (
 )
 
 const (
-	monitorDesktopWidth = 100
-	monitorQuotaStaleS  = 600
+	monitorDesktopWidth     = 100
+	monitorQuotaStaleS      = 600
+	monitorClaudeLastKnownS = 86400
 )
 
+type monitorSortMode int
+
+const (
+	monitorSortDefault monitorSortMode = iota
+	monitorSortContext
+	monitorSortTokens
+	monitorSortMemory
+	monitorSortCost
+)
+
+func (s monitorSortMode) next() monitorSortMode {
+	return (s + 1) % 5
+}
+
+func (s monitorSortMode) label() string {
+	switch s {
+	case monitorSortContext:
+		return "context"
+	case monitorSortTokens:
+		return "tokens"
+	case monitorSortMemory:
+		return "memory"
+	case monitorSortCost:
+		return "cost"
+	default:
+		return "default"
+	}
+}
+
+func sessionMatchesMonitorFilter(s model.SessionRow, queryLower string) bool {
+	if queryLower == "" {
+		return true
+	}
+	for _, field := range []string{
+		s.Project,
+		s.Agent,
+		s.Model,
+		s.Summary,
+		s.CurrentTask,
+		s.SessionID,
+		s.Profile,
+	} {
+		if field != "" && strings.Contains(strings.ToLower(field), queryLower) {
+			return true
+		}
+	}
+	return false
+}
+
+func (m Model) monitorSessions() []model.SessionRow {
+	src := m.telemetry.Sessions
+	if len(src) == 0 {
+		return nil
+	}
+	q := strings.ToLower(strings.TrimSpace(m.tabsMonitorFilter))
+	var out []model.SessionRow
+	if q == "" {
+		if m.tabsMonitorSort == monitorSortDefault {
+			return src
+		}
+		out = make([]model.SessionRow, len(src))
+		copy(out, src)
+	} else {
+		out = make([]model.SessionRow, 0, len(src))
+		for _, s := range src {
+			if sessionMatchesMonitorFilter(s, q) {
+				out = append(out, s)
+			}
+		}
+	}
+
+	switch m.tabsMonitorSort {
+	case monitorSortContext:
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].ContextPct > out[j].ContextPct
+		})
+	case monitorSortTokens:
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].TotalTokens > out[j].TotalTokens
+		})
+	case monitorSortMemory:
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].MemKB > out[j].MemKB
+		})
+	case monitorSortCost:
+		sort.SliceStable(out, func(i, j int) bool {
+			return out[i].Usage.CostUSD > out[j].Usage.CostUSD
+		})
+	}
+	return out
+}
+
 func (m *Model) clampMonitorSelection() {
-	n := len(m.telemetry.Sessions)
+	n := len(m.monitorSessions())
 	if n == 0 {
 		m.tabsMonitorSelected = 0
 		return
@@ -47,7 +141,7 @@ func (m *Model) toggleMonitorPanel(panel int) {
 }
 
 func (m *Model) moveMonitorSelection(delta int) {
-	n := len(m.telemetry.Sessions)
+	n := len(m.monitorSessions())
 	if n == 0 {
 		m.tabsMonitorSelected = 0
 		return
@@ -62,10 +156,11 @@ func (m *Model) moveMonitorSelection(delta int) {
 }
 
 func (m *Model) activateMonitorSession() {
-	if m.tabsMonitorSelected < 0 || m.tabsMonitorSelected >= len(m.telemetry.Sessions) {
+	sessions := m.monitorSessions()
+	if m.tabsMonitorSelected < 0 || m.tabsMonitorSelected >= len(sessions) {
 		return
 	}
-	sess := m.telemetry.Sessions[m.tabsMonitorSelected]
+	sess := sessions[m.tabsMonitorSelected]
 	spaceName := strings.TrimSpace(sess.Space)
 	winID := strings.TrimSpace(sess.WindowID)
 	paneID := strings.TrimSpace(sess.PaneID)
@@ -98,11 +193,62 @@ func (m *Model) activateMonitorSession() {
 }
 
 func (m Model) handleTabsMonitor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.tabsMonitorFiltering {
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			m.quitting = true
+			return m, tea.Quit
+		case tea.KeyEsc:
+			m.tabsMonitorFilter = ""
+			m.tabsMonitorFiltering = false
+			m.tabsMonitorSelected = 0
+			m.clampMonitorSelection()
+			return m, nil
+		case tea.KeyEnter:
+			m.tabsMonitorFiltering = false
+			m.clampMonitorSelection()
+			return m, nil
+		case tea.KeyBackspace:
+			runes := []rune(m.tabsMonitorFilter)
+			if len(runes) > 0 {
+				m.tabsMonitorFilter = string(runes[:len(runes)-1])
+				m.tabsMonitorSelected = 0
+				m.clampMonitorSelection()
+			}
+			return m, nil
+		case tea.KeySpace:
+			m.tabsMonitorFilter += " "
+			m.tabsMonitorSelected = 0
+			m.clampMonitorSelection()
+			return m, nil
+		case tea.KeyUp, tea.KeyCtrlP:
+			m.moveMonitorSelection(-1)
+			return m, nil
+		case tea.KeyDown, tea.KeyCtrlN:
+			m.moveMonitorSelection(1)
+			return m, nil
+		case tea.KeyRunes:
+			if len(msg.Runes) > 0 {
+				m.tabsMonitorFilter += string(msg.Runes)
+				m.tabsMonitorSelected = 0
+				m.clampMonitorSelection()
+			}
+			return m, nil
+		}
+		return m, nil
+	}
+
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		m.quitting = true
 		return m, tea.Quit
 	case tea.KeyEsc:
+		if m.tabsMonitorFilter != "" {
+			m.tabsMonitorFilter = ""
+			m.tabsMonitorSelected = 0
+			m.clampMonitorSelection()
+			return m, nil
+		}
 		m.tabsMonitorMode = false
 		return m, nil
 	case tea.KeyEnter:
@@ -133,6 +279,14 @@ func (m Model) handleTabsMonitor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		ch := string(msg.Runes)
 		switch ch {
+		case "/":
+			m.tabsMonitorFiltering = true
+			return m, nil
+		case "s":
+			m.tabsMonitorSort = m.tabsMonitorSort.next()
+			m.tabsMonitorSelected = 0
+			m.clampMonitorSelection()
+			return m, nil
 		case "m":
 			m.tabsMonitorMode = false
 			return m, nil
@@ -223,9 +377,23 @@ func (m Model) renderTabsMonitor(width, height int) string {
 }
 
 func (m Model) tabsMonitorHintsLine(width int) string {
+	if m.tabsMonitorFiltering {
+		pairs := [][2]string{
+			{"/", m.tabsMonitorFilter + "█"},
+			{"Enter", "apply"},
+			{"Esc", "clear"},
+		}
+		return renderHintsBar(pairs, width)
+	}
+	sortHint := "sort"
+	if m.tabsMonitorSort != monitorSortDefault {
+		sortHint = "sort:" + m.tabsMonitorSort.label()
+	}
 	pairs := [][2]string{
 		{"↑↓", "session"},
 		{"Enter", "focus"},
+		{"/", "filter"},
+		{"s", sortHint},
 		{"1-7", "panels"},
 	}
 	if width < monitorDesktopWidth {
@@ -234,8 +402,12 @@ func (m Model) tabsMonitorHintsLine(width int) string {
 	if len(m.telemetry.OrphanPorts) > 0 {
 		pairs = append(pairs, [2]string{"X", "kill orphans"})
 	}
+	escLabel := "tabs"
+	if m.tabsMonitorFilter != "" {
+		escLabel = "clear filter"
+	}
 	pairs = append(pairs,
-		[2]string{"m/Esc", "tabs"},
+		[2]string{"m/Esc", escLabel},
 		[2]string{"q", "quit"},
 	)
 	return renderHintsBar(pairs, width)
@@ -519,9 +691,18 @@ func (m Model) renderPanelContext(width, height int) []string {
 		line := stMuted.Render(" Rate ") +
 			lipgloss.NewStyle().Foreground(lipgloss.Color(rateHex)).Bold(true).Render(fmtTokens(int64(ctx.TokensPerMin))+"/min") +
 			stMuted.Render("  Total ") +
-			stText.Render(fmtTokens(ctx.TotalTokens)) +
-			stMuted.Render("  ") +
-			stGreen.Render(fmt.Sprintf("%d active", ctx.ActiveSessions))
+			stText.Render(fmtTokens(ctx.TotalTokens))
+		if ctx.TotalCostUSD > 0 {
+			line += stMuted.Render("  ") + lipgloss.NewStyle().Foreground(lipgloss.Color(ColorYellow)).Render(fmtCostUSD(ctx.TotalCostUSD, true))
+		}
+		if ctx.TotalMemKB > 0 {
+			line += stMuted.Render("  Σ") + stText.Render(fmtMemKB(ctx.TotalMemKB))
+		}
+		if ctx.AvgContextPct > 0 {
+			avgHex := lerpHexColor(ctx.AvgContextPct, ColorGreen, ColorYellow, ColorRed)
+			line += stMuted.Render("  avg ") + lipgloss.NewStyle().Foreground(lipgloss.Color(avgHex)).Render(fmt.Sprintf("%.0f%%", ctx.AvgContextPct))
+		}
+		line += stMuted.Render("  ") + stGreen.Render(fmt.Sprintf("%d active", ctx.ActiveSessions))
 		return renderMonitorBox("¹", "context", ColorTeal, []string{line}, width, height)
 	}
 
@@ -592,7 +773,18 @@ func renderContextGraphColumn(ctx model.TelemetryContext, width, height int) []s
 
 	// Summary footer
 	if len(lines) < height {
-		lines = append(lines, " "+stText.Render(fmtTokens(ctx.TotalTokens))+stMuted.Render(" total"))
+		footer := " " + stText.Render(fmtTokens(ctx.TotalTokens)) + stMuted.Render(" total")
+		if ctx.TotalCostUSD > 0 {
+			footer += stMuted.Render("  ") + lipgloss.NewStyle().Foreground(lipgloss.Color(ColorYellow)).Render(fmtCostUSD(ctx.TotalCostUSD, true))
+		}
+		if ctx.TotalMemKB > 0 {
+			footer += stMuted.Render("  Σ") + stText.Render(fmtMemKB(ctx.TotalMemKB))
+		}
+		if ctx.AvgContextPct > 0 {
+			avgHex := lerpHexColor(ctx.AvgContextPct, ColorGreen, ColorYellow, ColorRed)
+			footer += stMuted.Render("  avg ") + lipgloss.NewStyle().Foreground(lipgloss.Color(avgHex)).Render(fmt.Sprintf("%.0f%%", ctx.AvgContextPct))
+		}
+		lines = append(lines, footer)
 	}
 	return lines
 }
@@ -731,7 +923,25 @@ func renderQuotaSourceCol(name string, q *agent.QuotaInfo, emptyHint string, wid
 		}
 	}
 
-	isStale := q.UpdatedAt > 0 && nowUnix-q.UpdatedAt > monitorQuotaStaleS
+	age := int64(0)
+	if q.UpdatedAt > 0 && nowUnix > q.UpdatedAt {
+		age = nowUnix - q.UpdatedAt
+	}
+	isClaude := strings.EqualFold(q.Agent, "claude") || strings.EqualFold(name, "CLAUDE")
+	isStale := false
+	isLastKnown := false
+	if !q.Estimated && q.UpdatedAt > 0 {
+		if isClaude {
+			if age > monitorClaudeLastKnownS {
+				isStale = true
+			} else if age > monitorQuotaStaleS {
+				isLastKnown = true
+			}
+		} else if age > monitorQuotaStaleS {
+			isStale = true
+		}
+	}
+
 	hdrStyle := stTitle
 	if isStale {
 		hdrStyle = stMuted.Bold(true)
@@ -746,7 +956,17 @@ func renderQuotaSourceCol(name string, q *agent.QuotaInfo, emptyHint string, wid
 	}
 
 	var lines []string
-	lines = append(lines, hdrStyle.Render(" "+name))
+	hdrText := " " + name
+	if plan := strings.TrimSpace(q.PlanType); plan != "" {
+		hdrText += " (" + plan + ")"
+	}
+	hdrLine := hdrStyle.Render(hdrText)
+	if q.Estimated {
+		hdrLine += stMuted.Render(" ~est")
+	} else if isLastKnown {
+		hdrLine += stMuted.Render(" ~last")
+	}
+	lines = append(lines, hdrLine)
 
 	renderWindow := func(w *agent.QuotaWindow, fallbackLbl string) {
 		if w == nil || len(lines) >= height {
@@ -795,9 +1015,10 @@ func (m Model) renderPanelTokens(width, height int) []string {
 	innerW := width - 2
 	innerH := height - 2
 
+	sessions := m.monitorSessions()
 	var sel *model.SessionRow
-	if m.tabsMonitorSelected >= 0 && m.tabsMonitorSelected < len(m.telemetry.Sessions) {
-		s := m.telemetry.Sessions[m.tabsMonitorSelected]
+	if m.tabsMonitorSelected >= 0 && m.tabsMonitorSelected < len(sessions) {
+		s := sessions[m.tabsMonitorSelected]
 		sel = &s
 	}
 
@@ -855,12 +1076,24 @@ func (m Model) renderPanelTokens(width, height int) []string {
 		barW = 14
 	}
 
+	hasCost := sel.Usage.CostPriced || sel.Usage.CostUSD > 0
+	costStr := fmtCostUSD(sel.Usage.CostUSD, sel.Usage.CostPriced)
+	stCost := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorYellow))
+
 	var lines []string
 	if innerH < 7 {
-		lines = append(lines, stMuted.Render(" Total: ")+stTitle.Render(fmtTokens(total))+
-			stMuted.Render(fmt.Sprintf("  %dt %s/t", turns, fmtTokens(avg))))
+		totLine := stMuted.Render(" Total: ") + stTitle.Render(fmtTokens(total)) +
+			stMuted.Render(fmt.Sprintf("  %dt %s/t", turns, fmtTokens(avg)))
+		if hasCost {
+			totLine += stMuted.Render("  ") + stCost.Render(costStr)
+		}
+		lines = append(lines, totLine)
 	} else {
-		lines = append(lines, stMuted.Render(" Total: ")+stTitle.Render(fmtTokens(total)))
+		totLine := stMuted.Render(" Total: ") + stTitle.Render(fmtTokens(total))
+		if hasCost && innerW < 36 {
+			totLine += stMuted.Render("  Cost: ") + stCost.Render(costStr)
+		}
+		lines = append(lines, totLine)
 	}
 	lines = append(lines, stMuted.Render(" Input : ")+meterBar(pctOf(totalIn), barW, ColorTeal, ColorBlue, ColorLavender)+
 		lipgloss.NewStyle().Foreground(lipgloss.Color(ColorTeal)).Render(" "+fmtTokens(totalIn)))
@@ -886,8 +1119,12 @@ func (m Model) renderPanelTokens(width, height int) []string {
 	lines = append(lines, " "+brailleSparkline(hist, sparkW, ColorGreen, ColorYellow, ColorRed)+stMuted.Render(" tok/t"))
 
 	if innerH >= 7 {
-		lines = append(lines, stMuted.Render(" Turns: ")+stText.Render(fmt.Sprintf("%d", turns))+
-			stMuted.Render("  Avg: ")+stText.Render(fmtTokens(avg)+"/t"))
+		turnLine := stMuted.Render(" Turns: ") + stText.Render(fmt.Sprintf("%d", turns)) +
+			stMuted.Render("  Avg: ") + stText.Render(fmtTokens(avg)+"/t")
+		if hasCost && innerW >= 36 {
+			turnLine += stMuted.Render("  Cost: ") + stCost.Render(costStr)
+		}
+		lines = append(lines, turnLine)
 	}
 
 	return renderMonitorBox("³", title, ColorBlue, lines, width, height)
@@ -909,6 +1146,7 @@ func (m Model) renderPanelProjects(width, height int) []string {
 	stMuted := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorOverlay0))
 	stGreen := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorGreen))
 	stYellow := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorYellow))
+	stMauve := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorMauve))
 
 	if len(m.telemetry.Projects) == 0 {
 		return renderMonitorBox("⁴", "projects", ColorBlue, []string{stMuted.Render(" No active projects")}, width, height)
@@ -919,7 +1157,19 @@ func (m Model) renderPanelProjects(width, height int) []string {
 		if len(lines) >= innerH {
 			break
 		}
-		lines = append(lines, stTitle.Render(" "+truncate(proj.Name, innerW-2)))
+		wtBadge := ""
+		if proj.WorktreeCount > 1 {
+			wtBadge = fmt.Sprintf(" ⎇ %d", proj.WorktreeCount)
+		}
+		nameBudget := innerW - 2 - ansi.StringWidth(wtBadge)
+		if nameBudget < 4 {
+			nameBudget = 4
+		}
+		projLine := stTitle.Render(" " + truncate(proj.Name, nameBudget))
+		if wtBadge != "" {
+			projLine += stMauve.Render(wtBadge)
+		}
+		lines = append(lines, projLine)
 		if len(lines) >= innerH {
 			break
 		}
@@ -1028,10 +1278,20 @@ func (m Model) renderPanelPorts(width, height int) []string {
 // ---------------------------------------------------------------------------
 
 func (m Model) renderPanelSessions(width, height int) []string {
+	title := "sessions"
+	if m.tabsMonitorFiltering {
+		title += "  / " + m.tabsMonitorFilter + "█"
+	} else if m.tabsMonitorFilter != "" {
+		title += "  / " + m.tabsMonitorFilter
+	}
+	if m.tabsMonitorSort != monitorSortDefault {
+		title += "  sort:" + m.tabsMonitorSort.label()
+	}
+
 	innerW := width - 2
 	innerH := height - 2
 	if innerW < 12 || innerH < 1 {
-		return renderMonitorBox("⁶", "sessions", ColorLavender, nil, width, height)
+		return renderMonitorBox("⁶", title, ColorLavender, nil, width, height)
 	}
 
 	stBold := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText)).Bold(true)
@@ -1042,6 +1302,7 @@ func (m Model) renderPanelSessions(width, height int) []string {
 	showCfg := innerW >= 100
 	showModel := innerW >= 90
 	showTokens := innerW >= 86
+	showCost := width >= 104
 	showMem := innerW >= 110
 	showTurn := innerW >= 110
 
@@ -1069,6 +1330,7 @@ func (m Model) renderPanelSessions(width, height int) []string {
 	}
 	ctxW := 5
 	tokW := 6
+	costW := 7
 	memW := 6
 	turnW := 4
 	pidW := 6
@@ -1088,6 +1350,9 @@ func (m Model) renderPanelSessions(width, height int) []string {
 	}
 	if showTokens {
 		fixedW += tokW + 1
+	}
+	if showCost {
+		fixedW += costW + 1
 	}
 	if showMem {
 		fixedW += memW + 1
@@ -1123,6 +1388,9 @@ func (m Model) renderPanelSessions(width, height int) []string {
 	if showTokens {
 		hdr.WriteString(fmt.Sprintf(" %*s", tokW, "Tokens"))
 	}
+	if showCost {
+		hdr.WriteString(fmt.Sprintf(" %*s", costW, "Cost"))
+	}
 	if showMem {
 		hdr.WriteString(fmt.Sprintf(" %*s", memW, "Mem"))
 	}
@@ -1132,9 +1400,14 @@ func (m Model) renderPanelSessions(width, height int) []string {
 
 	lines := []string{stBold.Render(truncate(hdr.String(), innerW))}
 
-	if len(m.telemetry.Sessions) == 0 {
-		lines = append(lines, stMuted.Render(" No monitored agent sessions."))
-		return renderMonitorBox("⁶", "sessions", ColorLavender, lines, width, height)
+	sessions := m.monitorSessions()
+	if len(sessions) == 0 {
+		if len(m.telemetry.Sessions) > 0 && m.tabsMonitorFilter != "" {
+			lines = append(lines, stMuted.Render(" No sessions match / "+m.tabsMonitorFilter))
+		} else {
+			lines = append(lines, stMuted.Render(" No monitored agent sessions."))
+		}
+		return renderMonitorBox("⁶", title, ColorLavender, lines, width, height)
 	}
 
 	// Calculate summary column x-offset for current-task sub-rows.
@@ -1155,7 +1428,7 @@ func (m Model) renderPanelSessions(width, height int) []string {
 	}
 	var allRows []sessRowLine
 
-	for i, s := range m.telemetry.Sessions {
+	for i, s := range sessions {
 		selected := i == m.tabsMonitorSelected
 		bg := ColorBase
 		if selected {
@@ -1233,6 +1506,14 @@ func (m Model) renderPanelSessions(width, height int) []string {
 			row.WriteString(st(bg, false).Render(" "))
 			row.WriteString(st(ColorText, false).Render(fmt.Sprintf("%*s", tokW, fmtTokens(s.TotalTokens))))
 		}
+		if showCost {
+			row.WriteString(st(bg, false).Render(" "))
+			costFg := ColorOverlay0
+			if s.Usage.CostPriced || s.Usage.CostUSD > 0 {
+				costFg = ColorYellow
+			}
+			row.WriteString(st(costFg, false).Render(fmt.Sprintf("%*s", costW, fmtCostUSD(s.Usage.CostUSD, s.Usage.CostPriced))))
+		}
 		if showMem {
 			row.WriteString(st(bg, false).Render(" "))
 			row.WriteString(st(ColorOverlay0, false).Render(fmt.Sprintf("%*s", memW, fmtMemKB(s.MemKB))))
@@ -1275,7 +1556,7 @@ func (m Model) renderPanelSessions(width, height int) []string {
 	for i := 0; i < availRows && start+i < len(allRows); i++ {
 		lines = append(lines, allRows[start+i].text)
 	}
-	return renderMonitorBox("⁶", "sessions", ColorLavender, lines, width, height)
+	return renderMonitorBox("⁶", title, ColorLavender, lines, width, height)
 }
 
 // ---------------------------------------------------------------------------

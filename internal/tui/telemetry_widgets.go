@@ -297,6 +297,17 @@ func fmtMemKB(kb int64) string {
 	return fmt.Sprintf("%dK", kb)
 }
 
+// fmtCostUSD formats a USD cost value (e.g. "$1.24", "$0.08", "$0.00" when priced, "—" when unpriced).
+func fmtCostUSD(cost float64, priced bool) string {
+	if !priced && cost <= 0 {
+		return "—"
+	}
+	if cost < 0 {
+		cost = 0
+	}
+	return fmt.Sprintf("$%.2f", cost)
+}
+
 // fmtCountdown formats a future reset timestamp as "in X" (e.g. "in 2h 14m", "in 3d 4h").
 // Returns empty string when resetUnix is in the past or zero.
 func fmtCountdown(resetUnix, nowUnix int64) string {
