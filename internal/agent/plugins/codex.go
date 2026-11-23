@@ -9,6 +9,7 @@ import (
 
 // NewCodex returns the coding-agent plugin for OpenAI Codex CLI.
 func NewCodex() agent.Plugin {
+	rateStore := &codexRateLimitStore{}
 	return &agent.BasePlugin{
 		PluginSpec: agent.Spec{
 			ID:                      "codex",
@@ -24,8 +25,11 @@ func NewCodex() agent.Plugin {
 		MCPTargets: []agent.MCPConfigTarget{
 			{HarnessLabel: "codex", RelPath: ".codex/config.toml"},
 		},
-		CustomTitleExtractor:  agent.TitleExtractorFunc(extractCodexTitle),
-		CustomSessionResolver: agent.BaseSessionResolver{PositionalResume: true},
+		CustomTitleExtractor:      agent.TitleExtractorFunc(extractCodexTitle),
+		CustomSessionResolver:     agent.BaseSessionResolver{PositionalResume: true},
+		CustomSessionTelemetry:    newCodexTelemetryProvider(rateStore),
+		CustomQuotaProvider:       newCodexQuotaProvider(rateStore),
+		CustomMCPActivityProvider: newCodexMCPActivityProvider(),
 	}
 }
 

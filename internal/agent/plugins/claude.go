@@ -35,5 +35,7 @@ func NewClaude() agent.Plugin {
 		CustomTitleExtractor: agent.TitleExtractorFunc(func(viewport string) string {
 			return screen.ExtractPromptMarkerLine(viewport, "❯")
 		}),
+		CustomSessionTelemetry: newClaudeTelemetryProvider(),
+		CustomQuotaProvider:    newClaudeQuotaProvider(),
 	}
 }
