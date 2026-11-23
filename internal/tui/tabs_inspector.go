@@ -930,6 +930,9 @@ func (m Model) renderInspectorContextTokensSection(sess model.SessionRow, width 
 		totVal += st(ColorOverlay0, false).Render(fmt.Sprintf("  ·  %d turns  ·  %s/t", sess.TurnCount, fmtTokens(avg)))
 	}
 	addRow("Total", totVal)
+	if sess.Usage.CostPriced || sess.Usage.CostUSD > 0 {
+		addRow("Cost", st(ColorYellow, true).Render(fmtCostUSD(sess.Usage.CostUSD, sess.Usage.CostPriced)))
+	}
 
 	if sess.Usage.InputTokens > 0 || sess.Usage.OutputTokens > 0 || sess.Usage.CacheReadTokens > 0 || sess.Usage.CacheWriteTokens > 0 {
 		addRow("Input", meterBar(pctOf(sess.Usage.InputTokens), tokBarW, ColorTeal, ColorBlue, ColorLavender)+
