@@ -159,11 +159,93 @@ func TestParsePorcelainV2AheadBehindAndDetached(t *testing.T) {
 	if obs.branch != "feat/ci" || obs.ahead != 3 || obs.behind != 2 || !obs.dirty || !obs.upstream {
 		t.Fatalf("unexpected obs: %+v", obs)
 	}
+	if obs.filesAdded != 0 || obs.filesModified != 1 {
+		t.Fatalf("file counts = +%d/~%d, want +0/~1", obs.filesAdded, obs.filesModified)
+	}
 
 	detached := "# branch.oid 0123456789abcdef0123456789abcdef01234567\x00# branch.head (detached)\x00"
 	obs2 := parsePorcelainV2([]byte(detached))
-	if obs2.branch != "" || obs2.dirty {
+	if obs2.branch != "" || obs2.dirty || obs2.filesAdded != 0 || obs2.filesModified != 0 {
 		t.Fatalf("unexpected detached obs: %+v", obs2)
+	}
+}
+
+func TestParsePorcelainV2FileCounts(t *testing.T) {
+	raw := strings.Join([]string{
+		"# branch.head main",
+		"? untracked1.txt",
+		"? untracked2.txt",
+		"1 A. N... 000000 100644 100644 0000000 abcdef1 staged_new.go",
+		"1 AM N... 000000 100644 100644 0000000 abcdef2 staged_and_edited.go",
+		"1 .M N... 100644 100644 100644 abcdef1 abcdef2 modified.go",
+		"1 D. N... 100644 000000 000000 abcdef1 0000000 deleted.go",
+		"2 R. N... 100644 100644 100644 abcdef1 abcdef1 R100 newname.go",
+		"oldname.go",
+		"u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.go",
+		"",
+	}, "\x00")
+	obs := parsePorcelainV2([]byte(raw))
+	if !obs.dirty {
+		t.Fatal("expected dirty=true")
+	}
+	// Added: 2 untracked + staged_new + staged_and_edited = 4
+	if obs.filesAdded != 4 {
+		t.Fatalf("filesAdded = %d, want 4", obs.filesAdded)
+	}
+	// Modified: modified + deleted + renamed + unmerged = 4
+	if obs.filesModified != 4 {
+		t.Fatalf("filesModified = %d, want 4", obs.filesModified)
+	}
+}
+
+func TestCollectGitStatusFileCounts(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	dir := t.TempDir()
+	runGitTest(t, dir, "init", "-q", "-b", "main")
+	runGitTest(t, dir, "config", "user.name", "Test User")
+	runGitTest(t, dir, "config", "user.email", "test@example.com")
+
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "b.txt"), []byte("two\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, dir, "add", "a.txt", "b.txt")
+	runGitTest(t, dir, "commit", "-q", "-m", "init")
+
+	// Clean repo: 0 added, 0 modified.
+	clean := CollectGitStatus(context.Background(), dir, nil)
+	if clean == nil || clean.IsDirty || clean.FilesAdded != 0 || clean.FilesModified != 0 {
+		t.Fatalf("unexpected clean status: %+v", clean)
+	}
+
+	// Add 1 untracked file, stage 1 new file, modify 1 tracked file, delete 1 tracked file.
+	if err := os.WriteFile(filepath.Join(dir, "untracked.txt"), []byte("new\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "staged.txt"), []byte("staged\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitTest(t, dir, "add", "staged.txt")
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("one-modified\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(dir, "b.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty := CollectGitStatus(context.Background(), dir, nil)
+	if dirty == nil || !dirty.IsDirty {
+		t.Fatalf("expected dirty status, got %+v", dirty)
+	}
+	if dirty.FilesAdded != 2 {
+		t.Fatalf("FilesAdded = %d, want 2", dirty.FilesAdded)
+	}
+	if dirty.FilesModified != 2 {
+		t.Fatalf("FilesModified = %d, want 2", dirty.FilesModified)
 	}
 }
 
