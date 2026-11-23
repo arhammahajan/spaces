@@ -681,3 +681,16 @@ func (r *Registry) MCPActivityProviders() []Plugin {
 	}
 	return out
 }
+
+// UsageReaders returns all registered plugins that implement UsageReader.
+func (r *Registry) UsageReaders() []Plugin {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Plugin
+	for _, p := range r.ordered {
+		if p != nil && p.UsageReader() != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
