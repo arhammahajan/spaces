@@ -14,6 +14,7 @@ import (
 	hookclient "github.com/arhammahajan/spaces/internal/hooks/client"
 	hookcore "github.com/arhammahajan/spaces/internal/hooks/core"
 	"github.com/arhammahajan/spaces/internal/model"
+	"github.com/arhammahajan/spaces/internal/osc"
 	"github.com/arhammahajan/spaces/internal/tmux"
 )
 
@@ -72,6 +73,23 @@ func bindHookSeams() {
 		}
 		hookcore.DaemonWatchPaneLister = listLiveDaemonWatchPanes
 		hookcore.DaemonWatchResolver = resolvePluginDaemonWatcher
+		hookcore.NotifyFunc = func(n hookcore.Notification) {
+			app := strings.TrimSpace(n.App)
+			if d := agent.DefaultRegistry().DisplayApp(n.Agent); d != "" {
+				app = d
+			} else if d := agent.DefaultRegistry().DisplayApp(app); d != "" {
+				app = d
+			}
+			osc.SendTmuxNotification(osc.Notification{
+				Session: n.Session,
+				Pane:    n.Pane,
+				Agent:   n.Agent,
+				App:     app,
+				State:   n.State,
+				Title:   n.Title,
+				Body:    n.Body,
+			})
+		}
 		model.OutcomeEnricher = func(o *model.OutcomeEntry) {
 			if o == nil {
 				return
