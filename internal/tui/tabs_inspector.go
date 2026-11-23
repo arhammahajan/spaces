@@ -89,11 +89,17 @@ func (m Model) renderTabInspectorWithHits(sp model.Space, tab TabItem, width, he
 	body = append(body, fitCellWidth("", width))
 
 	// 3. Telemetry Body: Agent Telemetry OR Process Telemetry.
+	var sessTelemetry *model.SessionRow
 	if selPane != nil {
 		if selPane.IsAgent() {
 			body = append(body, m.renderAgentTelemetrySections(sp, *selPane, width)...)
 		} else {
 			body = append(body, m.renderProcessCommandSection(*selPane, width)...)
+		}
+		if sess := m.telemetry.SessionForPane(selPane.ID); sess != nil {
+			sessTelemetry = sess
+			addBlank()
+			body = append(body, m.renderInspectorContextTokensSection(*sess, width)...)
 		}
 	}
 
@@ -115,7 +121,7 @@ func (m Model) renderTabInspectorWithHits(sp model.Space, tab TabItem, width, he
 
 	// 5. Compact 2-column Details Grid at the bottom (all technical/runtime metadata).
 	if selPane != nil {
-		details := m.renderInspectorDetailsSection(sp, tab, *selPane, width)
+		details := m.renderInspectorDetailsSection(sp, tab, *selPane, sessTelemetry, width)
 		if len(details) > 0 {
 			addBlank()
 			body = append(body, details...)
@@ -848,9 +854,124 @@ func (m Model) renderInspectorGitSection(g *model.GitInfo, w model.Window, cwd s
 	return out
 }
 
+// renderInspectorContextTokensSection renders the abtop-style Context & Tokens
+// telemetry card inside the tab inspector when a matching SessionRow is available.
+func (m Model) renderInspectorContextTokensSection(sess model.SessionRow, width int) []string {
+	st := func(fg string, bold bool) lipgloss.Style {
+		s := lipgloss.NewStyle().Foreground(lipgloss.Color(fg))
+		if bold {
+			s = s.Bold(true)
+		}
+		return s
+	}
+
+	var subParts []string
+	if sess.ContextWindow > 0 {
+		subParts = append(subParts, fmtTokens(sess.ContextWindow))
+	}
+	if sess.CompactionCount > 0 {
+		subParts = append(subParts, fmt.Sprintf("C%d", sess.CompactionCount))
+	}
+	if sess.MemoryLines > 0 {
+		subParts = append(subParts, fmt.Sprintf("MEM %d/200", sess.MemoryLines))
+	}
+
+	var out []string
+	out = append(out, renderSectionLabel("CONTEXT & TOKENS", strings.Join(subParts, " · "), ColorTeal, width))
+
+	const labelW = 9
+	innerW := width - 4
+	if innerW < 20 {
+		innerW = 20
+	}
+	valW := maxInt(14, innerW-labelW-2)
+	addRow := func(label, styledVal string) {
+		lbl := st(ColorOverlay0, false).Render(fmt.Sprintf("%-*s", labelW, label))
+		out = append(out, fitCellWidth("  "+lbl+"  "+ansi.Truncate(styledVal, valW, "…"), width))
+	}
+
+	// Context bar row.
+	ctxBarW := maxInt(6, minInt(18, valW-16))
+	warn := string(sess.Warning)
+	if warn == "" {
+		if sess.ContextPct >= 90 {
+			warn = "⚠"
+		} else if sess.ContextPct >= 75 {
+			warn = "!"
+		}
+	}
+	pctHex := lerpHexColor(sess.ContextPct, ColorGreen, ColorYellow, ColorRed)
+	ctxMeta := fmt.Sprintf(" %.0f%%%s", sess.ContextPct, warn)
+	if sess.ContextTokens > 0 && sess.ContextWindow > 0 {
+		ctxMeta += fmt.Sprintf(" (%s/%s)", fmtTokens(sess.ContextTokens), fmtTokens(sess.ContextWindow))
+	}
+	addRow("Context", meterBar(sess.ContextPct, ctxBarW, ColorGreen, ColorYellow, ColorRed)+
+		st(pctHex, warn != "").Render(ctxMeta))
+
+	// Token breakdown rows.
+	total := sess.TotalTokens
+	if total <= 0 {
+		total = sess.Usage.Total()
+	}
+	pctOf := func(v int64) float64 {
+		if total <= 0 {
+			return 0
+		}
+		return float64(v) / float64(total) * 100.0
+	}
+	tokBarW := maxInt(5, minInt(14, valW-10))
+
+	avg := sess.AvgTokensPerTurn
+	if avg <= 0 && sess.TurnCount > 0 {
+		avg = total / int64(sess.TurnCount)
+	}
+	totVal := st(ColorText, true).Render(fmtTokens(total))
+	if sess.TurnCount > 0 {
+		totVal += st(ColorOverlay0, false).Render(fmt.Sprintf("  ·  %d turns  ·  %s/t", sess.TurnCount, fmtTokens(avg)))
+	}
+	addRow("Total", totVal)
+
+	if sess.Usage.InputTokens > 0 || sess.Usage.OutputTokens > 0 || sess.Usage.CacheReadTokens > 0 || sess.Usage.CacheWriteTokens > 0 {
+		addRow("Input", meterBar(pctOf(sess.Usage.InputTokens), tokBarW, ColorTeal, ColorBlue, ColorLavender)+
+			st(ColorTeal, false).Render(" "+fmtTokens(sess.Usage.InputTokens)))
+		addRow("Output", meterBar(pctOf(sess.Usage.OutputTokens), tokBarW, ColorYellow, ColorRed, ColorRed)+
+			st(ColorYellow, false).Render(" "+fmtTokens(sess.Usage.OutputTokens)))
+		addRow("Cache R", meterBar(pctOf(sess.Usage.CacheReadTokens), tokBarW, ColorBlue, ColorMauve, ColorMauve)+
+			st(ColorMauve, false).Render(" "+fmtTokens(sess.Usage.CacheReadTokens)))
+		addRow("Cache W", meterBar(pctOf(sess.Usage.CacheWriteTokens), tokBarW, ColorBlue, ColorMauve, ColorMauve)+
+			st(ColorBlue, false).Render(" "+fmtTokens(sess.Usage.CacheWriteTokens)))
+	}
+
+	// Per-turn braille sparkline.
+	if len(sess.TokenHistory) > 0 {
+		hist := make([]float64, len(sess.TokenHistory))
+		for i, v := range sess.TokenHistory {
+			hist[i] = float64(v)
+		}
+		sparkW := maxInt(6, minInt(22, valW-8))
+		addRow("Per-turn", brailleSparkline(hist, sparkW, ColorGreen, ColorYellow, ColorRed)+
+			st(ColorOverlay0, false).Render(" tok/t"))
+	}
+
+	// Listening child ports.
+	if len(sess.Ports) > 0 {
+		var pParts []string
+		for _, pt := range sess.Ports {
+			if pt.Duplicate {
+				pParts = append(pParts, st(ColorRed, true).Render(fmt.Sprintf(":%d ⚠", pt.Port)))
+			} else {
+				pParts = append(pParts, st(ColorGreen, false).Render(fmt.Sprintf(":%d", pt.Port)))
+			}
+		}
+		addRow("Ports", strings.Join(pParts, "  "))
+	}
+
+	return out
+}
+
 // renderInspectorDetailsSection renders a compact 2-column (or 1-column when
 // narrow) runtime & session metadata grid at the bottom of the inspector.
-func (m Model) renderInspectorDetailsSection(sp model.Space, tab TabItem, p model.Pane, width int) []string {
+func (m Model) renderInspectorDetailsSection(sp model.Space, tab TabItem, p model.Pane, sess *model.SessionRow, width int) []string {
 	now := m.opts.NowOrDefault()
 	nowMs := now.UnixMilli()
 	var items []inspectorKV
@@ -911,6 +1032,14 @@ func (m Model) renderInspectorDetailsSection(sp model.Space, tab TabItem, p mode
 		}
 		if p.Width > 0 && p.Height > 0 {
 			rParts = append(rParts, fmt.Sprintf("%d×%d", p.Width, p.Height))
+		}
+		if sess != nil {
+			if sess.MemKB > 0 {
+				rParts = append(rParts, "mem "+fmtMemKB(sess.MemKB))
+			}
+			if sess.LaunchSurface != "" {
+				rParts = append(rParts, string(sess.LaunchSurface))
+			}
 		}
 		if len(rParts) > 0 {
 			items = append(items, inspectorKV{label: "Runtime", value: strings.Join(rParts, " · "), color: ColorOverlay0})
@@ -981,6 +1110,14 @@ func (m Model) renderInspectorDetailsSection(sp model.Space, tab TabItem, p mode
 		}
 		if p.Width > 0 && p.Height > 0 {
 			rParts = append(rParts, fmt.Sprintf("%d×%d", p.Width, p.Height))
+		}
+		if sess != nil {
+			if sess.MemKB > 0 {
+				rParts = append(rParts, "mem "+fmtMemKB(sess.MemKB))
+			}
+			if sess.LaunchSurface != "" {
+				rParts = append(rParts, string(sess.LaunchSurface))
+			}
 		}
 		if len(rParts) > 0 {
 			items = append(items, inspectorKV{label: "Runtime", value: strings.Join(rParts, " · "), color: ColorOverlay0})

@@ -131,6 +131,13 @@ type WorktreeBackend interface {
 	PruneWorktrees(ctx context.Context, spaces []model.Space, removeOrphanedMerged bool) (string, error)
 }
 
+// TelemetryBackend is an optional extension of Backend for asynchronously
+// collecting abtop-style session, context, quota, project, port, and MCP telemetry.
+type TelemetryBackend interface {
+	LoadTelemetry(ctx context.Context, spaces []model.Space, force bool) (model.TelemetrySnapshot, error)
+	KillOrphanPorts(ctx context.Context, orphans []model.OrphanPort) (int, error)
+}
+
 // Mode selects which screen the TUI shows.
 type Mode int
 
