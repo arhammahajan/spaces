@@ -2,6 +2,7 @@ package model
 
 import (
 	"context"
+	"math"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -575,5 +576,305 @@ func TestParseTelemetryProcStatWithSpacesAndParens(t *testing.T) {
 
 	if _, _, _, ok := parseTelemetryProcStat("malformed"); ok {
 		t.Fatal("expected malformed stat line to fail")
+	}
+}
+
+func TestTelemetryWorktreeAwareProjectGrouping(t *testing.T) {
+	withStubProcHooks(t, func(_ bool) *procTableSnapshot {
+		return newEmptyProcTableSnapshot()
+	}, nil)
+
+	reg := agent.NewRegistry(&fakeTelemetryPlugin{
+		BasePlugin: agent.BasePlugin{PluginSpec: agent.Spec{ID: "claude"}},
+	})
+	col := NewTelemetryCollector(reg)
+
+	spaces := []Space{
+		{
+			Name: "tab-1",
+			Panes: []Pane{
+				// Repo 1, worktree A (clean)
+				{
+					ID: "%1", App: "claude", Status: StatusWorking, CWD: "/work/spaces",
+					Git: &GitInfo{
+						RepoKey:      "github.com/org/spaces",
+						MainRepoRoot: "/work/spaces",
+						RepoRoot:     "/work/spaces",
+						RepoName:     "spaces",
+						Branch:       "main",
+						IsDirty:      false,
+					},
+					Hook: &HookSummary{Agent: "claude", SessionID: "s1"},
+				},
+				// Repo 1, worktree B (dirty)
+				{
+					ID: "%2", App: "claude", Status: StatusWorking, CWD: "/work/spaces-wt-ui/sub",
+					Git: &GitInfo{
+						RepoKey:       "github.com/org/spaces",
+						MainRepoRoot:  "/work/spaces",
+						RepoRoot:      "/work/spaces-wt-ui",
+						RepoName:      "spaces",
+						IsWorktree:    true,
+						Branch:        "feat/ui",
+						IsDirty:       true,
+						FilesAdded:    2,
+						FilesModified: 3,
+					},
+					Hook: &HookSummary{Agent: "claude", SessionID: "s2"},
+				},
+				// Repo 1, second pane in same worktree B (must not double-count worktree or files)
+				{
+					ID: "%3", App: "claude", Status: StatusIdle, CWD: "/work/spaces-wt-ui",
+					Git: &GitInfo{
+						RepoKey:       "github.com/org/spaces",
+						MainRepoRoot:  "/work/spaces",
+						RepoRoot:      "/work/spaces-wt-ui",
+						RepoName:      "spaces",
+						IsWorktree:    true,
+						Branch:        "feat/ui",
+						IsDirty:       true,
+						FilesAdded:    2,
+						FilesModified: 3,
+					},
+					Hook: &HookSummary{Agent: "claude", SessionID: "s3"},
+				},
+			},
+		},
+		{
+			Name: "tab-2",
+			Panes: []Pane{
+				// Repo 2: grouped by MainRepoRoot (no RepoKey, no RepoName -> basename of MainRepoRoot), both worktrees clean
+				{
+					ID: "%4", App: "claude", Status: StatusIdle, CWD: "/work/clean-multi",
+					Git: &GitInfo{
+						MainRepoRoot: "/work/clean-multi",
+						RepoRoot:     "/work/clean-multi",
+						Branch:       "main",
+						IsDirty:      false,
+					},
+					Hook: &HookSummary{Agent: "claude", SessionID: "s4"},
+				},
+				{
+					ID: "%5", App: "claude", Status: StatusIdle, CWD: "/work/clean-multi-wt2",
+					Git: &GitInfo{
+						MainRepoRoot: "/work/clean-multi",
+						RepoRoot:     "/work/clean-multi-wt2",
+						IsWorktree:   true,
+						Branch:       "feat/a",
+						IsDirty:      false,
+					},
+					Hook: &HookSummary{Agent: "claude", SessionID: "s5"},
+				},
+				// Repo 3: two dirty worktrees -> file counts aggregated across worktrees
+				{
+					ID: "%6", App: "claude", Status: StatusWorking, CWD: "/work/agg-repo",
+					Git: &GitInfo{
+						RepoKey:       "github.com/org/agg-repo",
+						MainRepoRoot:  "/work/agg-repo",
+						RepoRoot:      "/work/agg-repo",
+						RepoName:      "agg-repo",
+						Branch:        "main",
+						IsDirty:       true,
+						FilesAdded:    1,
+						FilesModified: 4,
+					},
+					Hook: &HookSummary{Agent: "claude", SessionID: "s6"},
+				},
+				{
+					ID: "%7", App: "claude", Status: StatusIdle, CWD: "/work/agg-repo-wt2",
+					Git: &GitInfo{
+						RepoKey:       "github.com/org/agg-repo",
+						MainRepoRoot:  "/work/agg-repo",
+						RepoRoot:      "/work/agg-repo-wt2",
+						RepoName:      "agg-repo",
+						IsWorktree:    true,
+						Branch:        "feat/b",
+						IsDirty:       true,
+						FilesAdded:    2,
+						FilesModified: 1,
+					},
+					Hook: &HookSummary{Agent: "claude", SessionID: "s7"},
+				},
+			},
+		},
+	}
+
+	snap := col.Collect(context.Background(), spaces, t.TempDir(), true)
+	if len(snap.Projects) != 3 {
+		t.Fatalf("got %d projects, want 3: %+v", len(snap.Projects), snap.Projects)
+	}
+
+	p1 := snap.Projects[0]
+	if p1.Name != "spaces" || p1.RepoRoot != "/work/spaces" || p1.WorktreeCount != 2 ||
+		p1.SessionCount != 3 || p1.ActiveCount != 2 ||
+		p1.FilesAdded != 2 || p1.FilesModified != 3 || p1.IsClean || !p1.HasGit {
+		t.Fatalf("unexpected project 1: %+v", p1)
+	}
+
+	p2 := snap.Projects[1]
+	if p2.Name != "clean-multi" || p2.RepoRoot != "/work/clean-multi" || p2.WorktreeCount != 2 ||
+		p2.SessionCount != 2 || p2.ActiveCount != 0 ||
+		p2.FilesAdded != 0 || p2.FilesModified != 0 || !p2.IsClean || !p2.HasGit {
+		t.Fatalf("unexpected project 2: %+v", p2)
+	}
+
+	p3 := snap.Projects[2]
+	if p3.Name != "agg-repo" || p3.WorktreeCount != 2 ||
+		p3.SessionCount != 2 || p3.ActiveCount != 1 ||
+		p3.FilesAdded != 3 || p3.FilesModified != 5 || p3.IsClean {
+		t.Fatalf("unexpected project 3: %+v", p3)
+	}
+}
+
+func TestTelemetryCostPricingFallback(t *testing.T) {
+	withStubProcHooks(t, func(_ bool) *procTableSnapshot {
+		return newEmptyProcTableSnapshot()
+	}, nil)
+
+	// Plugin with NO SessionTelemetryProvider (hook-only sessions).
+	reg := agent.NewRegistry(&fakeTelemetryPlugin{
+		BasePlugin: agent.BasePlugin{PluginSpec: agent.Spec{ID: "claude"}},
+	})
+	col := NewTelemetryCollector(reg)
+
+	spaces := []Space{{
+		Name: "cost",
+		Panes: []Pane{
+			{
+				ID: "%1", App: "claude", Status: StatusWorking,
+				Hook: &HookSummary{
+					Agent:     "claude",
+					SessionID: "hook-known-model",
+					Model:     "claude-sonnet-4-6",
+					Usage: &HookUsage{
+						InputTokens:  1_000_000, // $3.00
+						OutputTokens: 100_000,   // $1.50
+					},
+				},
+			},
+			{
+				ID: "%2", App: "claude", Status: StatusIdle,
+				Hook: &HookSummary{
+					Agent:     "claude",
+					SessionID: "hook-unknown-model",
+					Model:     "unknown-local-model",
+					Usage: &HookUsage{
+						InputTokens:  500_000,
+						OutputTokens: 50_000,
+					},
+				},
+			},
+			{
+				ID: "%3", App: "claude", Status: StatusIdle,
+				Hook: &HookSummary{
+					Agent:     "claude",
+					SessionID: "hook-explicit-cost",
+					Model:     "unknown-local-model",
+					Usage: &HookUsage{
+						InputTokens: 1000,
+						CostUSD:     0.75,
+					},
+				},
+			},
+		},
+	}}
+
+	snap := col.Collect(context.Background(), spaces, t.TempDir(), true)
+
+	s1 := snap.SessionForPane("%1")
+	if s1 == nil {
+		t.Fatal("missing session %1")
+	}
+	if !s1.Usage.CostPriced {
+		t.Fatalf("expected known hook model to be CostPriced=true, got %+v", s1.Usage)
+	}
+	if math.Abs(s1.Usage.CostUSD-4.50) > 1e-9 {
+		t.Fatalf("s1 CostUSD = %v, want 4.50", s1.Usage.CostUSD)
+	}
+
+	s2 := snap.SessionForPane("%2")
+	if s2 == nil {
+		t.Fatal("missing session %2")
+	}
+	if s2.Usage.CostPriced || s2.Usage.CostUSD != 0 {
+		t.Fatalf("expected unpriced model to keep CostPriced=false and CostUSD=0, got %+v", s2.Usage)
+	}
+
+	s3 := snap.SessionForPane("%3")
+	if s3 == nil {
+		t.Fatal("missing session %3")
+	}
+	if !s3.Usage.CostPriced || math.Abs(s3.Usage.CostUSD-0.75) > 1e-9 {
+		t.Fatalf("expected explicit hook CostUSD=0.75 to set CostPriced=true, got %+v", s3.Usage)
+	}
+}
+
+func TestTelemetryContextAggregates(t *testing.T) {
+	procSnap := &procTableSnapshot{
+		ProcessSnapshot: &agent.ProcessSnapshot{
+			Processes: map[int]agent.OSProcess{
+				100: {PID: 100, PPID: 1, Comm: "claude", Args: []string{"claude"}, MemKB: 12000},
+				200: {PID: 200, PPID: 1, Comm: "claude", Args: []string{"claude"}, MemKB: 8000},
+				300: {PID: 300, PPID: 1, Comm: "claude", Args: []string{"claude"}, MemKB: 5000},
+			},
+			Children: map[int][]int{},
+		},
+		PortsByPID: map[int][]int{},
+	}
+	withStubProcHooks(t, func(_ bool) *procTableSnapshot { return procSnap }, nil)
+
+	metricsBySID := map[string]*agent.SessionMetrics{
+		"s1": {
+			SessionID:     "s1",
+			Model:         "claude-sonnet-4-6",
+			ContextTokens: 100_000,
+			ContextWindow: 200_000, // 50%
+			Usage:         agent.TokenUsage{InputTokens: 1000, CostUSD: 1.25, CostPriced: true},
+		},
+		"s2": {
+			SessionID:     "s2",
+			Model:         "claude-sonnet-4-6",
+			ContextTokens: 150_000,
+			ContextWindow: 200_000, // 75%
+			Usage:         agent.TokenUsage{InputTokens: 2000, CostUSD: 2.50, CostPriced: true},
+		},
+		"s3": {
+			SessionID: "s3",
+			// No model, no context window, no cost -> excluded from AvgContextPct denominator.
+		},
+	}
+
+	claude := &fakeTelemetryPlugin{
+		BasePlugin: agent.BasePlugin{PluginSpec: agent.Spec{ID: "claude"}},
+		sessionFn: func(_ context.Context, q agent.SessionMetricsQuery) (*agent.SessionMetrics, error) {
+			return metricsBySID[q.SessionID], nil
+		},
+	}
+	col := NewTelemetryCollector(agent.NewRegistry(claude))
+
+	spaces := []Space{{
+		Name: "agg",
+		Panes: []Pane{
+			{ID: "%1", App: "claude", PID: 100, Hook: &HookSummary{Agent: "claude", SessionID: "s1"}},
+			{ID: "%2", App: "claude", PID: 200, Hook: &HookSummary{Agent: "claude", SessionID: "s2"}},
+			{ID: "%3", App: "claude", PID: 300, Hook: &HookSummary{Agent: "claude", SessionID: "s3"}},
+		},
+	}}
+
+	snap := col.Collect(context.Background(), spaces, t.TempDir(), true)
+	if math.Abs(snap.Context.TotalCostUSD-3.75) > 1e-9 {
+		t.Fatalf("TotalCostUSD = %v, want 3.75", snap.Context.TotalCostUSD)
+	}
+	if snap.Context.TotalMemKB != 25000 {
+		t.Fatalf("TotalMemKB = %d, want 25000", snap.Context.TotalMemKB)
+	}
+	if math.Abs(snap.Context.AvgContextPct-62.5) > 1e-9 {
+		t.Fatalf("AvgContextPct = %v, want 62.5", snap.Context.AvgContextPct)
+	}
+
+	// Empty spaces -> all aggregates zero.
+	emptySnap := col.Collect(context.Background(), nil, t.TempDir(), true)
+	if emptySnap.Context.TotalCostUSD != 0 || emptySnap.Context.TotalMemKB != 0 || emptySnap.Context.AvgContextPct != 0 {
+		t.Fatalf("expected zero aggregates for empty spaces, got %+v", emptySnap.Context)
 	}
 }

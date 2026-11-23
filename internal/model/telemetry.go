@@ -421,10 +421,22 @@ func (c *TelemetryCollector) Collect(ctx context.Context, spaces []Space, homeDi
 		}
 	}
 
-	var totalTokens int64
+	var (
+		totalTokens     int64
+		totalCostUSD    float64
+		totalMemKB      int64
+		contextPctSum   float64
+		contextPctCount int
+	)
 	ctxSessions := make([]ContextSessionEntry, 0, len(sessions))
 	for _, s := range sessions {
 		totalTokens += s.TotalTokens
+		totalCostUSD += s.Usage.CostUSD
+		totalMemKB += s.MemKB
+		if s.ContextWindow > 0 {
+			contextPctSum += s.ContextPct
+			contextPctCount++
+		}
 		ctxSessions = append(ctxSessions, ContextSessionEntry{
 			SessionKey:      s.Key,
 			PaneID:          s.PaneID,
@@ -438,23 +450,38 @@ func (c *TelemetryCollector) Collect(ctx context.Context, spaces []Space, homeDi
 			CompactionCount: s.CompactionCount,
 		})
 	}
+	var avgContextPct float64
+	if contextPctCount > 0 {
+		avgContextPct = contextPctSum / float64(contextPctCount)
+	}
 
 	// 5. Projects summary (Panel 4).
 	projects := make([]ProjectSummary, 0, len(projectOrder))
 	for _, key := range projectOrder {
 		acc := projectsByKey[key]
-		isClean := acc.HasGit && !acc.isDirty && acc.FilesAdded == 0 && acc.FilesModified == 0
+		filesAdded := 0
+		filesModified := 0
+		anyDirty := false
+		for _, wt := range acc.worktrees {
+			filesAdded += wt.filesAdded
+			filesModified += wt.filesModified
+			if wt.isDirty {
+				anyDirty = true
+			}
+		}
+		isClean := acc.HasGit && !anyDirty && filesAdded == 0 && filesModified == 0
 		projects = append(projects, ProjectSummary{
 			Name:          acc.Name,
 			RepoRoot:      acc.RepoRoot,
 			CWD:           acc.CWD,
 			Branch:        acc.Branch,
 			HasGit:        acc.HasGit,
-			FilesAdded:    acc.FilesAdded,
-			FilesModified: acc.FilesModified,
+			FilesAdded:    filesAdded,
+			FilesModified: filesModified,
 			IsClean:       isClean,
 			SessionCount:  acc.SessionCount,
 			ActiveCount:   acc.ActiveCount,
+			WorktreeCount: len(acc.worktrees),
 		})
 	}
 
@@ -469,6 +496,9 @@ func (c *TelemetryCollector) Collect(ctx context.Context, spaces []Space, homeDi
 			TokensPerMin:   tokensPerMin,
 			RateHistory:    rateHistory,
 			TotalTokens:    totalTokens,
+			TotalCostUSD:   totalCostUSD,
+			TotalMemKB:     totalMemKB,
+			AvgContextPct:  avgContextPct,
 			ActiveSessions: len(sessions),
 			Sessions:       ctxSessions,
 		},
@@ -637,6 +667,15 @@ func buildSessionRow(
 
 	if modelName == "" && pane.Hook != nil {
 		modelName = strings.TrimSpace(pane.Hook.Model)
+	}
+	if !usage.CostPriced && usage.CostUSD > 0 {
+		usage.CostPriced = true
+	}
+	if !usage.CostPriced && modelName != "" && usage.HasData() {
+		if cost, ok := agent.EstimateCostUSD(modelName, usage); ok {
+			usage.CostUSD = cost
+			usage.CostPriced = true
+		}
 	}
 	if summary == "" {
 		summary = firstNonEmpty(pane.ConversationTitle, hookTitle(pane.Hook), pane.ScreenTitle, pane.Title)
@@ -837,17 +876,30 @@ func (c *TelemetryCollector) collectMCPServers(ctx context.Context, snap *agent.
 	return out
 }
 
-type projectAccum struct {
-	Name          string
-	RepoRoot      string
-	CWD           string
-	Branch        string
-	HasGit        bool
+type worktreeStats struct {
+	filesAdded    int
+	filesModified int
 	isDirty       bool
-	FilesAdded    int
-	FilesModified int
-	SessionCount  int
-	ActiveCount   int
+}
+
+type projectAccum struct {
+	Name         string
+	hasRepoName  bool
+	RepoRoot     string
+	CWD          string
+	Branch       string
+	HasGit       bool
+	SessionCount int
+	ActiveCount  int
+	worktrees    map[string]*worktreeStats
+}
+
+func cleanNonEmptyPath(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	return filepath.Clean(p)
 }
 
 func addProjectPane(
@@ -859,50 +911,70 @@ func addProjectPane(
 	isSession bool,
 	isActive bool,
 ) {
-	cwd := firstNonEmpty(pane.CWD, hookCWD(pane.Hook), sp.CWD)
-	repoRoot := ""
+	cwd := cleanNonEmptyPath(firstNonEmpty(pane.CWD, hookCWD(pane.Hook), sp.CWD))
+	var repoKey, mainRepoRoot, repoRoot, repoName string
 	if pane.Git != nil {
-		repoRoot = strings.TrimSpace(pane.Git.RepoRoot)
+		repoKey = strings.TrimSpace(pane.Git.RepoKey)
+		mainRepoRoot = cleanNonEmptyPath(pane.Git.MainRepoRoot)
+		repoRoot = cleanNonEmptyPath(pane.Git.RepoRoot)
+		repoName = strings.TrimSpace(pane.Git.RepoName)
 	}
 	name := deriveProjectName(pane, cwd, sp.Name)
-	key := firstNonEmpty(repoRoot, cwd, name)
+	key := firstNonEmpty(repoKey, mainRepoRoot, repoRoot, cwd, name)
 	if key == "" {
 		return
 	}
 
+	canonicalRoot := firstNonEmpty(mainRepoRoot, repoRoot)
+
 	acc, exists := byKey[key]
 	if !exists {
 		acc = &projectAccum{
-			Name:     name,
-			RepoRoot: repoRoot,
-			CWD:      cwd,
+			Name:        name,
+			hasRepoName: repoName != "",
+			RepoRoot:    canonicalRoot,
+			CWD:         cwd,
+			worktrees:   make(map[string]*worktreeStats),
 		}
 		byKey[key] = acc
 		*order = append(*order, key)
 	}
 
-	if acc.Name == "" {
+	if repoName != "" && !acc.hasRepoName {
+		acc.Name = repoName
+		acc.hasRepoName = true
+	} else if acc.Name == "" {
 		acc.Name = name
 	}
-	if acc.RepoRoot == "" && repoRoot != "" {
+	if mainRepoRoot != "" {
+		acc.RepoRoot = mainRepoRoot
+	} else if acc.RepoRoot == "" && repoRoot != "" {
 		acc.RepoRoot = repoRoot
 	}
 	if acc.CWD == "" && cwd != "" {
 		acc.CWD = cwd
 	}
+
+	wtKey := firstNonEmpty(repoRoot, cwd, key)
+	wt, wtExists := acc.worktrees[wtKey]
+	if !wtExists {
+		wt = &worktreeStats{}
+		acc.worktrees[wtKey] = wt
+	}
+
 	if pane.Git != nil {
 		acc.HasGit = true
-		if pane.Git.Branch != "" {
+		if pane.Git.Branch != "" && (acc.Branch == "" || !pane.Git.IsWorktree) {
 			acc.Branch = pane.Git.Branch
 		}
 		if pane.Git.IsDirty {
-			acc.isDirty = true
+			wt.isDirty = true
 		}
-		if pane.Git.FilesAdded > acc.FilesAdded {
-			acc.FilesAdded = pane.Git.FilesAdded
+		if pane.Git.FilesAdded > wt.filesAdded {
+			wt.filesAdded = pane.Git.FilesAdded
 		}
-		if pane.Git.FilesModified > acc.FilesModified {
-			acc.FilesModified = pane.Git.FilesModified
+		if pane.Git.FilesModified > wt.filesModified {
+			wt.filesModified = pane.Git.FilesModified
 		}
 	} else if acc.Branch == "" && metricsBranch != "" {
 		acc.Branch = metricsBranch
@@ -977,6 +1049,11 @@ func sessionRowKey(agentName, sessionID string, pane Pane) string {
 func deriveProjectName(pane Pane, cwd, spaceName string) string {
 	if pane.Git != nil && strings.TrimSpace(pane.Git.RepoName) != "" {
 		return strings.TrimSpace(pane.Git.RepoName)
+	}
+	if pane.Git != nil && strings.TrimSpace(pane.Git.MainRepoRoot) != "" {
+		if base := filepath.Base(pane.Git.MainRepoRoot); base != "" && base != "." && base != "/" {
+			return base
+		}
 	}
 	if pane.Git != nil && strings.TrimSpace(pane.Git.RepoRoot) != "" {
 		if base := filepath.Base(pane.Git.RepoRoot); base != "" && base != "." && base != "/" {
