@@ -26,15 +26,16 @@ const (
 	listTailScanBytes   = 128 * 1024 // 128 KiB tail window for fast List() metadata scan
 )
 
-// AttachProviderTelemetry attaches native ConversationStore and LogParser
-// implementations to p when p is a *agent.BasePlugin for one of the 9
-// first-class provider plugins and those capabilities are not already set.
+// AttachProviderTelemetry attaches native ConversationStore, LogParser, and
+// UsageReader implementations to p when p is a *agent.BasePlugin for a
+// supported provider plugin and those capabilities are not already set.
 func AttachProviderTelemetry(p agent.Plugin) {
 	bp, ok := p.(*agent.BasePlugin)
 	if !ok || bp == nil {
 		return
 	}
 	AttachProviderStores(bp)
+	AttachProviderUsageReaders(bp)
 }
 
 // AttachProviderStores wires native ConversationStore and LogParser
