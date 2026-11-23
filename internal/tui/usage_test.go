@@ -625,3 +625,298 @@ func TestCLIUsageDispatch(t *testing.T) {
 		t.Fatalf("cli.Run(usage --help) code=%d out=%q", code, out.String())
 	}
 }
+
+type fakeUsageLimitsBackend struct {
+	*fakeUsageBackend
+	limits           usage.LimitsSnapshot
+	limitsErr        error
+	limitsCalls      int
+	limitsForceCalls int
+}
+
+func (f *fakeUsageLimitsBackend) LoadUsageLimits(_ context.Context, force bool) (usage.LimitsSnapshot, error) {
+	f.limitsCalls++
+	if force {
+		f.limitsForceCalls++
+	}
+	if f.limitsErr != nil {
+		return usage.LimitsSnapshot{}, f.limitsErr
+	}
+	return f.limits, nil
+}
+
+func sampleLimitsSnapshot(now time.Time) usage.LimitsSnapshot {
+	return usage.LimitsSnapshot{
+		Version:     1,
+		CheckedAtMs: now.UnixMilli(),
+		Accounts: []usage.LimitAccount{
+			{
+				IdentityKey: "claude:default",
+				Provider:    "claude",
+				Profiles:    []string{"default"},
+				Email:       "arham@example.com",
+				Plan:        "Max",
+				CheckedAt:   now.Format(time.RFC3339),
+				ResetCredits: &agent.ResetCredits{
+					AvailableCount: 2,
+					NextExpiresAt:  now.AddDate(0, 1, 0).Format(time.RFC3339),
+				},
+				Windows: []agent.UsageLimitWindow{
+					{
+						ID:                 "session",
+						Kind:               agent.LimitWindowSession,
+						Label:              "Session",
+						UsedPercent:        45,
+						ResetsAt:           now.Add(2*time.Hour + 15*time.Minute).Format(time.RFC3339),
+						WindowDurationMins: 300,
+					},
+					{
+						ID:                 "weekly",
+						Kind:               agent.LimitWindowWeekly,
+						Label:              "Weekly",
+						UsedPercent:        20,
+						ResetsAt:           now.Add(48 * time.Hour).Format(time.RFC3339),
+						WindowDurationMins: 10080,
+					},
+				},
+			},
+			{
+				IdentityKey: "codex:default",
+				Provider:    "codex",
+				Profiles:    []string{"default"},
+				Email:       "codex@example.com",
+				Plan:        "Pro",
+				CheckedAt:   now.Format(time.RFC3339),
+				Stale:       true,
+				Windows: []agent.UsageLimitWindow{
+					{
+						ID:                 "session",
+						Kind:               agent.LimitWindowSession,
+						Label:              "Session",
+						UsedPercent:        85,
+						ResetsAt:           now.Add(3 * time.Hour).Format(time.RFC3339),
+						WindowDurationMins: 300,
+					},
+					{
+						ID:                 "weekly",
+						Kind:               agent.LimitWindowWeekly,
+						Label:              "Weekly",
+						UsedPercent:        50,
+						ResetsAt:           now.Add(84 * time.Hour).Format(time.RFC3339),
+						WindowDurationMins: 10080,
+					},
+				},
+			},
+			{
+				IdentityKey: "antigravity:pratham",
+				Provider:    "antigravity",
+				Profiles:    []string{"pratham"},
+				Email:       "pratham@example.com",
+				Plan:        "Pro",
+				CheckedAt:   now.Format(time.RFC3339),
+				Windows: []agent.UsageLimitWindow{
+					{
+						ID:                 "gemini-5h",
+						Kind:               agent.LimitWindowSession,
+						Label:              "Gemini · 5-hour",
+						UsedPercent:        25,
+						ResetsAt:           now.Add(4 * time.Hour).Format(time.RFC3339),
+						WindowDurationMins: 300,
+					},
+				},
+			},
+			{
+				IdentityKey: "antigravity:saucerf166",
+				Provider:    "antigravity",
+				Profiles:    []string{"saucerf166"},
+				Email:       "saucerf166@example.com",
+				Plan:        "Go",
+				CheckedAt:   now.Format(time.RFC3339),
+				Windows: []agent.UsageLimitWindow{
+					{
+						ID:                 "claude-gpt-weekly",
+						Kind:               agent.LimitWindowWeekly,
+						Label:              "Claude & GPT · Weekly",
+						UsedPercent:        60,
+						ResetsAt:           now.Add(96 * time.Hour).Format(time.RFC3339),
+						WindowDurationMins: 10080,
+					},
+				},
+			},
+		},
+		Notices: []usage.LimitNotice{
+			{
+				Provider: "claude",
+				Profile:  "work",
+				Message:  "Could not read limits.",
+			},
+		},
+	}
+}
+
+func runTeaCmd(m Model, cmd tea.Cmd) Model {
+	if cmd == nil {
+		return m
+	}
+	msg := cmd()
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		cur := m
+		for _, sub := range batch {
+			if sub == nil {
+				continue
+			}
+			next, _ := cur.Update(sub())
+			cur = next.(Model)
+		}
+		return cur
+	}
+	next, _ := m.Update(msg)
+	return next.(Model)
+}
+
+func TestUsagePlanTabPerProfileLimitsAndResetCredits(t *testing.T) {
+	now := sampleUsageNow()
+	sizes := [][2]int{{140, 40}, {72, 22}}
+
+	for _, sz := range sizes {
+		fb := &fakeUsageLimitsBackend{
+			fakeUsageBackend: &fakeUsageBackend{report: sampleUsageReport()},
+			limits:           sampleLimitsSnapshot(now),
+		}
+		m := New(fb, Options{
+			InitialMode: ModeUsage,
+			Now:         func() time.Time { return now },
+		})
+		m.width = sz[0]
+		m.height = sz[1]
+		m = runTeaCmd(m, m.Init())
+
+		// Switch to Plan tab (3)
+		m, _ = sendKey(m, runeKey("3"))
+		if m.usageTab != usageTabPlan {
+			t.Fatalf("size %dx%d: expected usageTabPlan, got %d", sz[0], sz[1], m.usageTab)
+		}
+
+		// Render full Plan tab lines (and check View height)
+		view := m.View()
+		if lines := strings.Split(view, "\n"); len(lines) != sz[1] {
+			t.Errorf("size %dx%d: expected %d lines, got %d", sz[0], sz[1], sz[1], len(lines))
+		}
+
+		// Check all rendered Plan tab lines (including scrolled content at narrow height)
+		fullPlan := ansi.Strip(strings.Join(m.renderUsagePlanTab(sz[0]-2), "\n"))
+		checks := []string{
+			"Plan & Rate Limits",
+			"Updated 14:30",
+			"Claude",
+			"Codex",
+			"Antigravity",
+			"pratham",
+			"saucerf166",
+			"Max",
+			"Pro",
+			"stale",
+			"✦ 2 reset credits available",
+			"(exp Dec 23)",
+			"▲ ahead",
+			"▼ under",
+			"● on",
+			"claude/work: Could not read limits.",
+		}
+		for _, want := range checks {
+			if !strings.Contains(fullPlan, want) {
+				t.Errorf("size %dx%d: expected %q in Plan tab:\n%s", sz[0], sz[1], want, fullPlan)
+			}
+		}
+
+		// Check Dashboard Card #3 ("3 Plan") includes per-profile summary & reset credits
+		dashCard := ansi.Strip(strings.Join(m.renderUsagePlanDashboardCard(50), "\n"))
+		if !strings.Contains(dashCard, "claude/default") || !strings.Contains(dashCard, "✦ 2 reset credits available") {
+			t.Errorf("size %dx%d: expected per-profile summary and reset credits in dashboard card:\n%s", sz[0], sz[1], dashCard)
+		}
+	}
+}
+
+func TestUsagePlanTabAutoRefreshOnSwitch(t *testing.T) {
+	curNow := sampleUsageNow()
+	fb := &fakeUsageLimitsBackend{
+		fakeUsageBackend: &fakeUsageBackend{report: sampleUsageReport()},
+		limits:           sampleLimitsSnapshot(curNow),
+	}
+
+	m := New(fb, Options{
+		InitialMode: ModeUsage,
+		Now:         func() time.Time { return curNow },
+	})
+	m.width = 140
+	m.height = 40
+
+	if !m.usageLimitsRefreshing {
+		t.Fatalf("expected usageLimitsRefreshing=true immediately after New()")
+	}
+
+	// Init runs cache load + background live refresh
+	m = runTeaCmd(m, m.Init())
+	if m.usageLimitsRefreshing {
+		t.Fatalf("expected usageLimitsRefreshing=false after Init refresh completes")
+	}
+	if fb.limitsCalls != 2 || fb.limitsForceCalls != 1 {
+		t.Fatalf("expected 2 limits calls (1 cache, 1 force) from Init, got calls=%d force=%d", fb.limitsCalls, fb.limitsForceCalls)
+	}
+
+	// Switching to Plan tab within 15s cooldown should NOT trigger another refresh
+	var cmd tea.Cmd
+	m, cmd = sendKey(m, runeKey("3"))
+	if cmd != nil {
+		t.Fatalf("expected no refresh cmd within 15s cooldown")
+	}
+	if m.usageLimitsRefreshing {
+		t.Fatalf("expected usageLimitsRefreshing=false within cooldown")
+	}
+
+	// Advance clock past 15s cooldown, switch away and back via Tab
+	curNow = curNow.Add(16 * time.Second)
+	m, _ = sendKey(m, runeKey("2"))
+	m, cmd = sendKey(m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.usageTab != usageTabPlan {
+		t.Fatalf("expected tab to be usageTabPlan, got %d", m.usageTab)
+	}
+	if cmd == nil {
+		t.Fatalf("expected auto-refresh cmd when switching to Plan tab after 15s cooldown")
+	}
+	if !m.usageLimitsRefreshing {
+		t.Fatalf("expected usageLimitsRefreshing=true while refresh is in flight")
+	}
+
+	// Switching away and back while already refreshing must suppress duplicate refresh
+	m, _ = sendKey(m, runeKey("1"))
+	var dupCmd tea.Cmd
+	m, dupCmd = sendKey(m, runeKey("3"))
+	if dupCmd != nil {
+		t.Fatalf("expected duplicate refresh suppressed while usageLimitsRefreshing=true")
+	}
+
+	// Complete the in-flight refresh
+	m = runTeaCmd(m, cmd)
+	if m.usageLimitsRefreshing {
+		t.Fatalf("expected usageLimitsRefreshing=false after refresh completes")
+	}
+	if fb.limitsForceCalls != 2 {
+		t.Fatalf("expected 2 force calls after auto-refresh, got %d", fb.limitsForceCalls)
+	}
+
+	// Manual force refresh (R) should refresh both usage report and usage limits
+	beforeUsageForce := fb.forceCalls
+	beforeLimitsForce := fb.limitsForceCalls
+	m, cmd = sendKey(m, runeKey("R"))
+	if cmd == nil {
+		t.Fatalf("expected refresh cmd on R")
+	}
+	m = runTeaCmd(m, cmd)
+	if fb.forceCalls != beforeUsageForce+1 {
+		t.Fatalf("expected usage forceCalls=%d, got %d", beforeUsageForce+1, fb.forceCalls)
+	}
+	if fb.limitsForceCalls != beforeLimitsForce+1 {
+		t.Fatalf("expected limits forceCalls=%d, got %d", beforeLimitsForce+1, fb.limitsForceCalls)
+	}
+}

@@ -227,12 +227,17 @@ type Model struct {
 	tabsMonitorFiltering bool
 	tabsMonitorSort      monitorSortMode
 
-	usageReport      usage.Report
-	usageLoaded      bool
-	usageLoading     bool
-	usageRefreshing  bool
-	usageErr         string
-	usageTab         int
+	usageReport            usage.Report
+	usageLoaded            bool
+	usageLoading           bool
+	usageRefreshing        bool
+	usageErr               string
+	usageLimits            usage.LimitsSnapshot
+	usageLimitsLoaded      bool
+	usageLimitsRefreshing  bool
+	usageLimitsRefreshedAt time.Time
+	usageLimitsErr         string
+	usageTab               int
 	usageRange       usageRange
 	usageOverviewAgg usageOverviewAgg
 	usageGroupBy     usageGroupBy
@@ -315,6 +320,9 @@ func New(backend Backend, opts Options) Model {
 	if m.mode == ModeUsage {
 		m.usageLoading = true
 		m.usageRefreshing = true
+		if _, ok := backend.(UsageLimitsBackend); ok {
+			m.usageLimitsRefreshing = true
+		}
 		m.usageRange = usageRange30d
 		m.usageUseCost = true
 		m.usageDayIdx = -1
@@ -357,6 +365,8 @@ func (m Model) Init() tea.Cmd {
 		return tea.Batch(
 			m.loadUsageCmd(false),
 			m.loadUsageCmd(true),
+			m.loadUsageLimitsCmd(false),
+			m.loadUsageLimitsCmd(true),
 		)
 	}
 	if m.mode == ModeRename && m.renameStandalone {
@@ -547,6 +557,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.nextLoadSpacesCmd(), m.tickCmd())
 	case usageMsg:
 		return m.handleUsageMsg(msg)
+	case usageLimitsMsg:
+		return m.handleUsageLimitsMsg(msg)
 	case wtInspectMsg:
 		return m.handleWtInspectMsg(msg)
 	case wtPromptDetailMsg:
