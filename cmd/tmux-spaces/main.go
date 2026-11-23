@@ -451,6 +451,7 @@ type tuiBackend struct {
 	wt         *worktree.Manager
 	telemetry  *model.TelemetryCollector
 	usage      *usage.Collector
+	limits     *usage.LimitsCollector
 	now              func() time.Time
 	dirExists        func(string) bool
 	profileExists    func(agentName, profile string) bool
@@ -530,6 +531,7 @@ func newTUIBackend(client *tmux.Client) *tuiBackend {
 		wt:                 worktree.NewManager(),
 		telemetry:          model.NewTelemetryCollector(agent.DefaultRegistry()),
 		usage:              usage.NewCollector(homeDir()),
+		limits:             usage.NewLimitsCollector(homeDir()),
 		now:                time.Now,
 		dirExists:          isExistingDir,
 		profileExists:      isExistingHarnessProfile,
@@ -1660,6 +1662,15 @@ func (b *tuiBackend) LoadUsage(ctx context.Context, force bool) (usage.Report, e
 		b.usage = usage.NewCollector(homeDir())
 	}
 	return b.usage.Collect(ctx, force)
+}
+
+// LoadUsageLimits implements tui.UsageLimitsBackend by loading and refreshing
+// per-profile & per-harness usage limits cached in ~/.harness.
+func (b *tuiBackend) LoadUsageLimits(ctx context.Context, force bool) (usage.LimitsSnapshot, error) {
+	if b.limits == nil {
+		b.limits = usage.NewLimitsCollector(homeDir())
+	}
+	return b.limits.Collect(ctx, force)
 }
 
 func shellQuoteWord(s string) string {
