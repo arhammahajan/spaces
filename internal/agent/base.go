@@ -27,8 +27,11 @@ type BasePlugin struct {
 	CustomLogParser         LogParser
 	CustomSessionResolver   SessionResolver
 	CustomLauncher          Launcher
-	CustomConfigProvider    ConfigProvider
-	CustomDaemonWatcher     DaemonWatcher
+	CustomConfigProvider      ConfigProvider
+	CustomDaemonWatcher       DaemonWatcher
+	CustomSessionTelemetry    SessionTelemetryProvider
+	CustomQuotaProvider       QuotaProvider
+	CustomMCPActivityProvider MCPActivityProvider
 }
 
 func (b *BasePlugin) Spec() Spec {
@@ -104,6 +107,18 @@ func (b *BasePlugin) ConfigProvider() ConfigProvider {
 
 func (b *BasePlugin) DaemonWatcher() DaemonWatcher {
 	return b.CustomDaemonWatcher
+}
+
+func (b *BasePlugin) SessionTelemetry() SessionTelemetryProvider {
+	return b.CustomSessionTelemetry
+}
+
+func (b *BasePlugin) QuotaProvider() QuotaProvider {
+	return b.CustomQuotaProvider
+}
+
+func (b *BasePlugin) MCPActivityProvider() MCPActivityProvider {
+	return b.CustomMCPActivityProvider
 }
 
 // ManifestScreenReader evaluates pane viewports using a bundled manifest in

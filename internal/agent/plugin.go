@@ -53,6 +53,16 @@ type Plugin interface {
 	// DaemonWatcher returns an optional agent-native daemon/SSE event watcher.
 	// Returning nil indicates this agent does not support daemon event streaming.
 	DaemonWatcher() DaemonWatcher
+
+	// SessionTelemetry returns an optional native per-session metrics provider
+	// (context window, token breakdown, compactions, turn history).
+	SessionTelemetry() SessionTelemetryProvider
+
+	// QuotaProvider returns an optional account quota / rate-limit provider.
+	QuotaProvider() QuotaProvider
+
+	// MCPActivityProvider returns an optional live MCP server activity collector.
+	MCPActivityProvider() MCPActivityProvider
 }
 
 // Spec declares the static metadata and naming rules for an agent plugin.

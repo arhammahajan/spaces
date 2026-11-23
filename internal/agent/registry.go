@@ -646,3 +646,38 @@ func (r *Registry) FindUnclaimedConversation(
 	}
 	return "", true
 }
+
+// SessionTelemetry returns the SessionTelemetryProvider for the named agent, if any.
+func (r *Registry) SessionTelemetry(name string) SessionTelemetryProvider {
+	p, ok := r.Resolve(name)
+	if !ok || p == nil {
+		return nil
+	}
+	return p.SessionTelemetry()
+}
+
+// QuotaProviders returns all registered plugins that implement QuotaProvider.
+func (r *Registry) QuotaProviders() []Plugin {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Plugin
+	for _, p := range r.ordered {
+		if p != nil && p.QuotaProvider() != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// MCPActivityProviders returns all registered plugins that implement MCPActivityProvider.
+func (r *Registry) MCPActivityProviders() []Plugin {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Plugin
+	for _, p := range r.ordered {
+		if p != nil && p.MCPActivityProvider() != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
