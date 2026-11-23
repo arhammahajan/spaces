@@ -113,8 +113,11 @@ func buildPaneCommand(p PaneSnapshot, opts RestoreOptions, skipResume bool) []st
 		}
 
 		// Case 1: Harness launcher (e.g. `spaces agy profile saucerf166` or legacy `harness agy profile saucerf166`).
-		if len(p.FullCommand) > 0 && isHarnessLauncher(p.FullCommand) {
+		if isHarnessLauncher(p.FullCommand) {
 			cmdWithResume := appendResumeArgs(p.FullCommand, p.Agent, p.SessionID, skipResume)
+			if filepath.Base(cmdWithResume[0]) == "harness" {
+				cmdWithResume[0] = self
+			}
 			cmd := []string{self, "__shim"}
 			if p.Profile != "" {
 				cmd = append(cmd, "--profile", p.Profile)
@@ -164,9 +167,7 @@ func isHarnessLauncher(argv []string) bool {
 	}
 	base := filepath.Base(argv[0])
 	switch base {
-	case "harness":
-		return argv[1] != "spaces"
-	case "spaces", "tmux-spaces":
+	case "harness", "spaces", "tmux-spaces":
 		return argv[1] == "profile" || argv[1] == "launch" || CanonicalAgent(argv[1]) != ""
 	default:
 		return false
