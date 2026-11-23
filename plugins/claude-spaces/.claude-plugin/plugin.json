@@ -1,0 +1,15 @@
+{
+  "name": "claude-spaces",
+  "version": "1.0.0",
+  "description": "Live tmux-spaces lifecycle metrics bridge for Claude Code: forwards lifecycle hooks and statusLine snapshots to spacecore over UDS HTTP.",
+  "author": {
+    "name": "tmux-spaces"
+  },
+  "keywords": [
+    "claude-code",
+    "tmux-spaces",
+    "hooks",
+    "statusline",
+    "observability"
+  ]
+}
