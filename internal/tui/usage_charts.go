@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	"github.com/arhammahajan/spaces/internal/usage"
 )
 
@@ -1099,4 +1100,151 @@ func formatDurationShort(ms int64) string {
 		return fmt.Sprintf("%dd", days)
 	}
 	return fmt.Sprintf("%dd%dh", days, hrs)
+}
+
+// ---------------------------------------------------------------------------
+// Per-profile usage limit pace & formatting helpers
+// ---------------------------------------------------------------------------
+
+func parseLimitTime(raw string) (time.Time, bool) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}, false
+	}
+	if t, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return t, true
+	}
+	if t, err := time.Parse(time.RFC3339, raw); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+// computeLimitPace compares usedPercent against the elapsed fraction of the
+// rate-limit window to classify pace as ahead, on, or under.
+func computeLimitPace(w agent.UsageLimitWindow, now time.Time) (usage.LimitPace, bool) {
+	if w.WindowDurationMins <= 0 || w.ResetsAt == "" {
+		return "", false
+	}
+	resetAt, ok := parseLimitTime(w.ResetsAt)
+	if !ok {
+		return "", false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	total := time.Duration(w.WindowDurationMins) * time.Minute
+	rem := resetAt.Sub(now)
+	if rem <= 0 || rem >= total {
+		return "", false
+	}
+	elapsedFrac := 1.0 - float64(rem)/float64(total)
+	expectedUsed := elapsedFrac * 100.0
+	delta := w.UsedPercent - expectedUsed
+	switch {
+	case delta > 8.0:
+		return usage.LimitPaceAhead, true
+	case delta < -8.0:
+		return usage.LimitPaceUnder, true
+	default:
+		return usage.LimitPaceOn, true
+	}
+}
+
+func renderLimitPaceTag(pace usage.LimitPace, usedPct float64) string {
+	switch pace {
+	case usage.LimitPaceAhead:
+		color := ColorYellow
+		if usedPct >= 80 {
+			color = ColorRed
+		}
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(color)).Render("▲ ahead")
+	case usage.LimitPaceUnder:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(ColorGreen)).Render("▼ under")
+	case usage.LimitPaceOn:
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(ColorTeal)).Render("● on")
+	default:
+		return ""
+	}
+}
+
+func formatLimitResetCountdown(resetsAt string, now time.Time, compact bool) string {
+	t, ok := parseLimitTime(resetsAt)
+	if !ok {
+		return ""
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	rem := t.Sub(now)
+	if rem <= 0 {
+		if compact {
+			return "soon"
+		}
+		return "resets soon"
+	}
+	if rem < 24*time.Hour {
+		h := int(rem.Hours())
+		mins := int(rem.Minutes()) % 60
+		var dur string
+		switch {
+		case h > 0 && mins > 0:
+			if compact {
+				dur = fmt.Sprintf("%dh%dm", h, mins)
+			} else {
+				dur = fmt.Sprintf("%dh %dm", h, mins)
+			}
+		case h > 0:
+			dur = fmt.Sprintf("%dh", h)
+		case mins > 0:
+			dur = fmt.Sprintf("%dm", mins)
+		default:
+			dur = "<1m"
+		}
+		if compact {
+			return "in " + dur
+		}
+		return "resets in " + dur
+	}
+	locT := t.In(now.Location())
+	if compact {
+		return locT.Format("Jan 2")
+	}
+	return "resets " + locT.Format("Jan 2 15:04")
+}
+
+func formatLimitExpiryDate(expiresAt string, now time.Time) string {
+	t, ok := parseLimitTime(expiresAt)
+	if !ok {
+		return strings.TrimSpace(expiresAt)
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	return t.In(now.Location()).Format("Jan 2")
+}
+
+func limitProviderDisplayName(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		return "Claude"
+	case "codex":
+		return "Codex"
+	case "antigravity":
+		return "Antigravity"
+	case "opencode":
+		return "OpenCode"
+	case "cursor-agent", "cursor":
+		return "Cursor"
+	case "grok":
+		return "Grok"
+	case "muse":
+		return "Muse"
+	default:
+		p := strings.TrimSpace(provider)
+		if p == "" {
+			return "Other"
+		}
+		return strings.ToUpper(p[:1]) + p[1:]
+	}
 }
