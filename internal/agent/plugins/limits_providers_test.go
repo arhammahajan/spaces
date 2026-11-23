@@ -698,3 +698,96 @@ func TestLimitsMuseLocalState(t *testing.T) {
 		t.Fatalf("expected unsupported for empty muse home, got %+v", unavail.Unavailable)
 	}
 }
+
+func TestLimitsAntigravityGeminiSupplementAndCLIRefresh(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1internal:retrieveUserQuotaSummary":
+			_, _ = w.Write([]byte(`{
+				"groups": [{
+					"displayName": "Claude and GPT models",
+					"buckets": [
+						{"bucketId": "3p-5h", "window": "5h", "remainingFraction": 0.9, "resetTime": "2026-11-23T18:00:00Z"},
+						{"bucketId": "3p-weekly", "window": "weekly", "remainingFraction": 0.8, "resetTime": "2026-11-28T00:00:00Z"}
+					]
+				}]
+			}`))
+		case "/v1internal:fetchAvailableModels":
+			_, _ = w.Write([]byte(`{
+				"models": {
+					"gemini-2.5-pro": {"modelProvider": "MODEL_PROVIDER_GOOGLE", "quotaInfo": {"remainingFraction": 0.75, "resetTime": "2026-11-23T16:00:00Z"}},
+					"claude-opus-4-6": {"modelProvider": "MODEL_PROVIDER_ANTHROPIC", "quotaInfo": {"remainingFraction": 0.9, "resetTime": "2026-11-23T18:00:00Z"}}
+				}
+			}`))
+		case "/userinfo":
+			_, _ = w.Write([]byte(`{"id":"google-42","email":"dev@example.com"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	origEndpoints := antigravityEndpoints
+	origUserInfo := antigravityUserInfoURL
+	origCLIRefresh := antigravityCLIRefresh
+	t.Cleanup(func() {
+		antigravityEndpoints = origEndpoints
+		antigravityUserInfoURL = origUserInfo
+		antigravityCLIRefresh = origCLIRefresh
+	})
+	antigravityEndpoints = []string{srv.URL}
+	antigravityUserInfoURL = srv.URL + "/userinfo"
+
+	home := t.TempDir()
+	fakeBin := filepath.Join(home, "agy")
+	writeLimitTestFile(t, fakeBin, "#!/bin/sh\n")
+	tokPath := filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	writeLimitTestFile(t, tokPath, `{
+		"token": {"access_token": "expired-tok", "refresh_token": "ref-123", "expiry": "2020-01-01T00:00:00Z"},
+		"id_token_email": "dev@example.com"
+	}`)
+
+	refreshedCalled := false
+	antigravityCLIRefresh = func(ctx context.Context, binPath, homeDir string) error {
+		refreshedCalled = true
+		future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+		writeLimitTestFile(t, tokPath, `{"token":{"access_token":"fresh-tok","refresh_token":"ref-123","expiry":"`+future+`"},"id_token_email":"dev@example.com"}`)
+		return nil
+	}
+
+	p := NewAntigravityUsageLimitProvider()
+	got, err := p.FetchUsageLimits(context.Background(), agent.UsageLimitQuery{
+		Profile:    "work",
+		HomeDir:    home,
+		BinaryPath: fakeBin,
+	})
+	if err != nil {
+		t.Fatalf("FetchUsageLimits: %v", err)
+	}
+	if !refreshedCalled {
+		t.Fatalf("expected antigravityCLIRefresh to be called for expired token")
+	}
+	if got.Unavailable != nil {
+		t.Fatalf("unexpected unavailable: %+v", got.Unavailable)
+	}
+	byID := map[string]agent.UsageLimitWindow{}
+	for _, w := range got.Windows {
+		byID[w.ID] = w
+	}
+	if _, ok := byID["3p-5h"]; !ok {
+		t.Fatalf("missing 3p-5h window: %+v", got.Windows)
+	}
+	if _, ok := byID["3p-weekly"]; !ok {
+		t.Fatalf("missing 3p-weekly window: %+v", got.Windows)
+	}
+	gw, ok := byID["gemini-quota"]
+	if !ok {
+		t.Fatalf("expected gemini-quota supplemented from fetchAvailableModels, got %+v", got.Windows)
+	}
+	if gw.UsedPercent < 24.9 || gw.UsedPercent > 25.1 {
+		t.Fatalf("expected gemini-quota usedPercent=25, got %v", gw.UsedPercent)
+	}
+	if _, dupClaude := byID["claude-quota"]; dupClaude {
+		t.Fatalf("should not duplicate claude-quota when 3p-* buckets already present: %+v", got.Windows)
+	}
+}
