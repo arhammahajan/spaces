@@ -794,6 +794,9 @@ func (m *Model) syncTabsInspectorCmd(force bool) tea.Cmd {
 // ---------------------------------------------------------------------------
 
 func (m Model) handleTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.tabsMonitorMode {
+		return m.handleTabsMonitor(msg)
+	}
 	if m.tabsSearching {
 		return m.handleTabsSearch(msg)
 	}
@@ -926,6 +929,16 @@ func (m Model) handleTabs(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, m.syncTabsInspectorCmd(false)
 		case "v":
 			m.tabsTelemetryExpanded = !m.tabsTelemetryExpanded
+			return m, nil
+		case "m":
+			m.tabsMonitorMode = true
+			m.clampMonitorSelection()
+			if !m.telemetryLoaded && !m.telemetryFetching {
+				if cmd := m.loadTelemetryCmd(m.spaces, false); cmd != nil {
+					m.telemetryFetching = true
+					return m, cmd
+				}
+			}
 			return m, nil
 		case "b":
 			m.setFilter(model.FilterNeeds)
@@ -1224,6 +1237,9 @@ func (m Model) tabsLayout(width, height int) tabsLayout {
 }
 
 func (m Model) renderTabs(width, height int) string {
+	if m.tabsMonitorMode {
+		return m.renderTabsMonitor(width, height)
+	}
 	layout := m.tabsLayout(width, height)
 	items := m.tabsItems()
 	_, sp := m.tabsSpace()
@@ -1352,6 +1368,36 @@ func (m Model) tabsHeaderLine(width int) string {
 	}
 	if m.tabsSort != TabSortIndex {
 		segs = append(segs, st(ColorMauve, false).Render("sort:"+m.tabsSort.Label()))
+	}
+	if m.telemetryLoaded && width >= 90 {
+		if m.telemetry.Context.TokensPerMin > 0 {
+			segs = append(segs, st(ColorTeal, false).Render(fmtTokens(int64(m.telemetry.Context.TokensPerMin))+"/m"))
+		}
+		if cq := m.telemetry.QuotaForAgent("claude"); cq != nil && cq.Primary != nil {
+			hex := lerpHexColor(cq.Primary.UsedPct, ColorGreen, ColorYellow, ColorRed)
+			segs = append(segs, st(hex, false).Render(fmt.Sprintf("CC %.0f%%", cq.Primary.RemainingPct())))
+		}
+		if cdq := m.telemetry.QuotaForAgent("codex"); cdq != nil && cdq.Primary != nil {
+			hex := lerpHexColor(cdq.Primary.UsedPct, ColorGreen, ColorYellow, ColorRed)
+			segs = append(segs, st(hex, false).Render(fmt.Sprintf("CD %.0f%%", cdq.Primary.RemainingPct())))
+		}
+		portIssues := len(m.telemetry.OrphanPorts)
+		portCounts := map[int]int{}
+		for _, p := range m.telemetry.Ports {
+			portCounts[p.Port]++
+		}
+		for _, p := range m.telemetry.Ports {
+			if p.Duplicate || portCounts[p.Port] > 1 {
+				portIssues++
+			}
+		}
+		if portIssues > 0 {
+			noun := "port"
+			if portIssues != 1 {
+				noun = "ports"
+			}
+			segs = append(segs, st(ColorRed, true).Render(fmt.Sprintf("⚠ %d %s", portIssues, noun)))
+		}
 	}
 	return renderHeaderBar(title, segs, m.filter, width)
 }
@@ -1948,6 +1994,7 @@ func (m Model) tabsHintsLine(width int) string {
 			{"↑↓", "tab"},
 			{"←→", "pane"},
 			{"Enter", "focus"},
+			{"m", "monitor"},
 			{"/", "filter"},
 			{"n/r/x", "manage"},
 			{"?", "keys"},
@@ -1959,6 +2006,7 @@ func (m Model) tabsHintsLine(width int) string {
 		{"←→", "pane"},
 		{"J/K", "scroll"},
 		{"Enter", "focus"},
+		{"m", "monitor"},
 		{"/", "filter"},
 		{"s", "sort"},
 		{"v", "expand"},
