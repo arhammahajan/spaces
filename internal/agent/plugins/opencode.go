@@ -33,8 +33,9 @@ func NewOpenCode() agent.Plugin {
 		MCPTargets: []agent.MCPConfigTarget{
 			{HarnessLabel: "opencode", RelPath: ".config/opencode/opencode.json"},
 		},
-		CustomTitleExtractor: agent.TitleExtractorFunc(extractOpencodeTitle),
-		CustomDaemonWatcher:  NewOpenCodeDaemonWatcher(),
+		CustomTitleExtractor:   agent.TitleExtractorFunc(extractOpencodeTitle),
+		CustomDaemonWatcher:    NewOpenCodeDaemonWatcher(),
+		CustomSessionTelemetry: newOpenCodeTelemetryProvider(),
 	}
 }
 
