@@ -201,7 +201,7 @@ func TestPluginsInstallUninstall(t *testing.T) {
 	}
 
 	env3 := pluginsTestEnv()
-	if code := Run([]string{"plugins", "install", "all"}, env3); code != ExitOK {
+	if code := Run([]string{"plugins", "install", "all", "--home", t.TempDir()}, env3); code != ExitOK {
 		t.Fatalf("install all = %d: %s", code, stderrOf(t, env3))
 	}
 
