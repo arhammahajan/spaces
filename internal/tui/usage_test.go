@@ -423,12 +423,8 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("expected Esc to collapse expanded details, not quit")
 	}
 
-	// Plan tab: ←/→ toggles 5h/Weekly, ↑/↓ selects 5h bucket, Enter expands
+	// Plan tab: ↑/↓ selects 5h bucket, Enter expands
 	m, _ = sendKey(m, runeKey("3"))
-	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyRight})
-	if m.usagePlanWindow != 1 {
-		t.Fatalf("expected Weekly window selected")
-	}
 	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})
 	if m.usageRowSel != 1 {
 		t.Fatalf("expected row 1 selected on Plan tab")

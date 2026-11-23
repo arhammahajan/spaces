@@ -243,7 +243,6 @@ type Model struct {
 	usageGroupBy     usageGroupBy
 	usageUseCost     bool
 	usageProvider    string
-	usagePlanWindow  int
 	usageSessionSort usageSessionSort
 	usageDayIdx      int
 	usageRowSel      int
