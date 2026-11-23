@@ -8,6 +8,8 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -25,6 +27,7 @@ var (
 	}
 	antigravityTokenURL    = "https://oauth2.googleapis.com/token"
 	antigravityUserInfoURL = "https://www.googleapis.com/oauth2/v2/userinfo"
+	antigravityCLIRefresh  = refreshAntigravityTokenViaCLI
 )
 
 type antigravityUsageLimitProvider struct{}
@@ -115,7 +118,7 @@ func (p *antigravityUsageLimitProvider) FetchUsageLimits(ctx context.Context, q 
 	}
 
 	client := newLimitHTTPClient(defaultLimitHTTPTimeout)
-	creds, unavail := resolveAntigravityCredentials(ctx, client, homeDir, now)
+	creds, unavail := resolveAntigravityCredentials(ctx, client, q, homeDir, now)
 	if unavail != nil {
 		return unavailableLimits("antigravity", q.Profile, unavail.Reason, unavail.Message, now), nil
 	}
@@ -140,8 +143,35 @@ func (p *antigravityUsageLimitProvider) FetchUsageLimits(ctx context.Context, q 
 	}()
 
 	windows, resetCredits := fetchAntigravitySummary(ctx, client, creds.accessToken, ua, reqBody)
-	if len(windows) == 0 {
-		windows = fetchAntigravityModels(ctx, client, creds.accessToken, ua, reqBody)
+	hasGemini := false
+	hasThirdParty := false
+	for _, w := range windows {
+		low := strings.ToLower(w.ID)
+		if strings.HasPrefix(low, "gemini-") {
+			hasGemini = true
+		}
+		if strings.HasPrefix(low, "3p-") || strings.HasPrefix(low, "claude-") || strings.HasPrefix(low, "gpt-") {
+			hasThirdParty = true
+		}
+	}
+	if len(windows) == 0 || !hasGemini {
+		modelWins := fetchAntigravityModels(ctx, client, creds.accessToken, ua, reqBody)
+		if len(modelWins) > 0 {
+			merged := make(map[string]agent.UsageLimitWindow, len(windows)+len(modelWins))
+			for _, w := range windows {
+				merged[w.ID] = w
+			}
+			for _, w := range modelWins {
+				low := strings.ToLower(w.ID)
+				if hasThirdParty && (strings.HasPrefix(low, "claude-") || strings.HasPrefix(low, "gpt-")) {
+					continue
+				}
+				if prev, ok := merged[w.ID]; !ok || w.UsedPercent > prev.UsedPercent {
+					merged[w.ID] = w
+				}
+			}
+			windows = sortedLimitWindows(merged)
+		}
 	}
 	uiWG.Wait()
 
@@ -171,10 +201,11 @@ func (p *antigravityUsageLimitProvider) FetchUsageLimits(ctx context.Context, q 
 	}, nil
 }
 
-func resolveAntigravityCredentials(ctx context.Context, client *http.Client, homeDir string, now time.Time) (*antigravityResolvedCreds, *agent.UsageLimitUnavailable) {
+func resolveAntigravityCredentials(ctx context.Context, client *http.Client, q agent.UsageLimitQuery, homeDir string, now time.Time) (*antigravityResolvedCreds, *agent.UsageLimitUnavailable) {
 	primaryPath := filepath.Join(homeDir, ".gemini", "antigravity-cli", "antigravity-oauth-token")
 	var primary antigravityOAuthTokenFile
 	primaryExists, primaryErr := readJSONFile(primaryPath, &primary)
+	primaryExpired := false
 	if primaryExists && primaryErr == nil {
 		accessToken := strings.TrimSpace(primary.Token.AccessToken)
 		email := strings.TrimSpace(primary.IDTokenEmail)
@@ -212,7 +243,38 @@ func resolveAntigravityCredentials(ctx context.Context, client *http.Client, hom
 				fallbackKey: sha256Hex("antigravity\x00" + refreshed),
 			}, nil
 		}
-		// If accessToken was present (even if expired) and no refresh client credentials exist, still try secondary before falling back.
+		// Native antigravity-cli tokens omit client_id/client_secret; ask the
+		// profile's agy binary (with DBUS_SESSION_BUS_ADDRESS=disabled:) to
+		// refresh the file in place when a refresh_token is present.
+		if expired && strings.TrimSpace(primary.Token.RefreshToken) != "" {
+			primaryExpired = true
+			if bin := resolveAntigravityBinary(q); bin != "" && antigravityCLIRefresh != nil {
+				if err := antigravityCLIRefresh(ctx, bin, homeDir); err == nil {
+					var reloaded antigravityOAuthTokenFile
+					if ok, rerr := readJSONFile(primaryPath, &reloaded); ok && rerr == nil {
+						newTok := strings.TrimSpace(reloaded.Token.AccessToken)
+						stillExpired := false
+						if reloaded.Token.Expiry != "" {
+							if exp, ok := parseISOTime(reloaded.Token.Expiry); ok && !exp.After(now.Add(60*time.Second)) {
+								stillExpired = true
+							}
+						}
+						if newTok != "" && !stillExpired {
+							newEmail := strings.TrimSpace(reloaded.IDTokenEmail)
+							if newEmail == "" {
+								newEmail = email
+							}
+							return &antigravityResolvedCreds{
+								accessToken: newTok,
+								projectID:   strings.TrimSpace(reloaded.ProjectID),
+								email:       newEmail,
+								fallbackKey: sha256Hex("antigravity\x00" + newTok),
+							}, nil
+						}
+					}
+				}
+			}
+		}
 	}
 
 	secondaryPath := filepath.Join(homeDir, "antigravity-acp", "acp_token.json")
@@ -236,6 +298,13 @@ func resolveAntigravityCredentials(ctx context.Context, client *http.Client, hom
 		}, nil
 	}
 
+	if primaryExpired {
+		return nil, &agent.UsageLimitUnavailable{
+			Reason:  agent.LimitUnavailableProbeFailed,
+			Message: "Antigravity OAuth token expired; open profile to refresh.",
+		}
+	}
+
 	if primaryExists && primaryErr != nil || secondaryExists && secondaryErr != nil {
 		return nil, &agent.UsageLimitUnavailable{
 			Reason:  agent.LimitUnavailableProbeFailed,
@@ -247,6 +316,48 @@ func resolveAntigravityCredentials(ctx context.Context, client *http.Client, hom
 		Reason:  agent.LimitUnavailableUnsupported,
 		Message: "Sign in with Google to see Antigravity limits.",
 	}
+}
+
+func resolveAntigravityBinary(q agent.UsageLimitQuery) string {
+	if p := strings.TrimSpace(q.BinaryPath); p != "" {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() {
+			return p
+		}
+	}
+	if realHome := strings.TrimSpace(q.RealHomeDir); realHome != "" {
+		cand := filepath.Join(realHome, ".local", "libexec", "antigravity", "agy")
+		if info, err := os.Stat(cand); err == nil && !info.IsDir() {
+			return cand
+		}
+	}
+	if p, err := exec.LookPath("agy"); err == nil && p != "" {
+		return p
+	}
+	return ""
+}
+
+func refreshAntigravityTokenViaCLI(ctx context.Context, binPath, homeDir string) error {
+	runCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(runCtx, binPath, "models")
+	baseEnv := os.Environ()
+	env := make([]string, 0, len(baseEnv)+3)
+	for _, kv := range baseEnv {
+		if k, _, ok := strings.Cut(kv, "="); ok {
+			switch k {
+			case "HOME", "XDG_CONFIG_HOME", "DBUS_SESSION_BUS_ADDRESS":
+				continue
+			}
+		}
+		env = append(env, kv)
+	}
+	env = append(env,
+		"HOME="+homeDir,
+		"XDG_CONFIG_HOME="+filepath.Join(homeDir, ".config"),
+		"DBUS_SESSION_BUS_ADDRESS=disabled:",
+	)
+	cmd.Env = env
+	return cmd.Run()
 }
 
 func exchangeAntigravityRefreshToken(ctx context.Context, client *http.Client, clientID, clientSecret, refreshToken string) (string, error) {
