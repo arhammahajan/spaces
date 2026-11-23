@@ -225,7 +225,7 @@ func TestRunHealthyStack(t *testing.T) {
 		SpacesRuntime: runtime,
 	})
 	wantNames := []string{"router", "router-config", "profiles",
-		"agents", "spaces-runtime", "spaces-listener", "entries", "tmux"}
+		"agents", "spaces-runtime", "spaces-listener", "entries", "tmux", "plugins"}
 	if len(checks) != len(wantNames) {
 		t.Fatalf("Run returned %d checks, want %d", len(checks), len(wantNames))
 	}
@@ -263,11 +263,14 @@ func TestRunHealthyStack(t *testing.T) {
 	if detail := checks[6].Detail; detail != "spaces -> "+target {
 		t.Errorf("entries detail = %q", detail)
 	}
-	s := Summarize(checks)
-	if s.OK != 8 || s.Warn != 0 || s.Fail != 0 {
-		t.Fatalf("summary = %+v, want 8 ok", s)
+	if got := byName(checks)["plugins"]; got.State != StateOK || strings.TrimSpace(got.Detail) == "" {
+		t.Errorf("plugins = %+v, want ok with a detail", got)
 	}
-	if out := Render(checks); !strings.HasSuffix(out, "8 ok, 0 warn, 0 fail\n") {
+	s := Summarize(checks)
+	if s.OK != 9 || s.Warn != 0 || s.Fail != 0 {
+		t.Fatalf("summary = %+v, want 9 ok", s)
+	}
+	if out := Render(checks); !strings.HasSuffix(out, "9 ok, 0 warn, 0 fail\n") {
 		t.Errorf("render summary line missing: %q", out)
 	}
 }
@@ -285,8 +288,8 @@ func TestRunDegradedStack(t *testing.T) {
 		SpacesRuntime: t.TempDir(),
 	}
 	checks := Run(opts)
-	if len(checks) != 8 {
-		t.Fatalf("Run returned %d checks, want 8", len(checks))
+	if len(checks) != 9 {
+		t.Fatalf("Run returned %d checks, want 9", len(checks))
 	}
 	want := map[string]string{
 		"router":          StateFail, // not live
@@ -297,6 +300,7 @@ func TestRunDegradedStack(t *testing.T) {
 		"spaces-listener": StateWarn, // no lock
 		"entries":         StateFail, // both missing
 		"tmux":            StateFail, // both missing
+		"plugins":         StateOK,   // informational: fallback always works
 	}
 	got := byName(checks)
 	for name, state := range want {
@@ -321,10 +325,10 @@ func TestRunDegradedStack(t *testing.T) {
 		t.Errorf("entries detail = %q", detail)
 	}
 	s := Summarize(checks)
-	if s.OK != 1 || s.Warn != 3 || s.Fail != 4 {
-		t.Fatalf("summary = %+v, want 1 ok, 3 warn, 4 fail", s)
+	if s.OK != 2 || s.Warn != 3 || s.Fail != 4 {
+		t.Fatalf("summary = %+v, want 2 ok, 3 warn, 4 fail", s)
 	}
-	if out := Render(checks); !strings.HasSuffix(out, "1 ok, 3 warn, 4 fail\n") {
+	if out := Render(checks); !strings.HasSuffix(out, "2 ok, 3 warn, 4 fail\n") {
 		t.Errorf("render summary line wrong: %q", out)
 	}
 }
@@ -342,8 +346,8 @@ func TestRunPanicBecomesFail(t *testing.T) {
 		Kill:          func(int, syscall.Signal) error { panic("kill exploded") },
 	}
 	checks := Run(opts)
-	if len(checks) != 8 {
-		t.Fatalf("Run returned %d checks, want 8", len(checks))
+	if len(checks) != 9 {
+		t.Fatalf("Run returned %d checks, want 9", len(checks))
 	}
 	row := byName(checks)["spaces-listener"]
 	if row.State != StateFail || !strings.Contains(row.Detail, "check panicked") ||
@@ -824,5 +828,24 @@ func TestSpoolCount(t *testing.T) {
 	}
 	if got := spoolCount(filepath.Join(dir, "absent.jsonl")); got != 0 {
 		t.Errorf("spoolCount absent = %d, want 0", got)
+	}
+}
+
+func TestCheckPlugins(t *testing.T) {
+	paths := testPaths(t)
+	// With no companion plugins registered in this package's process, the
+	// check is informational ok in fallback mode.
+	state, detail := checkPlugins(CheckOptions{Paths: paths})
+	if state != StateOK || strings.TrimSpace(detail) == "" {
+		t.Errorf("checkPlugins = (%q, %q), want ok with a detail", state, detail)
+	}
+	if !strings.Contains(detail, "fallback mode") {
+		t.Errorf("checkPlugins detail = %q, want fallback mention when none installed", detail)
+	}
+	// The plugins row must never fail or warn: fallback always works.
+	for _, s := range []string{StateOK} {
+		if state != s {
+			t.Errorf("state = %q, want %q", state, s)
+		}
 	}
 }

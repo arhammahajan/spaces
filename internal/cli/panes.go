@@ -32,6 +32,7 @@ func cmdPanes(args []string, env Env) int {
 		Active  bool   `json:"active"`
 		Dead    bool   `json:"dead"`
 		PID     int    `json:"pid"`
+		Source  string `json:"source,omitempty"`
 	}
 	rows := []row{}
 	if session := f.str["session"]; session != "" {
@@ -51,6 +52,7 @@ func cmdPanes(args []string, env Env) int {
 				Pane: p.ID, Status: bucketOf(p.SpacesState), App: paneApp(&p),
 				Title: p.Title, CWD: p.CurrentPath,
 				Active: p.Active, Dead: p.Dead, PID: p.PID,
+				Source: p.SpacesSource,
 			})
 		}
 	} else {
@@ -65,6 +67,7 @@ func cmdPanes(args []string, env Env) int {
 				Pane: p.ID, Status: bucketOf(p.SpacesState), App: paneApp(&p),
 				Title: p.Title, CWD: p.CurrentPath,
 				Active: p.Active, Dead: p.Dead, PID: p.PID,
+				Source: p.SpacesSource,
 			})
 		}
 	}

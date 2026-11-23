@@ -128,6 +128,7 @@ func Run(opts CheckOptions) []Check {
 		{"spaces-listener", checkListener},
 		{"entries", checkEntries},
 		{"tmux", checkTmux},
+		{"plugins", checkPlugins},
 	}
 	out := make([]Check, 0, len(steps))
 	for _, step := range steps {

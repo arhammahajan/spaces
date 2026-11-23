@@ -59,6 +59,14 @@ func bindHookSeams() {
 		hookclient.HooksStop = hookcore.HooksStop
 		hookclient.HooksStart = hookcore.HooksStart
 		hookclient.Daemonize = hookcore.Daemonize
+		hookcore.CompanionNormalizer = func(agentName string, envelope map[string]any) map[string]any {
+			if cp := agent.DefaultRegistry().CompanionPlugin(agentName); cp != nil {
+				if norm, ok := cp.NormalizeCompanionEvent(envelope); ok && norm != nil {
+					return norm
+				}
+			}
+			return nil
+		}
 		hookclient.Serve = func(foreground bool, tcpPort *int) int {
 			port := 0
 			if tcpPort != nil {
