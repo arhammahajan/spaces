@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -423,11 +424,11 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("expected Esc to collapse expanded details, not quit")
 	}
 
-	// Plan tab: ↑/↓ selects 5h bucket, Enter expands
+	// Plan tab: ↑/↓ scrolls when overflowing, and selects 5h bucket when fitting
 	m, _ = sendKey(m, runeKey("3"))
 	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})
-	if m.usageRowSel != 1 {
-		t.Fatalf("expected row 1 selected on Plan tab")
+	if m.usageRowSel != 1 && m.usageScroll == 0 {
+		t.Fatalf("expected down arrow on Plan tab to either scroll or advance rowSel")
 	}
 	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if !m.usageExpanded {
@@ -914,5 +915,78 @@ func TestUsagePlanTabAutoRefreshOnSwitch(t *testing.T) {
 	}
 	if fb.limitsForceCalls != beforeLimitsForce+1 {
 		t.Fatalf("expected limits forceCalls=%d, got %d", beforeLimitsForce+1, fb.limitsForceCalls)
+	}
+}
+
+func TestUsageArrowKeyScrollingWhenOverflowing(t *testing.T) {
+	rep := sampleUsageReport()
+	// Add enough models to overflow a short 16-row viewport.
+	for i := 0; i < 20; i++ {
+		rep.Models = append(rep.Models, usage.ModelSummary{
+			Model:    fmt.Sprintf("model-%02d", i),
+			Provider: "claude",
+			CostUSD:  float64(20 - i),
+		})
+	}
+	fb := &fakeUsageLimitsBackend{
+		fakeUsageBackend: &fakeUsageBackend{report: rep},
+		limits:           sampleLimitsSnapshot(sampleUsageNow()),
+	}
+	m := New(fb, Options{InitialMode: ModeUsage, Now: sampleUsageNow})
+	m.width, m.height = 100, 16
+	m = runTeaCmd(m, m.Init())
+
+	// 1. Plan tab overflows 16 rows: Down must scroll usageScroll, Up scrolls back, End/Home clamp.
+	m, _ = sendKey(m, runeKey("3"))
+	maxPlan := m.usageMaxScroll()
+	if maxPlan <= 0 {
+		t.Fatalf("expected Plan tab to overflow 16-row viewport, got maxScroll=%d", maxPlan)
+	}
+	viewBefore := ansi.Strip(m.View())
+	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})
+	if m.usageScroll != 1 {
+		t.Fatalf("expected Plan tab down arrow to scroll to 1, got %d", m.usageScroll)
+	}
+	if ansi.Strip(m.View()) == viewBefore {
+		t.Fatalf("expected Plan tab rendered viewport to change after scrolling")
+	}
+	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyEnd})
+	if m.usageScroll != maxPlan {
+		t.Fatalf("expected End to clamp to maxScroll=%d, got %d", maxPlan, m.usageScroll)
+	}
+	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyHome})
+	if m.usageScroll != 0 {
+		t.Fatalf("expected Home to jump to 0, got %d", m.usageScroll)
+	}
+
+	// 2. Models tab overflows 16 rows: moving Down past viewport height scrolls usageScroll.
+	m, _ = sendKey(m, runeKey("4"))
+	for i := 0; i < 15; i++ {
+		m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.usageRowSel != 15 {
+		t.Fatalf("expected Models rowSel=15, got %d", m.usageRowSel)
+	}
+	if m.usageScroll == 0 {
+		t.Fatalf("expected Models tab to scroll viewport to keep row 15 visible")
+	}
+	if !strings.Contains(ansi.Strip(m.View()), "model-12") && !strings.Contains(ansi.Strip(m.View()), "model-13") {
+		t.Fatalf("expected scrolled Models viewport to display selected row near row 15")
+	}
+
+	// 3. Overview tab clamps at maxScroll (no dead overscroll).
+	m, _ = sendKey(m, runeKey("1"))
+	maxOv := m.usageMaxScroll()
+	for i := 0; i < maxOv+10; i++ {
+		m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if m.usageScroll != maxOv {
+		t.Fatalf("expected Overview scroll clamped at %d, got %d", maxOv, m.usageScroll)
+	}
+	if maxOv > 0 {
+		m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyUp})
+		if m.usageScroll != maxOv-1 {
+			t.Fatalf("expected immediate upward scroll from bottom (%d), got %d", maxOv-1, m.usageScroll)
+		}
 	}
 }
