@@ -53,6 +53,7 @@ type TokenUsage struct {
 	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
 	CostUSD          float64 `json:"cost_usd,omitempty"`
+	CostPriced       bool    `json:"cost_priced,omitempty"`
 }
 
 // Total returns all accounted tokens across input, output, reasoning, and cache.
@@ -162,6 +163,8 @@ func FormatQuotaWindowLabel(minutes int) string {
 type QuotaInfo struct {
 	Agent     string       `json:"agent"`
 	Source    string       `json:"source,omitempty"`
+	PlanType  string       `json:"plan_type,omitempty"`
+	Estimated bool         `json:"estimated,omitempty"`
 	Primary   *QuotaWindow `json:"primary,omitempty"`   // typically 5h window
 	Secondary *QuotaWindow `json:"secondary,omitempty"` // typically 7d (or 30d) window
 	UpdatedAt int64        `json:"updated_at,omitempty"`
