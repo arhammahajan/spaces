@@ -1,0 +1,19 @@
+{
+  "name": "opencode-spaces",
+  "version": "1.0.0",
+  "description": "Rich OpenCode companion plugin for tmux-spaces: extracts session/usage/context/tool/file/todo/subagent/permission/question/MCP/LSP/compaction/error/VCS state and pushes structured v2 envelopes to spacecore over UDS HTTP.",
+  "type": "module",
+  "main": "./index.mjs",
+  "exports": {
+    ".": "./index.mjs",
+    "./transport": "./transport.mjs",
+    "./tracker": "./tracker.mjs"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
