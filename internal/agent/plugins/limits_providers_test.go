@@ -89,7 +89,7 @@ func TestLimitsAntigravityDirectTokenAndSummaryMerge(t *testing.T) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if !strings.HasPrefix(r.Header.Get("User-Agent"), "antigravity/hub/1.0.0 ") {
+		if !strings.HasPrefix(r.Header.Get("User-Agent"), "antigravity/hub/2.24.0 ") {
 			http.Error(w, "bad ua", http.StatusBadRequest)
 			return
 		}

@@ -75,6 +75,7 @@ type antigravityBucket struct {
 	BucketID          string   `json:"bucketId"`
 	Window            string   `json:"window"`
 	DisplayName       string   `json:"displayName"`
+	Description       string   `json:"description"`
 	Disabled          bool     `json:"disabled"`
 	RemainingFraction *float64 `json:"remainingFraction"`
 	ResetTime         string   `json:"resetTime"`
@@ -123,7 +124,11 @@ func (p *antigravityUsageLimitProvider) FetchUsageLimits(ctx context.Context, q 
 		return unavailableLimits("antigravity", q.Profile, unavail.Reason, unavail.Message, now), nil
 	}
 
-	ua := fmt.Sprintf("antigravity/hub/1.0.0 (aidev_client; os_type=%s; arch=%s; cl=963137146)", runtime.GOOS, runtime.GOARCH)
+	arch := runtime.GOARCH
+	if arch == "amd64" {
+		arch = "x64"
+	}
+	ua := fmt.Sprintf("antigravity/hub/2.24.0 (aidev_client; os_type=%s; arch=%s; cl=963137146)", runtime.GOOS, arch)
 	bodyMap := map[string]any{}
 	if creds.projectID != "" {
 		bodyMap["project"] = creds.projectID
@@ -445,6 +450,7 @@ func fetchAntigravitySummary(ctx context.Context, client *http.Client, accessTok
 			req.Header.Set("Authorization", "Bearer "+accessToken)
 			req.Header.Set("User-Agent", ua)
 			req.Header.Set("Content-Type", "application/json")
+			requestedAt := time.Now().UTC()
 			resp, err := client.Do(req)
 			if err != nil {
 				return
@@ -462,7 +468,7 @@ func fetchAntigravitySummary(ctx context.Context, client *http.Client, accessTok
 				return
 			}
 			results[idx] = result{
-				windows: parseAntigravitySummaryWindows(&summary),
+				windows: parseAntigravitySummaryWindows(&summary, requestedAt),
 				credits: parseAntigravityResetCredits(&summary),
 			}
 		}(i, ep)
@@ -486,7 +492,27 @@ func fetchAntigravitySummary(ctx context.Context, client *http.Client, accessTok
 	return sortedLimitWindows(merged), credits
 }
 
-func parseAntigravitySummaryWindows(summary *antigravitySummaryResponse) []agent.UsageLimitWindow {
+func antigravitySummaryResetTime(b antigravityBucket, windowDurationMins int, requestedAt time.Time) string {
+	resetsAt := formatISOTime(b.ResetTime)
+	if resetsAt == "" || b.RemainingFraction == nil {
+		return resetsAt
+	}
+	if *b.RemainingFraction == 1 && strings.TrimSpace(b.Description) == "" && windowDurationMins > 0 {
+		if parsed, ok := parseISOTime(resetsAt); ok {
+			expected := requestedAt.Add(time.Duration(windowDurationMins) * time.Minute)
+			diff := parsed.Sub(expected)
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff <= time.Minute {
+				return ""
+			}
+		}
+	}
+	return resetsAt
+}
+
+func parseAntigravitySummaryWindows(summary *antigravitySummaryResponse, requestedAt time.Time) []agent.UsageLimitWindow {
 	type bucketGroup struct {
 		displayName string
 		buckets     []antigravityBucket
@@ -518,6 +544,14 @@ func parseAntigravitySummaryWindows(summary *antigravitySummaryResponse) []agent
 			}
 			family := strings.TrimSpace(group.displayName)
 			switch {
+			case strings.HasPrefix(b.BucketID, "gemini-argon-"):
+				if family == "" {
+					family = "Gemini Argon"
+				}
+			case strings.HasPrefix(b.BucketID, "gemini-carbon-"):
+				if family == "" {
+					family = "Gemini Carbon"
+				}
 			case strings.HasPrefix(b.BucketID, "gemini-"):
 				family = "Gemini"
 			case strings.HasPrefix(b.BucketID, "3p-"):
@@ -549,7 +583,7 @@ func parseAntigravitySummaryWindows(summary *antigravitySummaryResponse) []agent
 				Kind:               kind,
 				Label:              fmt.Sprintf("%s · %s", family, windowName),
 				UsedPercent:        (1 - clampFraction(*b.RemainingFraction)) * 100,
-				ResetsAt:           formatISOTime(b.ResetTime),
+				ResetsAt:           antigravitySummaryResetTime(b, duration, requestedAt),
 				WindowDurationMins: duration,
 			}
 			byID[w.ID] = w
