@@ -257,7 +257,8 @@ func usageTabBarLayout(tabs []string, active int, width int) (string, []usageTab
 }
 
 // renderActivityHeatmap renders the 52-week Token Activity chart in Daily, Weekly, or Cumulative mode.
-func renderActivityHeatmap(daily []usage.DailyBucket, aggMode usageOverviewAgg, width int, now time.Time) []string {
+// When useCost is true, intensity and bar heights reflect USD spend; otherwise token counts.
+func renderActivityHeatmap(daily []usage.DailyBucket, aggMode usageOverviewAgg, useCost bool, width int, now time.Time) []string {
 	if width < 20 {
 		width = 20
 	}
@@ -265,10 +266,14 @@ func renderActivityHeatmap(daily []usage.DailyBucket, aggMode usageOverviewAgg, 
 		now = time.Now()
 	}
 
-	// Build a date -> tokens lookup map.
-	byDate := make(map[string]int64, len(daily))
+	// Build a date -> value lookup map (USD when useCost, tokens otherwise).
+	byDate := make(map[string]float64, len(daily))
 	for _, d := range daily {
-		byDate[d.Date] += d.Totals.Total()
+		if useCost {
+			byDate[d.Date] += d.CostUSD
+		} else {
+			byDate[d.Date] += float64(d.Totals.Total())
+		}
 	}
 
 	// Compute the 52-week window ending on the Saturday of `now`'s week.
@@ -276,50 +281,51 @@ func renderActivityHeatmap(daily []usage.DailyBucket, aggMode usageOverviewAgg, 
 	daysUntilSat := int(time.Saturday - today.Weekday())
 	endSat := today.AddDate(0, 0, daysUntilSat)
 
-	// Decide how many weeks fit cleanly.
-	gutterW := 4 // "Su  " or max label
+	// Span the full width of the popup cleanly with uniform cell spacing.
+	gutterW := 4 // "Su  "
 	if aggMode != usageAggDaily {
-		gutterW = 7 // e.g. "12.4M "
+		gutterW = 8 // e.g. " $124.5 "
 	}
 	availCols := width - gutterW
 	if availCols < 12 {
 		availCols = 12
 	}
 
-	weeks := 52
 	cellStep := 1
-	if aggMode == usageAggDaily && availCols >= 52*2 {
+	if availCols >= 40 {
 		cellStep = 2
-	} else if availCols < weeks {
-		weeks = availCols
+	}
+	weeks := availCols / cellStep
+	if weeks < 12 {
+		weeks = 12
 	}
 
 	startSun := endSat.AddDate(0, 0, -(weeks*7 - 1))
 
 	// Populate grid[week][weekday] and weekly totals.
-	grid := make([][7]int64, weeks)
-	weekTotals := make([]int64, weeks)
-	var maxDaily int64
+	grid := make([][7]float64, weeks)
+	weekTotals := make([]float64, weeks)
+	var maxDaily float64
 	for w := 0; w < weeks; w++ {
 		for dow := 0; dow < 7; dow++ {
 			dt := startSun.AddDate(0, 0, w*7+dow)
 			if dt.After(today) {
 				continue
 			}
-			tok := byDate[dt.Format("2006-01-02")]
-			grid[w][dow] = tok
-			weekTotals[w] += tok
-			if tok > maxDaily {
-				maxDaily = tok
+			val := byDate[dt.Format("2006-01-02")]
+			grid[w][dow] = val
+			weekTotals[w] += val
+			if val > maxDaily {
+				maxDaily = val
 			}
 		}
 	}
 
 	switch aggMode {
 	case usageAggWeekly, usageAggCumulative:
-		vals := make([]int64, weeks)
-		var peak int64
-		var running int64
+		vals := make([]float64, weeks)
+		var peak float64
+		var running float64
 		for w := 0; w < weeks; w++ {
 			if aggMode == usageAggCumulative {
 				running += weekTotals[w]
@@ -331,15 +337,16 @@ func renderActivityHeatmap(daily []usage.DailyBucket, aggMode usageOverviewAgg, 
 				peak = vals[w]
 			}
 		}
-		return renderActivityColumnBars(vals, peak, startSun, aggMode, width)
+		return renderActivityColumnBars(vals, peak, startSun, aggMode, useCost, gutterW, cellStep, width)
 	default:
-		return renderActivityDailyGrid(grid, maxDaily, startSun, today, cellStep, width)
+		return renderActivityDailyGrid(grid, maxDaily, startSun, today, gutterW, cellStep, width)
 	}
 }
 
-func renderActivityDailyGrid(grid [][7]int64, maxDaily int64, startSun, today time.Time, cellStep, width int) []string {
+func renderActivityDailyGrid(grid [][7]float64, maxDaily float64, startSun, today time.Time, gutterW, cellStep, width int) []string {
 	weeks := len(grid)
 	lines := make([]string, 0, 10)
+	gutterPad := strings.Repeat(" ", gutterW)
 
 	// Month header line aligned above week columns.
 	headerCells := make([]rune, weeks*cellStep)
@@ -363,7 +370,7 @@ func renderActivityDailyGrid(grid [][7]int64, maxDaily int64, startSun, today ti
 			lastMonth = m
 		}
 	}
-	lines = append(lines, fitCellWidth(styleMuted.Render("    "+string(headerCells)), width))
+	lines = append(lines, fitCellWidth(styleMuted.Render(gutterPad+string(headerCells)), width))
 
 	dayLabels := [7]string{"Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"}
 	emptySt := lipgloss.NewStyle().Foreground(lipgloss.Color(usageHeatmapRamp[0]))
@@ -377,7 +384,7 @@ func renderActivityDailyGrid(grid [][7]int64, maxDaily int64, startSun, today ti
 
 	for dow := 0; dow < 7; dow++ {
 		var row strings.Builder
-		row.WriteString(styleMuted.Render(dayLabels[dow] + "  "))
+		row.WriteString(styleMuted.Render(fmt.Sprintf("%*s  ", gutterW-2, dayLabels[dow])))
 		for w := 0; w < weeks; w++ {
 			dt := startSun.AddDate(0, 0, w*7+dow)
 			if dt.After(today) {
@@ -388,8 +395,8 @@ func renderActivityDailyGrid(grid [][7]int64, maxDaily int64, startSun, today ti
 				}
 				continue
 			}
-			tok := grid[w][dow]
-			lvl := heatmapIntensityLevel(tok, maxDaily)
+			val := grid[w][dow]
+			lvl := heatmapIntensityLevel(val, maxDaily)
 			if lvl == 0 {
 				row.WriteString(emptySt.Render("□"))
 			} else {
@@ -403,7 +410,7 @@ func renderActivityDailyGrid(grid [][7]int64, maxDaily int64, startSun, today ti
 	}
 
 	// Legend line: Less □ ■ ■ ■ ■ More
-	legend := styleMuted.Render("    Less ") +
+	legend := styleMuted.Render(gutterPad+"Less ") +
 		emptySt.Render("□") + " " +
 		lvlSt[1].Render("■") + " " +
 		lvlSt[2].Render("■") + " " +
@@ -414,11 +421,11 @@ func renderActivityDailyGrid(grid [][7]int64, maxDaily int64, startSun, today ti
 	return lines
 }
 
-func heatmapIntensityLevel(val, maxVal int64) int {
+func heatmapIntensityLevel(val, maxVal float64) int {
 	if val <= 0 || maxVal <= 0 {
 		return 0
 	}
-	ratio := float64(val) / float64(maxVal)
+	ratio := val / maxVal
 	switch {
 	case ratio <= 0.15:
 		return 1
@@ -431,18 +438,11 @@ func heatmapIntensityLevel(val, maxVal int64) int {
 	}
 }
 
-func renderActivityColumnBars(vals []int64, peak int64, startSun time.Time, aggMode usageOverviewAgg, width int) []string {
+func renderActivityColumnBars(vals []float64, peak float64, startSun time.Time, aggMode usageOverviewAgg, useCost bool, gutterW, cellStep, width int) []string {
 	weeks := len(vals)
 	const rows = 7
-	gutterW := 7
-	avail := width - gutterW
-	if avail < weeks {
-		weeks = avail
-		if weeks < 1 {
-			weeks = 1
-		}
-		vals = vals[len(vals)-weeks:]
-		startSun = startSun.AddDate(0, 0, (len(vals)-weeks)*7)
+	if cellStep < 1 {
+		cellStep = 1
 	}
 
 	barColor := ColorBlue
@@ -450,34 +450,29 @@ func renderActivityColumnBars(vals []int64, peak int64, startSun time.Time, aggM
 		barColor = ColorTeal
 	}
 	barSt := lipgloss.NewStyle().Foreground(lipgloss.Color(barColor))
-	emptySt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSurface0))
 
-	lines := make([]string, 0, rows+3)
+	lines := make([]string, 0, rows+4)
 
-	// Month header line
-	headerCells := make([]rune, weeks)
-	for i := range headerCells {
-		headerCells[i] = ' '
-	}
-	lastMonth := time.Month(0)
-	lastEnd := -1
-	for w := 0; w < weeks; w++ {
-		dt := startSun.AddDate(0, 0, w*7)
-		if w == 0 || dt.Month() != lastMonth {
-			if w >= lastEnd+1 && w+3 <= weeks {
-				lbl := dt.Format("Jan")
-				for k, r := range lbl {
-					headerCells[w+k] = r
-				}
-				lastEnd = w + 3
-			}
-			lastMonth = dt.Month()
+	fmtVal := func(v float64) string {
+		if useCost {
+			return formatUSD(v)
 		}
+		return formatCompactTokens(int64(math.Round(v)))
 	}
-	lines = append(lines, fitCellWidth(styleMuted.Render(strings.Repeat(" ", gutterW)+string(headerCells)), width))
-
-	peakLabel := formatCompactTokens(peak)
-	midLabel := formatCompactTokens(peak / 2)
+	peakLabel := fmtVal(peak)
+	midLabel := fmtVal(peak / 2)
+	writeGlyph := func(b *strings.Builder, st lipgloss.Style, glyph string) {
+		if cellStep == 2 {
+			if aggMode == usageAggCumulative {
+				b.WriteString(st.Render(glyph + glyph))
+			} else {
+				b.WriteString(st.Render(glyph))
+				b.WriteByte(' ')
+			}
+			return
+		}
+		b.WriteString(st.Render(glyph))
+	}
 
 	for r := rows - 1; r >= 0; r-- {
 		var gutter string
@@ -486,8 +481,6 @@ func renderActivityColumnBars(vals []int64, peak int64, startSun time.Time, aggM
 			gutter = fmt.Sprintf("%*s ", gutterW-1, peakLabel)
 		case rows / 2:
 			gutter = fmt.Sprintf("%*s ", gutterW-1, midLabel)
-		case 0:
-			gutter = fmt.Sprintf("%*s ", gutterW-1, "0")
 		default:
 			gutter = strings.Repeat(" ", gutterW)
 		}
@@ -495,20 +488,24 @@ func renderActivityColumnBars(vals []int64, peak int64, startSun time.Time, aggM
 		b.WriteString(styleMuted.Render(gutter))
 		for w := 0; w < weeks; w++ {
 			if peak <= 0 || vals[w] <= 0 {
-				if r == 0 {
-					b.WriteString(emptySt.Render("▁"))
+				if cellStep == 2 {
+					b.WriteString("  ")
 				} else {
 					b.WriteByte(' ')
 				}
 				continue
 			}
-			scaled := float64(vals[w]) / float64(peak) * float64(rows)
+			scaled := vals[w] / peak * float64(rows)
 			cell := scaled - float64(r)
 			switch {
 			case cell >= 1.0:
-				b.WriteString(barSt.Render("█"))
+				writeGlyph(&b, barSt, "█")
 			case cell <= 0:
-				b.WriteByte(' ')
+				if cellStep == 2 {
+					b.WriteString("  ")
+				} else {
+					b.WriteByte(' ')
+				}
 			default:
 				idx := int(math.Round(cell * 8))
 				if idx < 1 {
@@ -517,17 +514,45 @@ func renderActivityColumnBars(vals []int64, peak int64, startSun time.Time, aggM
 				if idx > 8 {
 					idx = 8
 				}
-				b.WriteString(barSt.Render(string(usageLowerBlocks[idx])))
+				writeGlyph(&b, barSt, string(usageLowerBlocks[idx]))
 			}
 		}
 		lines = append(lines, fitCellWidth(b.String(), width))
 	}
 
+	// X-axis baseline (matching stacked bar chart style)
+	axis := styleMuted.Render(fmt.Sprintf("%*s ", gutterW-1, "0")) +
+		styleDivider.Render(strings.Repeat("─", weeks*cellStep))
+	lines = append(lines, fitCellWidth(axis, width))
+
+	// Month labels aligned underneath the axis
+	headerCells := make([]rune, weeks*cellStep)
+	for i := range headerCells {
+		headerCells[i] = ' '
+	}
+	lastMonth := time.Month(0)
+	lastEnd := -1
+	for w := 0; w < weeks; w++ {
+		dt := startSun.AddDate(0, 0, w*7)
+		if w == 0 || dt.Month() != lastMonth {
+			pos := w * cellStep
+			if pos >= lastEnd+1 && pos+3 <= len(headerCells) {
+				lbl := dt.Format("Jan")
+				for k, r := range lbl {
+					headerCells[pos+k] = r
+				}
+				lastEnd = pos + 3
+			}
+			lastMonth = dt.Month()
+		}
+	}
+	lines = append(lines, fitCellWidth(styleMuted.Render(strings.Repeat(" ", gutterW)+string(headerCells)), width))
+
 	var caption string
 	if aggMode == usageAggCumulative {
-		caption = fmt.Sprintf("Running total · top %s", formatCompactTokens(peak))
+		caption = fmt.Sprintf("Running total · top %s", peakLabel)
 	} else {
-		caption = fmt.Sprintf("Each column = 1 week · tallest %s", formatCompactTokens(peak))
+		caption = fmt.Sprintf("Each column = 1 week · tallest %s", peakLabel)
 	}
 	lines = append(lines, fitCellWidth(styleMuted.Render(strings.Repeat(" ", gutterW)+caption), width))
 	return lines
@@ -667,26 +692,55 @@ func renderStackedBarChart(days []usage.DailyBucket, selectedIdx int, groupBy us
 	}
 
 	n := len(visDays)
+	// Distribute bars evenly across the full container plotW with uniform barW.
 	barW := 1
-	gap := 0
-	if n > 0 {
-		slotW := plotW / n
+	barStarts := make([]int, n)
+	barGaps := make([]int, n) // gap after bar i (0 for last bar)
+	if n == 1 {
+		barW = plotW
+		if barW > 12 {
+			barW = 12
+		}
+		barStarts[0] = 0
+	} else if n > 1 {
+		baseGap := 0
 		switch {
-		case slotW >= 5:
-			barW = 3
-			gap = 1
-		case slotW >= 3:
-			barW = 2
-			gap = 1
-		case slotW >= 2:
+		case plotW >= n*7:
+			baseGap = 2
+		case plotW >= n*2:
+			baseGap = 1
+		}
+		barW = (plotW - baseGap*(n-1)) / n
+		if barW < 1 {
 			barW = 1
-			gap = 1
-		default:
-			barW = 1
-			gap = 0
+			baseGap = 0
+		}
+		rem := plotW - (barW*n + baseGap*(n-1))
+		if rem < 0 {
+			rem = 0
+		}
+		pos := 0
+		for i := 0; i < n; i++ {
+			barStarts[i] = pos
+			pos += barW
+			if i < n-1 {
+				g := baseGap
+				// Spread remainder pixels evenly across gaps so last bar ends at plotW.
+				if rem > 0 {
+					// Bresenham-style even distribution of rem across (n-1) gaps.
+					prev := (i * rem) / (n - 1)
+					next := ((i + 1) * rem) / (n - 1)
+					g += next - prev
+				}
+				barGaps[i] = g
+				pos += g
+			}
 		}
 	}
-	step := barW + gap
+	baseW := plotW
+	if baseW < 1 {
+		baseW = 1
+	}
 
 	// Compute per-day stacked slot values and peak.
 	daySlots := make([][4]float64, n)
@@ -731,8 +785,8 @@ func renderStackedBarChart(days []usage.DailyBucket, selectedIdx int, groupBy us
 
 	lines := make([]string, 0, plotH+4)
 
-	// Top callout row: show compact value above selected bar (and peak bar if distinct).
-	callout := make([]rune, n*step)
+	// Top callout row: show compact value above selected bar.
+	callout := make([]rune, baseW)
 	for i := range callout {
 		callout[i] = ' '
 	}
@@ -740,7 +794,7 @@ func renderStackedBarChart(days []usage.DailyBucket, selectedIdx int, groupBy us
 		if idx < 0 || idx >= n {
 			return
 		}
-		center := idx*step + barW/2
+		center := barStarts[idx] + barW/2
 		rs := []rune(text)
 		start := center - len(rs)/2
 		if start < 0 {
@@ -833,18 +887,14 @@ func renderStackedBarChart(days []usage.DailyBucket, selectedIdx int, groupBy us
 					}
 				}
 			}
-			if gap > 0 && i < n-1 {
-				b.WriteString(strings.Repeat(" ", gap))
+			if barGaps[i] > 0 {
+				b.WriteString(strings.Repeat(" ", barGaps[i]))
 			}
 		}
 		lines = append(lines, fitCellWidth(b.String(), width))
 	}
 
-	// Baseline: "     0 ───────"
-	baseW := n * step
-	if baseW < 1 {
-		baseW = 1
-	}
+	// Baseline: "     0 ───────" spanning the full container plotW
 	baseline := styleMuted.Render(fmt.Sprintf("%*s ", gutterW-1, "0")) +
 		styleDivider.Render(strings.Repeat("─", baseW))
 	lines = append(lines, fitCellWidth(baseline, width))
@@ -860,7 +910,7 @@ func renderStackedBarChart(days []usage.DailyBucket, selectedIdx int, groupBy us
 		}
 		lbl := shortDateLabel(visDays[idx].Date)
 		rs := []rune(lbl)
-		pos := idx * step
+		pos := barStarts[idx]
 		if pos+len(rs) > len(axisCells) {
 			pos = len(axisCells) - len(rs)
 		}
@@ -880,10 +930,10 @@ func renderStackedBarChart(days []usage.DailyBucket, selectedIdx int, groupBy us
 	}
 	lines = append(lines, fitCellWidth(styleMuted.Render(strings.Repeat(" ", gutterW)+string(axisCells)), width))
 
-	// Selection cursor row: ▲ under visSel.
-	cursorPos := visSel*step + barW/2
-	if cursorPos < 0 {
-		cursorPos = 0
+	// Selection cursor row: ▲ centered under visSel.
+	cursorPos := 0
+	if visSel >= 0 && visSel < n {
+		cursorPos = barStarts[visSel] + barW/2
 	}
 	cursorLine := strings.Repeat(" ", gutterW+cursorPos) + styleAccent.Render("▲")
 	lines = append(lines, fitCellWidth(cursorLine, width))

@@ -316,14 +316,13 @@ func TestUsageRenderAllTabsWideAndNarrow(t *testing.T) {
 		m := newLoadedUsageModel(t, fb, sz[0], sz[1])
 
 		expectedSnippets := []string{
-			"Token activity",          // Tab 0: Overview
-			"claude",                  // Tab 1: Usage
-			"Live Rate-Limit Windows", // Tab 2: Plan
-			"claude-sonnet-4",         // Tab 3: Models
-			"Showing 1–2 of 2",        // Tab 4: Sessions
+			"Daily usage",             // Tab 0: Overview (stacked daily bar chart + breakdown at top)
+			"Live Rate-Limit Windows", // Tab 1: Plan
+			"claude-sonnet-4",         // Tab 2: Models
+			"Showing 1–2 of 2",        // Tab 3: Sessions
 		}
 
-		for tab := 0; tab < 5; tab++ {
+		for tab := 0; tab < len(expectedSnippets); tab++ {
 			m, _ = sendKey(m, runeKey(string(rune('1'+tab))))
 			if m.usageTab != tab {
 				t.Fatalf("size %dx%d: expected tab %d, got %d", sz[0], sz[1], tab, m.usageTab)
@@ -358,7 +357,8 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("Shift+Tab expected tab 0, got %d", m.usageTab)
 	}
 
-	// Overview: g cycles Daily -> Weekly -> Cumulative
+	// Overview: g cycles Daily -> Weekly -> Cumulative on the top stacked bar chart,
+	// while Token activity stays a heatmap matrix.
 	if m.usageOverviewAgg != usageAggDaily {
 		t.Fatalf("expected Daily initially")
 	}
@@ -366,15 +366,22 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 	if m.usageOverviewAgg != usageAggWeekly {
 		t.Fatalf("expected Weekly after g")
 	}
-	if !strings.Contains(ansi.Strip(m.View()), "Each column = 1 week") {
-		t.Errorf("expected weekly caption in view")
+	weeklyView := ansi.Strip(m.View())
+	if !strings.Contains(weeklyView, "Weekly usage") || !strings.Contains(weeklyView, "Less □") {
+		t.Errorf("expected Weekly usage top chart + Token activity heatmap:\n%s", weeklyView)
 	}
 	m, _ = sendKey(m, runeKey("g"))
 	if m.usageOverviewAgg != usageAggCumulative {
 		t.Fatalf("expected Cumulative after second g")
 	}
-	if !strings.Contains(ansi.Strip(m.View()), "Running total") {
-		t.Errorf("expected cumulative caption in view")
+	cumView := ansi.Strip(m.View())
+	if !strings.Contains(cumView, "Cumulative usage") || !strings.Contains(cumView, "Less □") {
+		t.Errorf("expected Cumulative usage top chart + Token activity heatmap:\n%s", cumView)
+	}
+	// Cycle back to Daily for day-by-day cursor assertions below.
+	m, _ = sendKey(m, runeKey("g"))
+	if m.usageOverviewAgg != usageAggDaily {
+		t.Fatalf("expected Daily after third g")
 	}
 
 	// Range cycling: r (default 30d -> 90d -> all -> 7d)
@@ -391,8 +398,8 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("expected 7d, got %v", m.usageRange)
 	}
 
-	// Usage tab: g (group), c (cost/tokens), ←/→ (day), Enter (expand)
-	m, _ = sendKey(m, runeKey("2"))
+	// Overview: daily chart controls (b group, c cost/tokens, ←/→ day, Enter expand)
+	m, _ = sendKey(m, runeKey("1"))
 	prevDay := m.usageDayIdx
 	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyLeft})
 	if m.usageDayIdx != prevDay-1 {
@@ -402,7 +409,7 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 	if m.usageDayIdx != prevDay {
 		t.Fatalf("expected day idx %d, got %d", prevDay, m.usageDayIdx)
 	}
-	m, _ = sendKey(m, runeKey("g"))
+	m, _ = sendKey(m, runeKey("b"))
 	if m.usageGroupBy != usageGroupModel {
 		t.Fatalf("expected Model grouping, got %v", m.usageGroupBy)
 	}
@@ -414,8 +421,9 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 	if !m.usageExpanded {
 		t.Fatalf("expected usageExpanded=true after Enter")
 	}
-	if !strings.Contains(ansi.Strip(m.View()), "Cache Read:") {
-		t.Errorf("expected expanded breakdown details on Usage tab")
+	fullOverview := ansi.Strip(strings.Join(m.renderUsageOverview(138, 34), "\n"))
+	if !strings.Contains(fullOverview, "Cache Read:") || !strings.Contains(fullOverview, "Daily usage") {
+		t.Errorf("expected integrated Daily usage + expanded breakdown details on Overview tab:\n%s", fullOverview)
 	}
 
 	// Esc collapses expanded details without quitting
@@ -424,8 +432,8 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("expected Esc to collapse expanded details, not quit")
 	}
 
-	// Plan tab: ↑/↓ scrolls when overflowing, and selects 5h bucket when fitting
-	m, _ = sendKey(m, runeKey("3"))
+	// Plan tab (2): ↑/↓ scrolls when overflowing, and selects 5h bucket when fitting
+	m, _ = sendKey(m, runeKey("2"))
 	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})
 	if m.usageRowSel != 1 && m.usageScroll == 0 {
 		t.Fatalf("expected down arrow on Plan tab to either scroll or advance rowSel")
@@ -435,15 +443,15 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("expected Plan 5h bucket expanded")
 	}
 
-	// Models tab: ↑/↓ + Enter expands category cost
-	m, _ = sendKey(m, runeKey("4"))
+	// Models tab (3): ↑/↓ + Enter expands category cost
+	m, _ = sendKey(m, runeKey("3"))
 	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyEnter})
 	if !strings.Contains(ansi.Strip(m.View()), "Cache Read") {
 		t.Errorf("expected inline category cost breakdown on Models tab")
 	}
 
-	// Sessions tab: s cycles sort Cost -> Tokens -> Recent
-	m, _ = sendKey(m, runeKey("5"))
+	// Sessions tab (4): s cycles sort Cost -> Tokens -> Recent
+	m, _ = sendKey(m, runeKey("4"))
 	if m.usageFilteredSessions()[0].SessionID != "sess-1" {
 		t.Fatalf("expected sess-1 first by Cost")
 	}
@@ -483,8 +491,13 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("expected dashboard open")
 	}
 	dashView := ansi.Strip(m.View())
-	if !strings.Contains(dashView, "1 Overview") || !strings.Contains(dashView, "4 Models") {
+	if !strings.Contains(dashView, "1 Overview") || !strings.Contains(dashView, "3 Models") || !strings.Contains(dashView, "4 Sessions") {
 		t.Errorf("expected dashboard cards in view:\n%s", dashView)
+	}
+	// On Sessions tab (3), opening dashboard focuses card 3; Tab wraps to 0.
+	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyTab})
+	if m.usageDashFocus != 0 {
+		t.Fatalf("expected dash focus 0, got %d", m.usageDashFocus)
 	}
 	m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyTab})
 	if m.usageDashFocus != 1 {
@@ -560,20 +573,20 @@ func TestUsageMouseTabClickAndChartPrimitives(t *testing.T) {
 	fb := &fakeUsageBackend{report: sampleUsageReport()}
 	m := newLoadedUsageModel(t, fb, 120, 32)
 
-	// Click on the 3rd tab ("3 Plan") on row y=1
+	// Click on the 2nd tab ("2 Plan") on row y=1
 	_, hits := usageTabBarLayout(usageTabNames, m.usageTab, 118)
 	if len(hits) < 3 {
 		t.Fatalf("expected at least 3 tab hits, got %d", len(hits))
 	}
-	clickX := hits[2].Start + 2 + 1 // +1 for horizontal pad
+	clickX := hits[1].Start + 2 + 1 // +1 for horizontal pad
 	next, _ := m.Update(tea.MouseMsg{X: clickX, Y: 1, Button: tea.MouseButtonLeft, Action: tea.MouseActionPress})
 	m = next.(Model)
-	if m.usageTab != 2 {
-		t.Fatalf("expected click to select tab 2 (Plan), got %d", m.usageTab)
+	if m.usageTab != usageTabPlan {
+		t.Fatalf("expected click to select tab %d (Plan), got %d", usageTabPlan, m.usageTab)
 	}
 
 	// Overflow chevrons on very narrow tab bar
-	narrowTabs := ansi.Strip(renderUsageTabBar(usageTabNames, 2, 26))
+	narrowTabs := ansi.Strip(renderUsageTabBar(usageTabNames, 1, 20))
 	if !strings.Contains(narrowTabs, "‹") || !strings.Contains(narrowTabs, "›") {
 		t.Errorf("expected overflow chevrons on narrow tab bar, got %q", narrowTabs)
 	}
@@ -788,8 +801,8 @@ func TestUsagePlanTabPerProfileLimitsAndResetCredits(t *testing.T) {
 		m.height = sz[1]
 		m = runTeaCmd(m, m.Init())
 
-		// Switch to Plan tab (3)
-		m, _ = sendKey(m, runeKey("3"))
+		// Switch to Plan tab (2)
+		m, _ = sendKey(m, runeKey("2"))
 		if m.usageTab != usageTabPlan {
 			t.Fatalf("size %dx%d: expected usageTabPlan, got %d", sz[0], sz[1], m.usageTab)
 		}
@@ -861,9 +874,9 @@ func TestUsagePlanTabAutoRefreshOnSwitch(t *testing.T) {
 		t.Fatalf("expected 2 limits calls (1 cache, 1 force) from Init, got calls=%d force=%d", fb.limitsCalls, fb.limitsForceCalls)
 	}
 
-	// Switching to Plan tab within 15s cooldown should NOT trigger another refresh
+	// Switching to Plan tab (2) within 15s cooldown should NOT trigger another refresh
 	var cmd tea.Cmd
-	m, cmd = sendKey(m, runeKey("3"))
+	m, cmd = sendKey(m, runeKey("2"))
 	if cmd != nil {
 		t.Fatalf("expected no refresh cmd within 15s cooldown")
 	}
@@ -873,7 +886,7 @@ func TestUsagePlanTabAutoRefreshOnSwitch(t *testing.T) {
 
 	// Advance clock past 15s cooldown, switch away and back via Tab
 	curNow = curNow.Add(16 * time.Second)
-	m, _ = sendKey(m, runeKey("2"))
+	m, _ = sendKey(m, runeKey("1"))
 	m, cmd = sendKey(m, tea.KeyMsg{Type: tea.KeyTab})
 	if m.usageTab != usageTabPlan {
 		t.Fatalf("expected tab to be usageTabPlan, got %d", m.usageTab)
@@ -888,7 +901,7 @@ func TestUsagePlanTabAutoRefreshOnSwitch(t *testing.T) {
 	// Switching away and back while already refreshing must suppress duplicate refresh
 	m, _ = sendKey(m, runeKey("1"))
 	var dupCmd tea.Cmd
-	m, dupCmd = sendKey(m, runeKey("3"))
+	m, dupCmd = sendKey(m, runeKey("2"))
 	if dupCmd != nil {
 		t.Fatalf("expected duplicate refresh suppressed while usageLimitsRefreshing=true")
 	}
@@ -936,8 +949,8 @@ func TestUsageArrowKeyScrollingWhenOverflowing(t *testing.T) {
 	m.width, m.height = 100, 16
 	m = runTeaCmd(m, m.Init())
 
-	// 1. Plan tab overflows 16 rows: Down must scroll usageScroll, Up scrolls back, End/Home clamp.
-	m, _ = sendKey(m, runeKey("3"))
+	// 1. Plan tab (2) overflows 16 rows: Down must scroll usageScroll, Up scrolls back, End/Home clamp.
+	m, _ = sendKey(m, runeKey("2"))
 	maxPlan := m.usageMaxScroll()
 	if maxPlan <= 0 {
 		t.Fatalf("expected Plan tab to overflow 16-row viewport, got maxScroll=%d", maxPlan)
@@ -959,8 +972,8 @@ func TestUsageArrowKeyScrollingWhenOverflowing(t *testing.T) {
 		t.Fatalf("expected Home to jump to 0, got %d", m.usageScroll)
 	}
 
-	// 2. Models tab overflows 16 rows: moving Down past viewport height scrolls usageScroll.
-	m, _ = sendKey(m, runeKey("4"))
+	// 2. Models tab (3) overflows 16 rows: moving Down past viewport height scrolls usageScroll.
+	m, _ = sendKey(m, runeKey("3"))
 	for i := 0; i < 15; i++ {
 		m, _ = sendKey(m, tea.KeyMsg{Type: tea.KeyDown})
 	}
