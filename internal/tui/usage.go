@@ -1711,10 +1711,14 @@ func (m Model) renderLimitAccountCard(acc usage.LimitAccount, now time.Time, car
 		}
 
 		row := fmt.Sprintf("    %s %s %4s left", paddedLbl, bar, formatPct(rem, 0))
-		if pace, ok := computeLimitPace(w, now); ok {
+		pace, hasPace := computeLimitPace(w, now)
+		resetStr := formatLimitResetCountdown(w.ResetsAt, now, compact)
+		if hasPace {
 			row += " " + renderLimitPaceTag(pace, w.UsedPercent)
+		} else if resetStr != "" {
+			row += " " + renderLimitPaceTag("", 0)
 		}
-		if resetStr := formatLimitResetCountdown(w.ResetsAt, now, compact); resetStr != "" {
+		if resetStr != "" {
 			row += " " + styleMuted.Render(resetStr)
 		}
 		out = append(out, fitCellWidth(row, cardW))

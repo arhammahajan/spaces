@@ -1120,35 +1120,13 @@ func parseLimitTime(raw string) (time.Time, bool) {
 	return time.Time{}, false
 }
 
-// computeLimitPace compares usedPercent against the elapsed fraction of the
-// rate-limit window to classify pace as ahead, on, or under.
+// computeLimitPace delegates to the shared t3code-aligned pace calculation in
+// internal/usage (±5% deadband against elapsed window time).
 func computeLimitPace(w agent.UsageLimitWindow, now time.Time) (usage.LimitPace, bool) {
-	if w.WindowDurationMins <= 0 || w.ResetsAt == "" {
-		return "", false
-	}
-	resetAt, ok := parseLimitTime(w.ResetsAt)
-	if !ok {
-		return "", false
-	}
 	if now.IsZero() {
 		now = time.Now()
 	}
-	total := time.Duration(w.WindowDurationMins) * time.Minute
-	rem := resetAt.Sub(now)
-	if rem <= 0 || rem >= total {
-		return "", false
-	}
-	elapsedFrac := 1.0 - float64(rem)/float64(total)
-	expectedUsed := elapsedFrac * 100.0
-	delta := w.UsedPercent - expectedUsed
-	switch {
-	case delta > 8.0:
-		return usage.LimitPaceAhead, true
-	case delta < -8.0:
-		return usage.LimitPaceUnder, true
-	default:
-		return usage.LimitPaceOn, true
-	}
+	return usage.ComputeWindowPace(w, now)
 }
 
 func renderLimitPaceTag(pace usage.LimitPace, usedPct float64) string {
@@ -1162,9 +1140,9 @@ func renderLimitPaceTag(pace usage.LimitPace, usedPct float64) string {
 	case usage.LimitPaceUnder:
 		return lipgloss.NewStyle().Foreground(lipgloss.Color(ColorGreen)).Render("▼ under")
 	case usage.LimitPaceOn:
-		return lipgloss.NewStyle().Foreground(lipgloss.Color(ColorTeal)).Render("● on")
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(ColorTeal)).Render("● on   ")
 	default:
-		return ""
+		return "       "
 	}
 }
 
