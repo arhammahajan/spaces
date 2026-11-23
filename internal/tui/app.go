@@ -230,6 +230,7 @@ type Model struct {
 	usageReport      usage.Report
 	usageLoaded      bool
 	usageLoading     bool
+	usageRefreshing  bool
 	usageErr         string
 	usageTab         int
 	usageRange       usageRange
@@ -313,6 +314,7 @@ func New(backend Backend, opts Options) Model {
 	}
 	if m.mode == ModeUsage {
 		m.usageLoading = true
+		m.usageRefreshing = true
 		m.usageRange = usageRange30d
 		m.usageUseCost = true
 		m.usageDayIdx = -1
@@ -352,7 +354,10 @@ func (m Model) Init() tea.Cmd {
 		return m.loadSharedCmd()
 	}
 	if m.mode == ModeUsage {
-		return m.loadUsageCmd(false)
+		return tea.Batch(
+			m.loadUsageCmd(false),
+			m.loadUsageCmd(true),
+		)
 	}
 	if m.mode == ModeRename && m.renameStandalone {
 		return m.loadSpacesCmd()

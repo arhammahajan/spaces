@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	defaultCollectorTTL   = 30 * time.Second
-	maxScanConcurrency    = 6
-	quotaFetchTimeout     = 5 * time.Second
+	defaultCollectorTTL = 30 * time.Second
+	maxScanConcurrency  = 6
+	quotaFetchTimeout   = 5 * time.Second
 )
 
 type inflightCollect struct {
@@ -23,8 +23,9 @@ type inflightCollect struct {
 	err    error
 }
 
-// Collector orchestrates usage scanning, pricing, aggregation, and quota/burndown
-// collection with 30-second in-memory caching and concurrent call coalescing.
+// Collector orchestrates persistent SQLite usage storage, incremental provider
+// scanning, pricing, aggregation, and quota/burndown collection with instant
+// DB-backed reads, 30-second in-memory caching, and concurrent call coalescing.
 type Collector struct {
 	opts CollectOptions
 	ttl  time.Duration
@@ -37,7 +38,7 @@ type Collector struct {
 }
 
 // NewCollector creates a Collector rooted at homeDir using DefaultRegistry and
-// standard cache paths.
+// standard persistent DB / cache paths.
 func NewCollector(homeDir string) *Collector {
 	return NewCollectorWithOptions(CollectOptions{HomeDir: homeDir})
 }
@@ -50,8 +51,21 @@ func NewCollectorWithOptions(opts CollectOptions) *Collector {
 	}
 }
 
-// Collect returns a usage Report, serving the cached snapshot when younger than
-// 30s unless force is true. Concurrent Collect calls coalesce onto a single run.
+// Collect returns a usage Report.
+//
+// When force is false:
+//  1. Serves the in-memory cached snapshot if younger than 30s.
+//  2. Otherwise reads the persisted snapshot (or SQL-aggregated report) directly
+//     from the persistent SQLite usage database (`usage.db`) for sub-5ms opens.
+//  3. Falls back to a full scan only when the database has no persisted data yet.
+//
+// When force is true:
+//
+//	Runs an incremental scan across all registered UsageReaders, upserts new
+//	records into `usage.db`, builds the report from SQLite, refreshes live
+//	quotas/burndown, and persists the updated snapshot.
+//
+// Concurrent full-scan calls coalesce onto a single run.
 func (c *Collector) Collect(ctx context.Context, force bool) (Report, error) {
 	nowFn := c.opts.Now
 	if nowFn == nil {
@@ -64,6 +78,27 @@ func (c *Collector) Collect(ctx context.Context, force bool) (Report, error) {
 		c.mu.Unlock()
 		return rep, nil
 	}
+	hadCache := c.hasCache
+	opts := c.opts
+	c.mu.Unlock()
+
+	// Fast path for !force on a fresh Collector (e.g. brand-new popup process):
+	// serve directly from the persistent SQLite DB if it already has a snapshot
+	// or persisted usage_records (matches convstore's instant-open + background
+	// refresh UX). If this Collector already had an in-memory cache whose TTL
+	// expired, proceed to rescan.
+	if !force && !hadCache {
+		if rep, ok := loadCachedReportFromDB(opts, nowFn()); ok {
+			c.mu.Lock()
+			c.cached = rep
+			c.cachedAt = nowFn()
+			c.hasCache = true
+			c.mu.Unlock()
+			return rep, nil
+		}
+	}
+
+	c.mu.Lock()
 	if c.inflight != nil {
 		flight := c.inflight
 		c.mu.Unlock()
@@ -77,7 +112,7 @@ func (c *Collector) Collect(ctx context.Context, force bool) (Report, error) {
 
 	flight := &inflightCollect{done: make(chan struct{})}
 	c.inflight = flight
-	opts := c.opts
+	opts = c.opts
 	opts.Force = force
 	c.mu.Unlock()
 
@@ -98,10 +133,65 @@ func (c *Collector) Collect(ctx context.Context, force bool) (Report, error) {
 	return rep, err
 }
 
-// CollectWithOptions performs a full usage scan across all registered
-// UsageReaders (real home + discovered harness profile roots), fetches live
-// QuotaProviders in parallel, and merges pricing, aggregation, and burndown
-// metrics into a single Report.
+func resolveUsageDBPath(opts CollectOptions, homeDir string) string {
+	if strings.TrimSpace(opts.DBPath) != "" {
+		return strings.TrimSpace(opts.DBPath)
+	}
+	if homeDir != "" {
+		return DefaultUsageDBPath(homeDir)
+	}
+	return DefaultUsageDBPath("")
+}
+
+func loadCachedReportFromDB(opts CollectOptions, now time.Time) (Report, bool) {
+	homeDir := agent.RealHomeDir(opts.HomeDir)
+	dbPath := resolveUsageDBPath(opts, homeDir)
+	if dbPath == "" {
+		return Report{}, false
+	}
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		return Report{}, false
+	}
+	defer func() { _ = store.Close() }()
+
+	if snap, ok := store.LoadSnapshot(); ok {
+		return snap, true
+	}
+	if store.RecordCount() == 0 {
+		return Report{}, false
+	}
+
+	loc := opts.Location
+	if loc == nil {
+		loc = time.Local
+	}
+	rep, err := store.BuildReport(now, loc)
+	if err != nil {
+		return Report{}, false
+	}
+	rep.HomeDir = homeDir
+
+	var plan PlanConfig
+	if opts.PlanConfig != nil {
+		plan = normalizePlanConfig(*opts.PlanConfig)
+	} else {
+		plan = LoadPlanConfig(homeDir)
+	}
+	recentRecs, _ := store.QueryRecentRecords(now.AddDate(0, 0, -7).UnixMilli())
+	rep.Burndown = BurndownSummary{
+		ActiveBlocks:    DetectActiveBlocks(recentRecs, now),
+		Projection:      ComputePlanProjection(rep.Daily, plan, now, loc),
+		FiveHourHistory: BuildFiveHourHistory(recentRecs, nil, now, loc),
+	}
+	return rep, true
+}
+
+// CollectWithOptions performs an incremental usage scan across all registered
+// UsageReaders (real home + discovered harness profile roots), upserts records
+// into the persistent SQLite usage database (`usage.db`), fetches live
+// QuotaProviders in parallel, queries the aggregated Report from SQLite, and
+// persists the updated snapshot.
 func CollectWithOptions(ctx context.Context, opts CollectOptions) (Report, error) {
 	nowFn := opts.Now
 	if nowFn == nil {
@@ -120,13 +210,35 @@ func CollectWithOptions(ctx context.Context, opts CollectOptions) (Report, error
 		reg = agent.DefaultRegistry()
 	}
 
-	cachePath := opts.CachePath
-	if cachePath == "" && homeDir != "" {
-		cachePath = DefaultScanCachePath(homeDir)
+	// Open the persistent SQLite usage database (which also stores incremental
+	// file-scan resume state). Fall back to SQLiteFileCache only if Store open fails.
+	var (
+		store     *Store
+		fileCache agent.UsageFileCache
+		closeFn   func()
+	)
+	dbPath := resolveUsageDBPath(opts, homeDir)
+	if dbPath != "" {
+		if st, err := OpenStore(dbPath); err == nil {
+			store = st
+			fileCache = st
+			_ = st.PruneFilesOlderThan(now.AddDate(0, 0, -DefaultCacheRetentionDays).Unix())
+			closeFn = func() { _ = st.Close() }
+		}
 	}
-	cache := OpenSQLiteFileCache(cachePath)
-	defer func() { _ = cache.Close() }()
-	_ = cache.PruneOlderThan(now.AddDate(0, 0, -DefaultCacheRetentionDays).Unix())
+	if fileCache == nil {
+		cachePath := opts.CachePath
+		if cachePath == "" && homeDir != "" {
+			cachePath = DefaultScanCachePath(homeDir)
+		}
+		cache := OpenSQLiteFileCache(cachePath)
+		_ = cache.PruneOlderThan(now.AddDate(0, 0, -DefaultCacheRetentionDays).Unix())
+		fileCache = cache
+		closeFn = func() { _ = cache.Close() }
+	}
+	if closeFn != nil {
+		defer closeFn()
+	}
 
 	ratesPath := opts.RatesPath
 	if ratesPath == "" && homeDir != "" {
@@ -214,7 +326,7 @@ func CollectWithOptions(ctx context.Context, opts CollectOptions) (Report, error
 				HomeDir:    job.homeDir,
 				Profile:    job.profile,
 				IsRealHome: job.isRealHome,
-				Cache:      cache,
+				Cache:      fileCache,
 			})
 			if err != nil {
 				label := job.plugin.Spec().ID
@@ -295,7 +407,32 @@ func CollectWithOptions(ctx context.Context, opts CollectOptions) (Report, error
 	})
 	sort.Strings(warnings)
 
-	report := Aggregate(records, table, now, loc)
+	var (
+		report     Report
+		recentRecs []agent.UsageRecord
+	)
+	if store != nil {
+		if _, err := store.UpsertRecords(records, table, loc); err != nil {
+			addWarning(fmt.Sprintf("usage db upsert: %v", err))
+			report = Aggregate(records, table, now, loc)
+			recentRecs = records
+		} else if dbRep, err := store.BuildReport(now, loc); err != nil {
+			addWarning(fmt.Sprintf("usage db query: %v", err))
+			report = Aggregate(records, table, now, loc)
+			recentRecs = records
+		} else {
+			report = dbRep
+			if rr, rerr := store.QueryRecentRecords(now.AddDate(0, 0, -7).UnixMilli()); rerr == nil {
+				recentRecs = rr
+			} else {
+				recentRecs = records
+			}
+		}
+	} else {
+		report = Aggregate(records, table, now, loc)
+		recentRecs = records
+	}
+
 	report.HomeDir = homeDir
 	report.Warnings = warnings
 
@@ -308,9 +445,13 @@ func CollectWithOptions(ctx context.Context, opts CollectOptions) (Report, error
 
 	report.Burndown = BurndownSummary{
 		Quotas:          quotas,
-		ActiveBlocks:    DetectActiveBlocks(records, now),
+		ActiveBlocks:    DetectActiveBlocks(recentRecs, now),
 		Projection:      ComputePlanProjection(report.Daily, plan, now, loc),
-		FiveHourHistory: BuildFiveHourHistory(records, table, now, loc),
+		FiveHourHistory: BuildFiveHourHistory(recentRecs, table, now, loc),
+	}
+
+	if store != nil {
+		_ = store.SaveSnapshot(report)
 	}
 
 	return report, nil

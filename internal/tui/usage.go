@@ -26,32 +26,45 @@ const (
 )
 
 type usageMsg struct {
-	report usage.Report
-	err    string
+	report  usage.Report
+	refresh bool
+	err     string
 }
 
 func (m Model) loadUsageCmd(force bool) tea.Cmd {
 	ub, ok := m.backend.(UsageBackend)
 	if !ok {
 		return func() tea.Msg {
-			return usageMsg{err: "usage backend not configured"}
+			return usageMsg{refresh: force, err: "usage backend not configured"}
 		}
 	}
 	return func() tea.Msg {
 		rep, err := ub.LoadUsage(context.Background(), force)
 		if err != nil {
-			return usageMsg{err: err.Error()}
+			return usageMsg{refresh: force, err: err.Error()}
 		}
-		return usageMsg{report: rep}
+		return usageMsg{report: rep, refresh: force}
 	}
 }
 
 func (m Model) handleUsageMsg(msg usageMsg) (tea.Model, tea.Cmd) {
-	m.usageLoading = false
+	if msg.refresh {
+		m.usageRefreshing = false
+	}
 	if msg.err != "" {
-		m.usageErr = msg.err
+		if !m.usageLoaded || msg.refresh {
+			m.usageLoading = false
+			m.usageErr = msg.err
+		}
 		return m, nil
 	}
+	hasData := msg.report.Records > 0 || len(msg.report.Daily) > 0 || len(msg.report.Burndown.Quotas) > 0 || len(msg.report.SessionsList) > 0 || len(msg.report.Models) > 0
+	if !msg.refresh && !hasData && m.usageRefreshing {
+		// Initial DB cache was empty; keep showing Loading… until the
+		// background refresh scan finishes so we don't flash an empty state.
+		return m, nil
+	}
+	m.usageLoading = false
 	m.usageErr = ""
 	m.usageReport = msg.report
 	m.usageLoaded = true
@@ -318,7 +331,10 @@ func (m Model) handleUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.clampUsageSelection()
 		return m, nil
 	case "R":
-		m.usageLoading = true
+		m.usageRefreshing = true
+		if !m.usageLoaded {
+			m.usageLoading = true
+		}
 		m.usageErr = ""
 		return m, m.loadUsageCmd(true)
 	case "p":
@@ -620,8 +636,10 @@ func (m Model) renderUsageTitle(width int) string {
 	left += styleMuted.Render(meta)
 
 	var right string
-	if m.usageLoading {
+	if m.usageLoading && !m.usageLoaded {
 		right = styleAccent.Render("Loading…")
+	} else if m.usageRefreshing && m.usageLoaded {
+		right = styleAccent.Render("Syncing…")
 	} else if m.usageReport.GeneratedAtMs > 0 {
 		t := time.UnixMilli(m.usageReport.GeneratedAtMs).In(m.opts.NowOrDefault().Location())
 		right = styleMuted.Render("Updated · " + t.Format("15:04"))

@@ -216,6 +216,7 @@ type CollectOptions struct {
 	Now           func() time.Time
 	Registry      *agent.Registry
 	Location      *time.Location
+	DBPath        string
 	CachePath     string
 	RatesPath     string
 	PlanConfig    *PlanConfig
