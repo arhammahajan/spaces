@@ -689,6 +689,8 @@ type GitInfo struct {
 	LinesRemoved       int           `json:"lines_removed,omitempty"`       // committed changes (base...HEAD)
 	UncommittedAdded   int           `json:"uncommitted_added,omitempty"`   // working tree + untracked
 	UncommittedRemoved int           `json:"uncommitted_removed,omitempty"` // working tree
+	FilesAdded         int           `json:"files_added,omitempty"`         // added + untracked file count
+	FilesModified      int           `json:"files_modified,omitempty"`      // modified/renamed/deleted file count
 	PR                 *PRSummary    `json:"pr,omitempty"`
 	Checks             *CheckSummary `json:"checks,omitempty"`
 }
