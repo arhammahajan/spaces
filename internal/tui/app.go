@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"sort"
 	"strings"
@@ -58,6 +59,14 @@ type (
 	}
 	prInfoMsg struct {
 		info map[string]*model.GitInfo
+	}
+	telemetryMsg struct {
+		snap model.TelemetrySnapshot
+		err  string
+	}
+	killOrphansMsg struct {
+		killed int
+		err    string
 	}
 )
 
@@ -206,6 +215,14 @@ type Model struct {
 	tabsInitSelected      bool
 	tabsHookInFlight      string
 
+	telemetry           model.TelemetrySnapshot
+	telemetryLoaded     bool
+	telemetryFetching   bool
+	tabsMonitorMode     bool
+	tabsMonitorSelected int
+	tabsMonitorTab      int          // narrow (<100 col): 0=Work, 1=Usage, 2=System
+	tabsMonitorHidden   map[int]bool // panels 1..7 visibility toggles
+
 	pendingTarget string
 	quitting      bool
 }
@@ -225,8 +242,9 @@ func New(backend Backend, opts Options) Model {
 		bgDetails:      map[string]*model.HookDetail{},
 		previews:       map[string]string{},
 		gitInfo:        map[string]*model.GitInfo{},
-		tabsPaneSel:    map[string]int{},
-		convScope:      "all",
+		tabsPaneSel:       map[string]int{},
+		tabsMonitorHidden: map[int]bool{},
+		convScope:         "all",
 		convSearchHits: map[string]model.ConversationSearchHit{},
 		lastClickRow:   -1,
 		pendingTarget:  strings.TrimSpace(opts.Target),
@@ -398,6 +416,36 @@ func (m Model) loadPRStatusCmd(gitByCWD map[string]*model.GitInfo, force bool) t
 	}
 }
 
+func (m Model) loadTelemetryCmd(spaces []model.Space, force bool) tea.Cmd {
+	tb, ok := m.backend.(TelemetryBackend)
+	if !ok {
+		return nil
+	}
+	spacesCopy := append([]model.Space(nil), spaces...)
+	return func() tea.Msg {
+		snap, err := tb.LoadTelemetry(context.Background(), spacesCopy, force)
+		if err != nil {
+			return telemetryMsg{err: err.Error()}
+		}
+		return telemetryMsg{snap: snap}
+	}
+}
+
+func (m Model) killOrphanPortsCmd(orphans []model.OrphanPort) tea.Cmd {
+	tb, ok := m.backend.(TelemetryBackend)
+	if !ok || len(orphans) == 0 {
+		return nil
+	}
+	orphansCopy := append([]model.OrphanPort(nil), orphans...)
+	return func() tea.Msg {
+		killed, err := tb.KillOrphanPorts(context.Background(), orphansCopy)
+		if err != nil {
+			return killOrphansMsg{killed: killed, err: err.Error()}
+		}
+		return killOrphansMsg{killed: killed}
+	}
+}
+
 func (m *Model) collectCWDs() []string {
 	seen := make(map[string]struct{})
 	var cwds []string
@@ -552,6 +600,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.syncTabsInspectorCmd(false); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+			if !m.telemetryFetching {
+				if cmd := m.loadTelemetryCmd(m.spaces, false); cmd != nil {
+					m.telemetryFetching = true
+					cmds = append(cmds, cmd)
+				}
+			}
 		}
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
@@ -582,6 +636,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.gitInfo[cwd] = g
 		}
 		m.applyGitInfo()
+		return m, nil
+	case telemetryMsg:
+		m.telemetryFetching = false
+		if msg.err == "" {
+			m.telemetry = msg.snap
+			m.telemetryLoaded = true
+			m.clampMonitorSelection()
+		}
+		return m, nil
+	case killOrphansMsg:
+		if msg.err != "" {
+			m.toast = "Kill orphan ports failed: " + msg.err
+		} else if msg.killed == 1 {
+			m.toast = "Killed 1 orphan port."
+		} else {
+			m.toast = fmt.Sprintf("Killed %d orphan ports.", msg.killed)
+		}
+		if cmd := m.loadTelemetryCmd(m.spaces, true); cmd != nil {
+			m.telemetryFetching = true
+			return m, cmd
+		}
 		return m, nil
 	case hookDetailMsg:
 		if m.tabsHookInFlight == tabsHookKey(msg.session, msg.paneNum) {
