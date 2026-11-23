@@ -145,6 +145,12 @@ type UsageBackend interface {
 	LoadUsage(ctx context.Context, force bool) (usage.Report, error)
 }
 
+// UsageLimitsBackend is an optional extension of Backend for loading and
+// refreshing per-profile & per-harness usage limits cached in ~/.harness.
+type UsageLimitsBackend interface {
+	LoadUsageLimits(ctx context.Context, force bool) (usage.LimitsSnapshot, error)
+}
+
 // Mode selects which screen the TUI shows.
 type Mode int
 

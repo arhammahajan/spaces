@@ -31,6 +31,14 @@ type usageMsg struct {
 	err     string
 }
 
+type usageLimitsMsg struct {
+	snapshot usage.LimitsSnapshot
+	refresh  bool
+	err      string
+}
+
+const planLimitsRefreshCooldown = 15 * time.Second
+
 func (m Model) loadUsageCmd(force bool) tea.Cmd {
 	ub, ok := m.backend.(UsageBackend)
 	if !ok {
@@ -47,6 +55,20 @@ func (m Model) loadUsageCmd(force bool) tea.Cmd {
 	}
 }
 
+func (m Model) loadUsageLimitsCmd(force bool) tea.Cmd {
+	ulb, ok := m.backend.(UsageLimitsBackend)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		snap, err := ulb.LoadUsageLimits(context.Background(), force)
+		if err != nil {
+			return usageLimitsMsg{refresh: force, err: err.Error()}
+		}
+		return usageLimitsMsg{snapshot: snap, refresh: force}
+	}
+}
+
 func (m Model) handleUsageMsg(msg usageMsg) (tea.Model, tea.Cmd) {
 	if msg.refresh {
 		m.usageRefreshing = false
@@ -58,7 +80,7 @@ func (m Model) handleUsageMsg(msg usageMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	hasData := msg.report.Records > 0 || len(msg.report.Daily) > 0 || len(msg.report.Burndown.Quotas) > 0 || len(msg.report.SessionsList) > 0 || len(msg.report.Models) > 0
+	hasData := msg.report.Records > 0 || len(msg.report.Daily) > 0 || len(msg.report.Burndown.Quotas) > 0 || len(msg.report.Burndown.Limits.Accounts) > 0 || len(msg.report.SessionsList) > 0 || len(msg.report.Models) > 0
 	if !msg.refresh && !hasData && m.usageRefreshing {
 		// Initial DB cache was empty; keep showing Loading… until the
 		// background refresh scan finishes so we don't flash an empty state.
@@ -78,6 +100,49 @@ func (m Model) handleUsageMsg(msg usageMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) handleUsageLimitsMsg(msg usageLimitsMsg) (tea.Model, tea.Cmd) {
+	if msg.refresh {
+		m.usageLimitsRefreshing = false
+	}
+	if msg.err != "" {
+		m.usageLimitsErr = msg.err
+		return m, nil
+	}
+	if !msg.refresh && len(msg.snapshot.Accounts) == 0 && len(msg.snapshot.Notices) == 0 && m.usageLimitsRefreshing {
+		// Initial cache was empty; keep refreshing silently without clobbering existing data.
+		return m, nil
+	}
+	m.usageLimitsErr = ""
+	m.usageLimits = msg.snapshot
+	m.usageLimitsLoaded = true
+	if msg.refresh {
+		m.usageLimitsRefreshedAt = m.opts.NowOrDefault()
+	}
+	return m, nil
+}
+
+func (m *Model) maybeRefreshPlanLimits() tea.Cmd {
+	if m.usageTab != usageTabPlan || m.usageLimitsRefreshing {
+		return nil
+	}
+	if _, ok := m.backend.(UsageLimitsBackend); !ok {
+		return nil
+	}
+	now := m.opts.NowOrDefault()
+	if !m.usageLimitsRefreshedAt.IsZero() && now.Sub(m.usageLimitsRefreshedAt) < planLimitsRefreshCooldown {
+		return nil
+	}
+	m.usageLimitsRefreshing = true
+	return m.loadUsageLimitsCmd(true)
+}
+
+func (m Model) effectiveUsageLimits() usage.LimitsSnapshot {
+	if m.usageLimitsLoaded && (len(m.usageLimits.Accounts) > 0 || len(m.usageLimits.Notices) > 0) {
+		return m.usageLimits
+	}
+	return m.usageReport.Burndown.Limits
+}
+
 // ---------------------------------------------------------------------------
 // Filtered views over m.usageReport
 // ---------------------------------------------------------------------------
@@ -92,6 +157,15 @@ func (m Model) usageProviderList() []string {
 		if _, ok := seen[p.Provider]; !ok {
 			seen[p.Provider] = struct{}{}
 			out = append(out, p.Provider)
+		}
+	}
+	for _, acc := range m.effectiveUsageLimits().Accounts {
+		if acc.Provider == "" {
+			continue
+		}
+		if _, ok := seen[acc.Provider]; !ok {
+			seen[acc.Provider] = struct{}{}
+			out = append(out, acc.Provider)
 		}
 	}
 	return out
@@ -272,20 +346,20 @@ func (m Model) handleUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.usageDashFocus = (m.usageDashFocus + 1) % 4
 			return m, nil
 		}
-		m.switchUsageTab((m.usageTab + 1) % len(usageTabNames))
-		return m, nil
+		cmd := m.switchUsageTab((m.usageTab + 1) % len(usageTabNames))
+		return m, cmd
 	case tea.KeyShiftTab:
 		if m.usageDashboard {
 			m.usageDashFocus = (m.usageDashFocus + 3) % 4
 			return m, nil
 		}
-		m.switchUsageTab((m.usageTab + len(usageTabNames) - 1) % len(usageTabNames))
-		return m, nil
+		cmd := m.switchUsageTab((m.usageTab + len(usageTabNames) - 1) % len(usageTabNames))
+		return m, cmd
 	case tea.KeyEnter:
 		if m.usageDashboard {
 			m.usageDashboard = false
-			m.switchUsageTab(m.usageDashFocus)
-			return m, nil
+			cmd := m.switchUsageTab(m.usageDashFocus)
+			return m, cmd
 		}
 		if m.usageTab != usageTabOverview {
 			m.usageExpanded = !m.usageExpanded
@@ -309,12 +383,13 @@ func (m Model) handleUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "1", "2", "3", "4", "5":
 		idx := int(r[0] - '1')
 		m.usageDashboard = false
-		m.switchUsageTab(idx)
-		return m, nil
+		cmd := m.switchUsageTab(idx)
+		return m, cmd
 	case "z":
 		if m.usageDashboard {
 			m.usageDashboard = false
-			m.switchUsageTab(m.usageDashFocus)
+			cmd := m.switchUsageTab(m.usageDashFocus)
+			return m, cmd
 		} else {
 			m.usageDashboard = true
 			if m.usageTab < 4 {
@@ -336,7 +411,16 @@ func (m Model) handleUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.usageLoading = true
 		}
 		m.usageErr = ""
-		return m, m.loadUsageCmd(true)
+		cmds := []tea.Cmd{m.loadUsageCmd(true)}
+		if _, ok := m.backend.(UsageLimitsBackend); ok {
+			m.usageLimitsRefreshing = true
+			m.usageLimitsErr = ""
+			cmds = append(cmds, m.loadUsageLimitsCmd(true))
+		}
+		if len(cmds) == 1 {
+			return m, cmds[0]
+		}
+		return m, tea.Batch(cmds...)
 	case "p":
 		provs := m.usageProviderList()
 		if len(provs) == 0 {
@@ -398,9 +482,9 @@ func (m Model) handleUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *Model) switchUsageTab(tab int) {
+func (m *Model) switchUsageTab(tab int) tea.Cmd {
 	if tab < 0 || tab >= len(usageTabNames) {
-		return
+		return nil
 	}
 	m.usageTab = tab
 	m.usageRowSel = 0
@@ -408,6 +492,7 @@ func (m *Model) switchUsageTab(tab int) {
 	m.usageScroll = 0
 	m.usageDayIdx = -1
 	m.clampUsageSelection()
+	return m.maybeRefreshPlanLimits()
 }
 
 func (m *Model) usageHandleLeftRight(delta int) {
@@ -483,8 +568,8 @@ func (m Model) handleUsageLeftClick(x, y int) (tea.Model, tea.Cmd) {
 		for _, h := range hits {
 			if relX >= h.Start && relX < h.End {
 				m.usageDashboard = false
-				m.switchUsageTab(h.Index)
-				return m, nil
+				cmd := m.switchUsageTab(h.Index)
+				return m, cmd
 			}
 		}
 	}
@@ -595,7 +680,8 @@ func (m Model) renderUsage(width, height int) string {
 
 func (m Model) usageIsEmpty() bool {
 	r := m.usageReport
-	return r.Records == 0 && len(r.Daily) == 0 && len(r.Burndown.Quotas) == 0 && len(r.SessionsList) == 0 && len(r.Models) == 0
+	limits := m.effectiveUsageLimits()
+	return r.Records == 0 && len(r.Daily) == 0 && len(r.Burndown.Quotas) == 0 && len(limits.Accounts) == 0 && len(r.SessionsList) == 0 && len(r.Models) == 0
 }
 
 func (m Model) renderUsageCenteredState(width, height int, content string) []string {
@@ -1086,8 +1172,57 @@ func (m Model) renderUsageDayBreakdown(day usage.DailyBucket, series []usageSeri
 // Tab 2 — Plan & Burndown
 // ---------------------------------------------------------------------------
 
+var limitProviderOrder = []string{
+	"claude",
+	"codex",
+	"antigravity",
+	"opencode",
+	"cursor-agent",
+	"grok",
+	"muse",
+}
+
+func (m Model) usageFilteredLimitAccounts() []usage.LimitAccount {
+	limits := m.effectiveUsageLimits()
+	var out []usage.LimitAccount
+	for _, acc := range limits.Accounts {
+		if m.usageProvider != "" && !strings.EqualFold(acc.Provider, m.usageProvider) {
+			continue
+		}
+		out = append(out, acc)
+	}
+	return out
+}
+
+func (m Model) usageFilteredLimitNotices() []usage.LimitNotice {
+	limits := m.effectiveUsageLimits()
+	var out []usage.LimitNotice
+	for _, n := range limits.Notices {
+		if m.usageProvider != "" && !strings.EqualFold(n.Provider, m.usageProvider) {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+func alignHeaderRight(left, right string, width int) string {
+	if right == "" {
+		return fitCellWidth(left, width)
+	}
+	lw := ansi.StringWidth(left)
+	rw := ansi.StringWidth(right)
+	if lw+rw+2 <= width {
+		return left + strings.Repeat(" ", width-lw-rw) + right
+	}
+	return fitCellWidth(left, width)
+}
+
 func (m Model) renderUsagePlanTab(width int) []string {
 	now := m.opts.NowOrDefault()
+	limits := m.effectiveUsageLimits()
+	accounts := m.usageFilteredLimitAccounts()
+	notices := m.usageFilteredLimitNotices()
 	quotas := m.usageFilteredQuotas()
 	proj := m.usageReport.Burndown.Projection
 	history := m.usageFilteredFiveHour()
@@ -1095,55 +1230,163 @@ func (m Model) renderUsagePlanTab(width int) []string {
 	secTitle := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorText)).Bold(true)
 	var lines []string
 
-	// 1. Live Rate-Limit Windows
-	lines = append(lines, fitCellWidth(secTitle.Render("Live Rate-Limit Windows"), width))
-	covered := map[string]bool{}
-	var cards [][]string
-	for _, q := range quotas {
-		covered[strings.ToLower(q.Agent)] = true
-		cards = append(cards, m.renderQuotaCard(q, now))
-	}
-	for _, blk := range m.usageReport.Burndown.ActiveBlocks {
-		if m.usageProvider != "" && !strings.EqualFold(blk.Provider, m.usageProvider) {
-			continue
-		}
-		if covered[strings.ToLower(blk.Provider)] {
-			continue
-		}
-		cards = append(cards, m.renderActiveBlockCard(blk, now))
+	// Right-aligned live limits refresh status
+	var statusRight string
+	switch {
+	case m.usageLimitsRefreshing:
+		statusRight = styleAccent.Render("Refreshing…")
+	case limits.CheckedAtMs > 0:
+		t := time.UnixMilli(limits.CheckedAtMs).In(now.Location())
+		statusRight = styleMuted.Render("Updated " + t.Format("15:04"))
+	case m.usageLimitsErr != "":
+		statusRight = styleError.Render("Refresh failed")
 	}
 
-	if len(cards) == 0 {
-		lines = append(lines, styleMuted.Render("  No live rate-limit windows reported."))
-	} else if width >= 100 && len(cards) >= 2 {
-		halfW := (width - 2) / 2
-		for i := 0; i < len(cards); i += 2 {
-			left := cards[i]
-			var right []string
-			if i+1 < len(cards) {
-				right = cards[i+1]
+	// 1. Plan & Rate Limits (per-profile & per-harness) with legacy fallback
+	if len(accounts) > 0 {
+		lines = append(lines, alignHeaderRight(secTitle.Render("Plan & Rate Limits"), statusRight, width))
+
+		// Group accounts by provider in canonical order.
+		byProv := map[string][]usage.LimitAccount{}
+		for _, acc := range accounts {
+			key := strings.ToLower(strings.TrimSpace(acc.Provider))
+			if key == "" {
+				key = "other"
 			}
-			maxR := len(left)
-			if len(right) > maxR {
-				maxR = len(right)
+			byProv[key] = append(byProv[key], acc)
+		}
+		var provOrder []string
+		seenProv := map[string]bool{}
+		for _, p := range limitProviderOrder {
+			if len(byProv[p]) > 0 {
+				provOrder = append(provOrder, p)
+				seenProv[p] = true
 			}
-			for r := 0; r < maxR; r++ {
-				l, rr := "", ""
-				if r < len(left) {
-					l = left[r]
+		}
+		var extraProvs []string
+		for p := range byProv {
+			if !seenProv[p] {
+				extraProvs = append(extraProvs, p)
+			}
+		}
+		sort.Strings(extraProvs)
+		provOrder = append(provOrder, extraProvs...)
+
+		provHeaderSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorSubtext0)).Bold(true)
+		for _, prov := range provOrder {
+			group := byProv[prov]
+			unit := "account"
+			if len(group) != 1 {
+				unit = "accounts"
+			}
+			subHdr := "  " + provHeaderSt.Render(limitProviderDisplayName(prov)) +
+				" " + styleMuted.Render(fmt.Sprintf("(%d %s)", len(group), unit))
+			lines = append(lines, fitCellWidth(subHdr, width))
+
+			if width >= 104 && len(group) >= 2 {
+				halfW := (width - 2) / 2
+				for i := 0; i < len(group); i += 2 {
+					left := m.renderLimitAccountCard(group[i], now, halfW)
+					var right []string
+					if i+1 < len(group) {
+						right = m.renderLimitAccountCard(group[i+1], now, width-halfW-2)
+					}
+					maxR := len(left)
+					if len(right) > maxR {
+						maxR = len(right)
+					}
+					for r := 0; r < maxR; r++ {
+						l, rr := "", ""
+						if r < len(left) {
+							l = left[r]
+						}
+						if r < len(right) {
+							rr = right[r]
+						}
+						lines = append(lines, fitCellWidth(fitCellWidth(l, halfW)+"  "+fitCellWidth(rr, width-halfW-2), width))
+					}
+					lines = append(lines, "")
 				}
-				if r < len(right) {
-					rr = right[r]
+			} else {
+				for _, acc := range group {
+					lines = append(lines, m.renderLimitAccountCard(acc, now, width)...)
+					lines = append(lines, "")
 				}
-				lines = append(lines, fitCellWidth(fitCellWidth(l, halfW)+"  "+fitCellWidth(rr, width-halfW-2), width))
 			}
-			lines = append(lines, "")
 		}
 	} else {
-		for _, c := range cards {
-			lines = append(lines, c...)
+		// Graceful fallback to legacy Quotas + ActiveBlocks when no LimitsSnapshot accounts are present.
+		covered := map[string]bool{}
+		var cards [][]string
+		for _, q := range quotas {
+			covered[strings.ToLower(q.Agent)] = true
+			cards = append(cards, m.renderQuotaCard(q, now))
+		}
+		for _, blk := range m.usageReport.Burndown.ActiveBlocks {
+			if m.usageProvider != "" && !strings.EqualFold(blk.Provider, m.usageProvider) {
+				continue
+			}
+			if covered[strings.ToLower(blk.Provider)] {
+				continue
+			}
+			cards = append(cards, m.renderActiveBlockCard(blk, now))
+		}
+
+		if len(cards) > 0 {
+			lines = append(lines, alignHeaderRight(secTitle.Render("Live Rate-Limit Windows"), statusRight, width))
+			if width >= 100 && len(cards) >= 2 {
+				halfW := (width - 2) / 2
+				for i := 0; i < len(cards); i += 2 {
+					left := cards[i]
+					var right []string
+					if i+1 < len(cards) {
+						right = cards[i+1]
+					}
+					maxR := len(left)
+					if len(right) > maxR {
+						maxR = len(right)
+					}
+					for r := 0; r < maxR; r++ {
+						l, rr := "", ""
+						if r < len(left) {
+							l = left[r]
+						}
+						if r < len(right) {
+							rr = right[r]
+						}
+						lines = append(lines, fitCellWidth(fitCellWidth(l, halfW)+"  "+fitCellWidth(rr, width-halfW-2), width))
+					}
+					lines = append(lines, "")
+				}
+			} else {
+				for _, c := range cards {
+					lines = append(lines, c...)
+					lines = append(lines, "")
+				}
+			}
+		} else {
+			lines = append(lines, alignHeaderRight(secTitle.Render("Plan & Rate Limits"), statusRight, width))
+			if m.usageLimitsRefreshing {
+				lines = append(lines, styleMuted.Render("  Refreshing plan limits…"))
+			} else {
+				lines = append(lines, styleMuted.Render("  No live rate-limit windows reported."))
+			}
 			lines = append(lines, "")
 		}
+	}
+
+	// Render any probe/status notices compactly below the limit cards.
+	if len(notices) > 0 {
+		warnSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorYellow))
+		for _, n := range notices {
+			src := n.Provider
+			if n.Profile != "" {
+				src += "/" + n.Profile
+			}
+			msg := fmt.Sprintf("  %s %s", warnSt.Render("⚠"), styleMuted.Render(src+": "+n.Message))
+			lines = append(lines, fitCellWidth(msg, width))
+		}
+		lines = append(lines, "")
 	}
 
 	// 2. Monthly Burndown & Projection
@@ -1209,6 +1452,183 @@ func (m Model) renderUsagePlanTab(width int) []string {
 					truncate(k, 14), formatCompactTokens(mm.Tokens), formatUSD(mm.CostUSD)), width))
 			}
 		}
+	}
+	return lines
+}
+
+func (m Model) renderLimitAccountCard(acc usage.LimitAccount, now time.Time, cardW int) []string {
+	profileLabel := strings.Join(acc.Profiles, ", ")
+	if profileLabel == "" {
+		profileLabel = acc.DisplayName
+	}
+	if profileLabel == "" {
+		profileLabel = "default"
+	}
+
+	profSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorLavender)).Bold(true)
+	planSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorTeal)).Bold(true)
+	staleSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorYellow)).Bold(true)
+	creditSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorGreen)).Bold(true)
+
+	hdrParts := []string{profSt.Render(profileLabel)}
+	if acc.Plan != "" {
+		hdrParts = append(hdrParts, planSt.Render(acc.Plan))
+	}
+	if acc.Stale {
+		hdrParts = append(hdrParts, staleSt.Render("stale"))
+	}
+	hdr := "    " + strings.Join(hdrParts, " ")
+	if acc.Email != "" {
+		remW := cardW - ansi.StringWidth(hdr) - 1
+		if remW >= 8 {
+			hdr += " " + styleMuted.Render(truncate(acc.Email, remW))
+		}
+	}
+	out := []string{fitCellWidth(hdr, cardW)}
+
+	// Reset credits highlight line
+	if acc.ResetCredits != nil && acc.ResetCredits.AvailableCount > 0 {
+		noun := "reset credits"
+		if acc.ResetCredits.AvailableCount == 1 {
+			noun = "reset credit"
+		}
+		creditLine := fmt.Sprintf("    %s", creditSt.Render(fmt.Sprintf("✦ %d %s available", acc.ResetCredits.AvailableCount, noun)))
+		if acc.ResetCredits.NextExpiresAt != "" {
+			exp := formatLimitExpiryDate(acc.ResetCredits.NextExpiresAt, now)
+			if exp != "" {
+				creditLine += " " + styleMuted.Render("(exp "+exp+")")
+			}
+		}
+		out = append(out, fitCellWidth(creditLine, cardW))
+	}
+
+	// Unavailable message when no windows are reported
+	if len(acc.Windows) == 0 {
+		msg := "No windows reported"
+		if acc.Unavailable != nil && acc.Unavailable.Message != "" {
+			msg = acc.Unavailable.Message
+		} else if acc.Unavailable != nil && acc.Unavailable.Reason != "" {
+			msg = acc.Unavailable.Reason
+		}
+		out = append(out, fitCellWidth("    "+styleMuted.Render(msg), cardW))
+		return out
+	}
+
+	// Responsive window row column widths
+	labelW := 18
+	barSegs := 20
+	compact := false
+	switch {
+	case cardW < 58:
+		labelW = 12
+		barSegs = 12
+		compact = true
+	case cardW < 86:
+		labelW = 14
+		barSegs = 20
+		compact = true
+	}
+
+	for _, w := range acc.Windows {
+		lblText := strings.TrimSpace(w.Label)
+		if lblText == "" {
+			lblText = w.Kind
+		}
+		if lblText == "" {
+			lblText = w.ID
+		}
+		paddedLbl := fmt.Sprintf("%-*s", labelW, truncate(lblText, labelW))
+		highlight := (m.usagePlanWindow == 0 && w.Kind == agent.LimitWindowSession) ||
+			(m.usagePlanWindow == 1 && w.Kind == agent.LimitWindowWeekly)
+		if highlight {
+			paddedLbl = styleAccent.Render(paddedLbl)
+		} else {
+			paddedLbl = styleMuted.Render(paddedLbl)
+		}
+
+		bar := renderCodexQuotaBar(w.UsedPercent, barSegs)
+		rem := 100.0 - w.UsedPercent
+		if rem < 0 {
+			rem = 0
+		}
+		if rem > 100 {
+			rem = 100
+		}
+
+		row := fmt.Sprintf("    %s %s %4s left", paddedLbl, bar, formatPct(rem, 0))
+		if pace, ok := computeLimitPace(w, now); ok {
+			row += " " + renderLimitPaceTag(pace, w.UsedPercent)
+		}
+		if resetStr := formatLimitResetCountdown(w.ResetsAt, now, compact); resetStr != "" {
+			row += " " + styleMuted.Render(resetStr)
+		}
+		out = append(out, fitCellWidth(row, cardW))
+	}
+
+	return out
+}
+
+func (m Model) renderUsagePlanDashboardCard(width int) []string {
+	accounts := m.usageFilteredLimitAccounts()
+	if len(accounts) == 0 {
+		return m.renderUsagePlanTab(width)
+	}
+
+	var lines []string
+	var totalCredits int
+	profSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorLavender)).Bold(true)
+	planSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorTeal))
+	creditSt := lipgloss.NewStyle().Foreground(lipgloss.Color(ColorGreen)).Bold(true)
+
+	shown := 0
+	for _, acc := range accounts {
+		if acc.ResetCredits != nil && acc.ResetCredits.AvailableCount > 0 {
+			totalCredits += acc.ResetCredits.AvailableCount
+		}
+		if shown >= 4 || len(acc.Windows) == 0 {
+			continue
+		}
+		w := acc.Windows[0]
+		rem := 100.0 - w.UsedPercent
+		if rem < 0 {
+			rem = 0
+		}
+		if rem > 100 {
+			rem = 100
+		}
+		prof := acc.Provider
+		if len(acc.Profiles) > 0 {
+			prof += "/" + acc.Profiles[0]
+		}
+		bar := renderCodexQuotaBar(w.UsedPercent, 10)
+		planPart := ""
+		if acc.Plan != "" {
+			planPart = " " + planSt.Render(acc.Plan)
+		}
+		row := fmt.Sprintf("%-18s %s %s left%s",
+			profSt.Render(truncate(prof, 18)),
+			bar,
+			formatPct(rem, 0),
+			planPart,
+		)
+		lines = append(lines, fitCellWidth(row, width))
+		shown++
+	}
+
+	if totalCredits > 0 {
+		noun := "reset credits"
+		if totalCredits == 1 {
+			noun = "reset credit"
+		}
+		lines = append(lines, fitCellWidth(creditSt.Render(fmt.Sprintf("✦ %d %s available", totalCredits, noun)), width))
+	}
+
+	proj := m.usageReport.Burndown.Projection
+	if proj.Projected30dUSD > 0 || proj.SpentUSD > 0 {
+		lines = append(lines, fitCellWidth(
+			styleMuted.Render(fmt.Sprintf("30d proj: %s · spent: %s", formatUSD(proj.Projected30dUSD), formatUSD(proj.SpentUSD))),
+			width,
+		))
 	}
 	return lines
 }
@@ -1477,7 +1897,7 @@ func (m Model) renderUsageDashboard(width, bodyH int) []string {
 	// Build concise content for each of the 4 cards.
 	ov := m.renderUsageOverview(innerCardW)
 	us := m.renderUsageDailyTab(innerCardW, innerCardH)
-	pl := m.renderUsagePlanTab(innerCardW)
+	pl := m.renderUsagePlanDashboardCard(innerCardW)
 	mo := m.renderUsageModelsTab(innerCardW)
 
 	c0 := buildCard(0, ov)
