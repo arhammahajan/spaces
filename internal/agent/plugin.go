@@ -66,6 +66,9 @@ type Plugin interface {
 
 	// UsageReader returns an optional historical token/cost usage scanner.
 	UsageReader() UsageReader
+
+	// UsageLimitProvider returns an optional per-profile plan/rate-limit fetcher.
+	UsageLimitProvider() UsageLimitProvider
 }
 
 // Spec declares the static metadata and naming rules for an agent plugin.

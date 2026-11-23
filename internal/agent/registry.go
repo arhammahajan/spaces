@@ -694,3 +694,16 @@ func (r *Registry) UsageReaders() []Plugin {
 	}
 	return out
 }
+
+// UsageLimitProviders returns all registered plugins that implement UsageLimitProvider.
+func (r *Registry) UsageLimitProviders() []Plugin {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var out []Plugin
+	for _, p := range r.ordered {
+		if p != nil && p.UsageLimitProvider() != nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
