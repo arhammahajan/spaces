@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/arhammahajan/spaces/internal/model"
+	"github.com/arhammahajan/spaces/internal/usage"
 )
 
 // RowKind identifies a visible navigator row.
@@ -226,6 +227,26 @@ type Model struct {
 	tabsMonitorFiltering bool
 	tabsMonitorSort      monitorSortMode
 
+	usageReport      usage.Report
+	usageLoaded      bool
+	usageLoading     bool
+	usageErr         string
+	usageTab         int
+	usageRange       usageRange
+	usageOverviewAgg usageOverviewAgg
+	usageGroupBy     usageGroupBy
+	usageUseCost     bool
+	usageProvider    string
+	usagePlanWindow  int
+	usageSessionSort usageSessionSort
+	usageDayIdx      int
+	usageRowSel      int
+	usageExpanded    bool
+	usageScroll      int
+	usageDashboard   bool
+	usageDashFocus   int
+	usageHelp        bool
+
 	pendingTarget string
 	quitting      bool
 }
@@ -290,6 +311,12 @@ func New(backend Backend, opts Options) Model {
 	if m.mode == ModeShared {
 		m.sharedLoading = true
 	}
+	if m.mode == ModeUsage {
+		m.usageLoading = true
+		m.usageRange = usageRange30d
+		m.usageUseCost = true
+		m.usageDayIdx = -1
+	}
 	if m.mode == ModeNavigate || m.mode == ModeSearch || m.mode == ModeInbox || m.mode == ModeTabs || m.mode == ModeWorktrees {
 		m.spacesLoading = true
 	}
@@ -323,6 +350,9 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.mode == ModeShared {
 		return m.loadSharedCmd()
+	}
+	if m.mode == ModeUsage {
+		return m.loadUsageCmd(false)
 	}
 	if m.mode == ModeRename && m.renameStandalone {
 		return m.loadSpacesCmd()
@@ -505,11 +535,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampSelection()
 		return m, nil
 	case tickMsg:
-		if m.mode == ModeAgents || m.mode == ModeConversations || m.mode == ModeShared || m.mode == ModeWorktrees || m.mode == ModeConfirmRemoveWorktree {
+		if m.mode == ModeAgents || m.mode == ModeConversations || m.mode == ModeShared || m.mode == ModeWorktrees || m.mode == ModeConfirmRemoveWorktree || m.mode == ModeUsage {
 			// Static in modal/secondary modes: no polling flicker.
 			return m, nil
 		}
 		return m, tea.Batch(m.nextLoadSpacesCmd(), m.tickCmd())
+	case usageMsg:
+		return m.handleUsageMsg(msg)
 	case wtInspectMsg:
 		return m.handleWtInspectMsg(msg)
 	case wtPromptDetailMsg:
@@ -1551,6 +1583,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sharedLoading = true
 			return m, m.loadSharedCmd()
 		}
+		if m.mode == ModeUsage {
+			m.usageLoading = true
+			m.usageErr = ""
+			return m, m.loadUsageCmd(true)
+		}
 		if m.mode == ModeWorktrees {
 			m.worktreesLoading = true
 			return m, tea.Batch(m.nextLoadSpacesCmd(), m.loadAllWorktreesCmd())
@@ -1607,6 +1644,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleTabs(msg)
 	case ModeWorktrees:
 		return m.handleWorktrees(msg)
+	case ModeUsage:
+		return m.handleUsage(msg)
 	}
 	return m, nil
 }
@@ -2437,6 +2476,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.clampWorktreeSelection()
 			return m, nil
 		}
+		if m.mode == ModeUsage {
+			return m.handleUsageWheel(-1)
+		}
 		m.moveSelection(-1)
 		return m, nil
 	case tea.MouseButtonWheelDown:
@@ -2477,6 +2519,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.clampWorktreeSelection()
 			return m, nil
 		}
+		if m.mode == ModeUsage {
+			return m.handleUsageWheel(1)
+		}
 		m.moveSelection(1)
 		return m, nil
 	case tea.MouseButtonLeft:
@@ -2503,6 +2548,9 @@ func (m Model) handleLeftClick(x, y int) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == ModeWorktrees {
 		return m.handleWorktreesLeftClick(x, y)
+	}
+	if m.mode == ModeUsage {
+		return m.handleUsageLeftClick(x, y)
 	}
 	if m.mode == ModeAgents {
 		idx := y - agentsListTop()

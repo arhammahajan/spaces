@@ -72,6 +72,9 @@ func maybeRunHarnessCommand(argv0 string, args []string) (int, bool) {
 	case "models":
 		return runHarnessModels(rest), true
 	case "usage":
+		if prog == "tmux-spaces" && len(rest) == 0 {
+			return 0, false
+		}
 		return runHarnessUsage(rest), true
 	case "harness-status":
 		return runHarnessStatus(rest), true
