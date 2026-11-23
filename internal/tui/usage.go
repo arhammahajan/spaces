@@ -377,6 +377,18 @@ func (m Model) handleUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyDown:
 		m.usageHandleUpDown(1)
 		return m, nil
+	case tea.KeyPgUp:
+		m.usageHandlePage(-1)
+		return m, nil
+	case tea.KeyPgDown:
+		m.usageHandlePage(1)
+		return m, nil
+	case tea.KeyHome:
+		m.usageHandleHomeEnd(false)
+		return m, nil
+	case tea.KeyEnd:
+		m.usageHandleHomeEnd(true)
+		return m, nil
 	}
 
 	switch r {
@@ -516,6 +528,92 @@ func (m *Model) usageHandleLeftRight(delta int) {
 	}
 }
 
+func (m Model) usageViewportMetrics() (innerW, bodyH int) {
+	w := m.width
+	if w <= 0 {
+		w = 80
+	}
+	h := m.height
+	if h <= 0 {
+		h = 24
+	}
+	pad := 0
+	if w > 2 {
+		pad = 1
+	}
+	innerW = w - 2*pad
+	if innerW < 10 {
+		innerW = w
+	}
+	ctrlLines := m.renderUsageControls(innerW)
+	chromeH := 1 + 1 + 1 + len(ctrlLines) + 2
+	bodyH = h - chromeH
+	if bodyH < 1 {
+		bodyH = 1
+	}
+	return innerW, bodyH
+}
+
+func (m Model) usageMaxScroll() int {
+	innerW, bodyH := m.usageViewportMetrics()
+	var raw []string
+	switch m.usageTab {
+	case usageTabOverview:
+		raw = m.renderUsageOverview(innerW)
+	case usageTabUsage:
+		raw = m.renderUsageDailyTab(innerW, bodyH)
+	case usageTabPlan:
+		raw = m.renderUsagePlanTab(innerW)
+	case usageTabModels:
+		raw = m.renderUsageModelsTab(innerW)
+	case usageTabSessions:
+		return 0
+	default:
+		return 0
+	}
+	if len(raw) <= bodyH {
+		return 0
+	}
+	return len(raw) - bodyH
+}
+
+func (m *Model) scrollUsageBy(delta int) {
+	maxScroll := m.usageMaxScroll()
+	m.usageScroll += delta
+	if m.usageScroll < 0 {
+		m.usageScroll = 0
+	}
+	if m.usageScroll > maxScroll {
+		m.usageScroll = maxScroll
+	}
+}
+
+func (m *Model) ensureUsageModelRowVisible() {
+	_, bodyH := m.usageViewportMetrics()
+	// Models tab has 2 header lines before row 0.
+	rowTop := 2 + m.usageRowSel
+	rowBot := rowTop
+	if m.usageExpanded {
+		rowBot = rowTop + 1
+	}
+	if m.usageRowSel == 0 {
+		m.usageScroll = 0
+		return
+	}
+	if rowTop < m.usageScroll {
+		m.usageScroll = rowTop
+	} else if rowBot >= m.usageScroll+bodyH {
+		m.usageScroll = rowBot - bodyH + 1
+	}
+	maxScroll := m.usageMaxScroll()
+	if m.usageScroll < 0 {
+		m.usageScroll = 0
+	}
+	if m.usageScroll > maxScroll {
+		m.usageScroll = maxScroll
+	}
+}
+
 func (m *Model) usageHandleUpDown(delta int) {
 	if m.usageDashboard {
 		step := 1
@@ -526,12 +624,87 @@ func (m *Model) usageHandleUpDown(delta int) {
 		return
 	}
 	switch m.usageTab {
-	case usageTabPlan, usageTabModels, usageTabSessions:
+	case usageTabPlan:
+		maxScroll := m.usageMaxScroll()
+		if maxScroll > 0 {
+			if delta > 0 {
+				if m.usageScroll < maxScroll {
+					m.scrollUsageBy(delta)
+					return
+				}
+			} else if delta < 0 {
+				if m.usageRowSel > 0 {
+					m.usageRowSel += delta
+					m.clampUsageSelection()
+					return
+				}
+				m.scrollUsageBy(delta)
+				return
+			}
+		}
 		m.usageRowSel += delta
 		m.clampUsageSelection()
+	case usageTabModels:
+		m.usageRowSel += delta
+		m.clampUsageSelection()
+		m.ensureUsageModelRowVisible()
+	case usageTabSessions:
+		m.usageRowSel += delta
+		m.usageScroll = 0
+		m.clampUsageSelection()
 	default:
-		m.usageScroll += delta
-		if m.usageScroll < 0 {
+		m.scrollUsageBy(delta)
+	}
+}
+
+func (m *Model) usageHandlePage(dir int) {
+	if m.usageDashboard {
+		return
+	}
+	_, bodyH := m.usageViewportMetrics()
+	step := bodyH / 2
+	if step < 1 {
+		step = 1
+	}
+	switch m.usageTab {
+	case usageTabModels:
+		m.usageRowSel += dir * step
+		m.clampUsageSelection()
+		m.ensureUsageModelRowVisible()
+	case usageTabSessions:
+		m.usageRowSel += dir * step
+		m.usageScroll = 0
+		m.clampUsageSelection()
+	default:
+		m.scrollUsageBy(dir * step)
+	}
+}
+
+func (m *Model) usageHandleHomeEnd(toEnd bool) {
+	if m.usageDashboard {
+		return
+	}
+	switch m.usageTab {
+	case usageTabModels:
+		if toEnd {
+			m.usageRowSel = len(m.usageFilteredModels()) - 1
+		} else {
+			m.usageRowSel = 0
+		}
+		m.clampUsageSelection()
+		m.ensureUsageModelRowVisible()
+	case usageTabSessions:
+		if toEnd {
+			m.usageRowSel = len(m.usageFilteredSessions()) - 1
+		} else {
+			m.usageRowSel = 0
+		}
+		m.usageScroll = 0
+		m.clampUsageSelection()
+	default:
+		if toEnd {
+			m.usageScroll = m.usageMaxScroll()
+		} else {
 			m.usageScroll = 0
 		}
 	}
