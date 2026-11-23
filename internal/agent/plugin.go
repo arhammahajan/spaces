@@ -63,6 +63,9 @@ type Plugin interface {
 
 	// MCPActivityProvider returns an optional live MCP server activity collector.
 	MCPActivityProvider() MCPActivityProvider
+
+	// UsageReader returns an optional historical token/cost usage scanner.
+	UsageReader() UsageReader
 }
 
 // Spec declares the static metadata and naming rules for an agent plugin.

@@ -32,6 +32,7 @@ type BasePlugin struct {
 	CustomSessionTelemetry    SessionTelemetryProvider
 	CustomQuotaProvider       QuotaProvider
 	CustomMCPActivityProvider MCPActivityProvider
+	CustomUsageReader         UsageReader
 }
 
 func (b *BasePlugin) Spec() Spec {
@@ -119,6 +120,10 @@ func (b *BasePlugin) QuotaProvider() QuotaProvider {
 
 func (b *BasePlugin) MCPActivityProvider() MCPActivityProvider {
 	return b.CustomMCPActivityProvider
+}
+
+func (b *BasePlugin) UsageReader() UsageReader {
+	return b.CustomUsageReader
 }
 
 // ManifestScreenReader evaluates pane viewports using a bundled manifest in
