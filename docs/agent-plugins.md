@@ -11,6 +11,7 @@
   - **Title Extraction (`TitleExtractor`):** agent-specific footer, tab-bar, status-line, or prompt parsers.
   - **Hooks & Arbitration (`HookPolicy`):** OSC 7501 authority and custom hook-vs-screen idle-yield rules (e.g., Antigravity's 10s idle grace for missed `Stop` hooks).
   - **Conversation Store & Log Parsing (`ConversationStore`, `LogParser`):** optional native conversation store readers/searchers and transcript/session log parsers (returning `nil` falls back to the shared `spaces` store).
+  - **Daemon / SSE Watchers (`DaemonWatcher`):** optional agent-native local server/daemon endpoint discovery and live event-stream parsing (e.g., OpenCode's standalone server HTTP SSE watcher in `internal/agent/plugins/opencode_sse*.go`, returning `nil` for agents without a local server stream).
   - **Session Resolution (`SessionResolver`):** CLI argv session ID extraction (flags or positional `resume <id>`), live process FD session discovery, multi-pane CWD title suppression, and restore-time session deduplication.
   - **Launching (`Launcher`):** direct executable binary name and `harness` CLI management flag.
   - **Configuration (`ConfigProvider`):** stowed `$HOME` MCP configuration paths.

@@ -73,8 +73,9 @@ type Model struct {
 	spaces        []model.Space
 	exited        []model.ExitedSpace
 	outcomes      []model.OutcomeEntry
-	spacesSeq     uint64
-	spacesLoading bool
+	spacesSeq        uint64
+	spacesAppliedSeq uint64
+	spacesLoading    bool
 	filter    model.AttentionFilter
 	query     string
 	cursor    int
@@ -475,8 +476,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case convSearchResultMsg:
 		return m.handleConvSearchResult(msg)
 	case spacesMsg:
-		if msg.seq > 0 && msg.seq < m.spacesSeq {
+		if msg.seq > 0 && msg.seq < m.spacesAppliedSeq {
 			return m, nil
+		}
+		if msg.seq > m.spacesAppliedSeq {
+			m.spacesAppliedSeq = msg.seq
 		}
 		m.spacesLoading = false
 		if msg.err != "" {

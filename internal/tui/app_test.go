@@ -767,3 +767,29 @@ func TestTickReloadsInNavigatorNotAgents(t *testing.T) {
 		t.Fatal("expected no tick cmd in agents mode")
 	}
 }
+
+func TestTickDoesNotDropInFlightSpacesLoad(t *testing.T) {
+	fb := &fakeBackend{spaces: testSpaces()}
+	m := New(fb, Options{InitialMode: ModeInbox})
+	if !m.spacesLoading {
+		t.Fatalf("expected initial spacesLoading=true")
+	}
+	initSeq := m.spacesSeq
+
+	// Simulate a refresh tick arriving while the initial LoadSpaces is still in flight.
+	u, cmd := m.Update(tickMsg(time.Now()))
+	m = u.(Model)
+	if cmd == nil {
+		t.Fatal("expected tick cmd")
+	}
+
+	// Delayed initial spacesMsg arrives before the newer tick finishes and must NOT be dropped.
+	u, _ = m.Update(spacesMsg{seq: initSeq, spaces: testSpaces()})
+	m = u.(Model)
+	if m.spacesLoading {
+		t.Fatalf("expected spacesLoading=false after delayed initial spacesMsg")
+	}
+	if len(m.spaces) == 0 {
+		t.Fatal("expected spaces to be populated after delayed spacesMsg")
+	}
+}

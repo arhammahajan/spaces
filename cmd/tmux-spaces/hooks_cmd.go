@@ -5,13 +5,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	hookclient "github.com/arhammahajan/spaces/internal/hooks/client"
 	hookcore "github.com/arhammahajan/spaces/internal/hooks/core"
 	"github.com/arhammahajan/spaces/internal/model"
+	"github.com/arhammahajan/spaces/internal/tmux"
 )
 
 var bindHooksOnce sync.Once
@@ -67,6 +70,8 @@ func bindHookSeams() {
 		hookcore.SpaceHookProfileResolver = func(agentName, sessionID string) string {
 			return hookclient.DiscoverProfile(agentName, "", sessionID)
 		}
+		hookcore.DaemonWatchPaneLister = listLiveDaemonWatchPanes
+		hookcore.DaemonWatchResolver = resolvePluginDaemonWatcher
 		model.OutcomeEnricher = func(o *model.OutcomeEntry) {
 			if o == nil {
 				return
@@ -173,4 +178,110 @@ func maybeRunHookCommand(argv0 string, args []string) (int, bool) {
 		return hookclient.SpaceHooks(rest), true
 	}
 	return 0, false
+}
+
+// listLiveDaemonWatchPanes enumerates live tmux panes whose detected agent
+// provides a DaemonWatcher plugin capability (e.g. OpenCode).
+func listLiveDaemonWatchPanes(ctx context.Context) ([]hookcore.DaemonPaneTarget, error) {
+	client := tmux.DefaultClient()
+	snap, err := client.Snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	spaces := model.BuildSpaces(snap, time.Now().UnixMilli())
+	reg := agent.DefaultRegistry()
+	var targets []hookcore.DaemonPaneTarget
+	for _, sp := range spaces {
+		for _, p := range sp.Panes {
+			if p.IsDead || p.ReturnedToShell || p.PID <= 0 {
+				continue
+			}
+			app := strings.TrimSpace(p.App)
+			if app == "" || reg.DaemonWatcher(app) == nil {
+				continue
+			}
+			canon := reg.CanonicalID(app)
+			if canon == "" {
+				canon = app
+			}
+			targets = append(targets, hookcore.DaemonPaneTarget{
+				Session:       sp.Name,
+				PaneID:        p.ID,
+				PaneNumericID: strconv.Itoa(p.NumericID),
+				PanePID:       p.PID,
+				Agent:         canon,
+				CWD:           p.CWD,
+				Profile:       p.Profile,
+			})
+		}
+	}
+	return targets, nil
+}
+
+// resolvePluginDaemonWatcher adapts an agent.Plugin's optional DaemonWatcher
+// into hookcore.DaemonWatchFn so provider-specific daemon/SSE logic stays
+// encapsulated in the agent plugin.
+func resolvePluginDaemonWatcher(agentName string) hookcore.DaemonWatchFn {
+	watcher := agent.DefaultRegistry().DaemonWatcher(agentName)
+	if watcher == nil {
+		return nil
+	}
+	return func(ctx context.Context, target hookcore.DaemonPaneTarget, emit func(hookcore.DaemonEvent)) error {
+		return watcher.Watch(ctx, agent.DaemonWatchTarget{
+			Session:  target.Session,
+			PaneID:   target.PaneID,
+			PanePID:  target.PanePID,
+			CWD:      target.CWD,
+			Profile:  target.Profile,
+			Endpoint: target.Endpoint,
+		}, func(ev agent.DaemonEvent) {
+			if emit == nil {
+				return
+			}
+			out := hookcore.DaemonEvent{
+				Agent:      ev.Agent,
+				App:        ev.App,
+				Source:     ev.Source,
+				Event:      ev.Event,
+				RawEvent:   ev.RawEvent,
+				State:      ev.State,
+				Kind:       ev.Kind,
+				Text:       ev.Text,
+				Title:      ev.Title,
+				Prompt:     ev.Prompt,
+				Tool:       ev.Tool,
+				ToolInput:  ev.ToolInput,
+				ToolOutput: ev.ToolOutput,
+				Reply:      ev.Reply,
+				Model:      ev.Model,
+				SessionID:  ev.SessionID,
+				CWD:        ev.CWD,
+				Profile:    ev.Profile,
+				TsMs:       ev.TsMs,
+			}
+			if ev.Usage != nil {
+				out.Usage = &hookcore.Usage{
+					InputTokens:      ev.Usage.InputTokens,
+					OutputTokens:     ev.Usage.OutputTokens,
+					ReasoningTokens:  ev.Usage.ReasoningTokens,
+					CacheReadTokens:  ev.Usage.CacheReadTokens,
+					CacheWriteTokens: ev.Usage.CacheWriteTokens,
+					CostUSD:          ev.Usage.CostUSD,
+				}
+			}
+			if ev.Child != nil {
+				out.Child = &hookcore.DaemonChildEvent{
+					ID:      ev.Child.ID,
+					Type:    ev.Child.Type,
+					State:   ev.Child.State,
+					Outcome: ev.Child.Outcome,
+					Text:    ev.Child.Text,
+					SinceMs: ev.Child.SinceMs,
+					TsMs:    ev.Child.TsMs,
+					EndedMs: ev.Child.EndedMs,
+				}
+			}
+			emit(out)
+		})
+	}
 }

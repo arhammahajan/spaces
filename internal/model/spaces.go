@@ -99,10 +99,25 @@ func convertHookChildren(in []hookcore.Child) []HookChild {
 	return out
 }
 
+func convertHookUsage(u *hookcore.Usage) *HookUsage {
+	if u == nil {
+		return nil
+	}
+	return &HookUsage{
+		InputTokens:      u.InputTokens,
+		OutputTokens:     u.OutputTokens,
+		ReasoningTokens:  u.ReasoningTokens,
+		CacheReadTokens:  u.CacheReadTokens,
+		CacheWriteTokens: u.CacheWriteTokens,
+		CostUSD:          u.CostUSD,
+	}
+}
+
 func convertHookSummary(s hookcore.PaneSummary) HookSummary {
 	return HookSummary{
 		Agent:           s.Agent,
 		App:             s.App,
+		Source:          s.Source,
 		State:           s.State,
 		Kind:            s.Kind,
 		Event:           s.Event,
@@ -114,6 +129,7 @@ func convertHookSummary(s hookcore.PaneSummary) HookSummary {
 		Model:           s.Model,
 		SessionID:       s.SessionID,
 		CWD:             s.CWD,
+		Usage:           convertHookUsage(s.Usage),
 		ChildCount:      s.ChildCount,
 		Background:      s.Background,
 		FiniteActive:    s.FiniteActive,

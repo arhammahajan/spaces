@@ -85,7 +85,7 @@ and config provenance.
 | TERM-5 | terminal | iTerm2 Python plugin and escape-sequence baseline for Ghostty and Foot | Deferred | §9.6 |
 | TEL-1 | telemetry | Model router session-correlated turn and usage telemetry | Proposed | §10.2 |
 | TEL-2 | telemetry | Local OpenTelemetry OTLP receiver in `spacecore` | Proposed | §10.3 |
-| TEL-3 | telemetry | Agent-native daemon and SSE event watchers | Proposed | §10.5 |
+| TEL-3 | telemetry | Agent-native daemon and SSE event watchers (OpenCode plugin SSE watcher shipped) | Partial | §10.4 |
 | TEL-4 | telemetry | Unified passive telemetry envelope and source precedence | Proposed | §10.1 |
 | MUX-1 | integration | Router-backed profiles with native status in TUIOS | Proposed | §12 |
 | LOG-1 | logstore | Shared operational log event schema, SQLite store (`logs.db`), and incremental cursor sync | Proposed | §11.1 |

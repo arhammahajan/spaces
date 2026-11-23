@@ -25,7 +25,7 @@ func openReadOnlySQLite(path string) (*sql.DB, error) {
 	}
 	slashed := filepath.ToSlash(path)
 	escaped := strings.ReplaceAll(strings.ReplaceAll(slashed, "?", "%3F"), "#", "%23")
-	uri := fmt.Sprintf("file:%s?mode=ro&_busy_timeout=2000", escaped)
+	uri := fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(500)&_pragma=query_only(1)", escaped)
 	return sql.Open("sqlite", uri)
 }
 
@@ -313,9 +313,41 @@ func loadSQLiteSessionSummaries(ctx context.Context, db *sql.DB) map[string]sqli
 	}
 
 	if sqliteTableExists(ctx, db, "session_message") {
-		rows, err := db.QueryContext(ctx, `
-			SELECT session_id, type, data
+		// Count messages per session without reading large assistant/tool JSON blobs.
+		if countRows, err := db.QueryContext(ctx, `
+			SELECT session_id, COUNT(*)
 			FROM session_message
+			WHERE lower(type) IN ('user', 'assistant')
+			GROUP BY session_id
+		`); err == nil {
+			defer countRows.Close()
+			for countRows.Next() {
+				if ctx.Err() != nil {
+					break
+				}
+				var (
+					sidNull sql.NullString
+					cnt     int
+				)
+				if err := countRows.Scan(&sidNull, &cnt); err != nil {
+					continue
+				}
+				sid := strings.TrimSpace(sidNull.String)
+				if sid == "" {
+					continue
+				}
+				sum := out[sid]
+				sum.msgCount = cnt
+				out[sid] = sum
+			}
+		}
+
+		// Read only user messages to extract first/last prompt text (avoids scanning
+		// hundreds of MB of assistant tool outputs on every popup refresh).
+		rows, err := db.QueryContext(ctx, `
+			SELECT session_id, data
+			FROM session_message
+			WHERE lower(type) = 'user'
 			ORDER BY session_id ASC, seq ASC, time_created ASC
 		`)
 		if err == nil {
@@ -326,10 +358,9 @@ func loadSQLiteSessionSummaries(ctx context.Context, db *sql.DB) map[string]sqli
 				}
 				var (
 					sidNull sql.NullString
-					typNull sql.NullString
 					dataStr sql.NullString
 				)
-				if err := rows.Scan(&sidNull, &typNull, &dataStr); err != nil {
+				if err := rows.Scan(&sidNull, &dataStr); err != nil {
 					continue
 				}
 				sid := strings.TrimSpace(sidNull.String)
@@ -341,8 +372,10 @@ func loadSQLiteSessionSummaries(ctx context.Context, db *sql.DB) map[string]sqli
 					continue
 				}
 				sum := out[sid]
-				sum.msgCount++
-				if strings.EqualFold(strings.TrimSpace(typNull.String), "user") && sum.firstUser == "" && !isBoilerplateUserMessage(text) {
+				if sum.msgCount == 0 {
+					sum.msgCount = 1
+				}
+				if sum.firstUser == "" && !isBoilerplateUserMessage(text) {
 					sum.firstUser = text
 				}
 				sum.lastText = text
