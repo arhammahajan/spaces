@@ -30,6 +30,9 @@ type TelemetryContext struct {
 	TokensPerMin   float64               `json:"tokens_per_min"`
 	RateHistory    []float64             `json:"rate_history,omitempty"` // bounded recent token deltas
 	TotalTokens    int64                 `json:"total_tokens"`
+	TotalCostUSD   float64               `json:"total_cost_usd,omitempty"`
+	TotalMemKB     int64                 `json:"total_mem_kb,omitempty"`
+	AvgContextPct  float64               `json:"avg_context_pct,omitempty"`
 	ActiveSessions int                   `json:"active_sessions"`
 	Sessions       []ContextSessionEntry `json:"sessions,omitempty"`
 }
@@ -67,6 +70,7 @@ type ProjectSummary struct {
 	IsClean       bool   `json:"is_clean,omitempty"`
 	SessionCount  int    `json:"session_count"`
 	ActiveCount   int    `json:"active_count,omitempty"`
+	WorktreeCount int    `json:"worktree_count,omitempty"`
 }
 
 // SessionRow is the normalized per-session telemetry record used by Panels 3 (Tokens) and 6 (Sessions),
