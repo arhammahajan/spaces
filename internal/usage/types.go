@@ -200,10 +200,55 @@ type PlanProjection struct {
 	Status             PlanStatus `json:"status"`
 }
 
+// LimitPace classifies spend pace relative to elapsed window time.
+type LimitPace string
+
+const (
+	LimitPaceAhead LimitPace = "ahead"
+	LimitPaceOn    LimitPace = "on"
+	LimitPaceUnder LimitPace = "under"
+)
+
+// LimitAccount is a normalized, identity-key-deduplicated account/profile usage
+// limit snapshot ready for display in the Plan tab.
+type LimitAccount struct {
+	IdentityKey  string                       `json:"identity_key"`
+	Provider     string                       `json:"provider"`
+	Profiles     []string                     `json:"profiles,omitempty"`
+	DisplayName  string                       `json:"display_name,omitempty"`
+	Email        string                       `json:"email,omitempty"`
+	Plan         string                       `json:"plan,omitempty"`
+	WorkspaceID  string                       `json:"workspace_id,omitempty"`
+	CheckedAt    string                       `json:"checked_at"`
+	Windows      []agent.UsageLimitWindow     `json:"windows"`
+	ResetCredits *agent.ResetCredits          `json:"reset_credits,omitempty"`
+	Unavailable  *agent.UsageLimitUnavailable `json:"unavailable,omitempty"`
+	Source       string                       `json:"source,omitempty"`
+	Stale        bool                         `json:"stale,omitempty"`
+}
+
+// LimitNotice records a non-fatal probe failure or status message for a
+// provider/profile limit check.
+type LimitNotice struct {
+	Provider string `json:"provider"`
+	Profile  string `json:"profile,omitempty"`
+	Message  string `json:"message"`
+}
+
+// LimitsSnapshot holds the normalized per-profile & per-harness usage limits
+// cached in ~/.harness/usage-limits-cache.json.
+type LimitsSnapshot struct {
+	Version     int            `json:"version"`
+	CheckedAtMs int64          `json:"checked_at_ms"`
+	Accounts    []LimitAccount `json:"accounts,omitempty"`
+	Notices     []LimitNotice  `json:"notices,omitempty"`
+}
+
 // BurndownSummary combines live provider quotas, local 5h blocks, 5h history,
-// and monthly burndown projections.
+// per-profile plan limits, and monthly burndown projections.
 type BurndownSummary struct {
 	Quotas          []agent.QuotaInfo `json:"quotas,omitempty"`
+	Limits          LimitsSnapshot    `json:"limits,omitempty"`
 	ActiveBlocks    []ActiveBlock     `json:"active_blocks,omitempty"`
 	Projection      PlanProjection    `json:"projection"`
 	FiveHourHistory []FiveHourBucket  `json:"five_hour_history,omitempty"`
