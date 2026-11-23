@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -10,6 +11,28 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// ConversationLaunchCommand reads launch metadata without scanning transcripts.
+func ConversationLaunchCommand(ctx context.Context, agent, sessionID string) []string {
+	canon := CanonicalConversationAgent(agent)
+	if canon == "" || sessionID == "" {
+		return nil
+	}
+	db, err := openConversationOverlayDB(ConversationOverlayPathFn())
+	if err != nil || db == nil {
+		return nil
+	}
+	defer db.Close()
+
+	var raw string
+	err = db.QueryRowContext(ctx,
+		"SELECT launch_cmd_json FROM conversation_overlay WHERE agent = ? AND session_id = ?",
+		canon, sessionID).Scan(&raw)
+	if err != nil {
+		return nil
+	}
+	return decodeLaunchCmdJSON(raw)
+}
 
 const conversationOverlaySchema = `
 CREATE TABLE IF NOT EXISTS conversation_overlay (

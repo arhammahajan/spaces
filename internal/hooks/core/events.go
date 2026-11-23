@@ -111,6 +111,10 @@ func NormalizeEvent(agent, rawEvent string, payload map[string]any, env map[stri
 	if event == "" {
 		return nil
 	}
+	if agent == "codex" && (event == "subagent_start" || event == "subagent_stop") &&
+		firstStr(payload, "agent_id", "agentId") == "" {
+		return nil
+	}
 	state, kind, ok := EventState(event, payload)
 	if !ok {
 		return nil
@@ -563,7 +567,10 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 			parseBoolField(event, "background_authoritative") ||
 			parseBoolField(event, "crons_authoritative") ||
 			parseBoolField(event, "finite_authoritative"))
-		if lastEvent == evEvent && lastAgent == evAgent && d <= DedupeMS && !distinctChild && !hasChildUpdates && !stopStateChange {
+		newSession := evChildID == "" && stringKey(event["session_id"]) != "" &&
+			stringKey(event["session_id"]) != stringKey(record["session_id"])
+		if lastEvent == evEvent && lastAgent == evAgent && d <= DedupeMS &&
+			!distinctChild && !hasChildUpdates && !stopStateChange && !newSession {
 			return record, false
 		}
 	}
@@ -571,6 +578,9 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 	if child, ok := event["child"].(map[string]any); ok && child != nil {
 		prevActiveFinite, _ := collectBackgroundWork(record)
 		children, _ := record["children"].([]any)
+		if stringKey(event["agent"]) == "codex" && !codexChildEventApplies(children, child, stringKey(event["event"])) {
+			return record, false
+		}
 		record["children"] = mergeChildEntry(children, child, now)
 		childID := stringKey(child["id"])
 		childState := stringKey(child["state"])
@@ -654,12 +664,15 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 	if eventName == "prompt" || eventName == "session_start" || (eventName == "pre_invocation" && previousState != "working") {
 		record["turn_started_ms"] = now
 	}
-	if eventName == "session_start" || eventName == "session_end" {
+	codex := stringKey(event["agent"]) == "codex"
+	oldSID, newSID := stringKey(record["session_id"]), stringKey(event["session_id"])
+	newCodexThread := codex && oldSID != "" && newSID != "" && oldSID != newSID
+	if eventName == "session_start" || eventName == "session_end" || newCodexThread {
 		record["children"] = []any{}
 		record["background_tasks"] = []any{}
 		record["waiting_on"] = nil
 		record["reply"] = nil
-		if eventName == "session_start" {
+		if eventName == "session_start" || newCodexThread {
 			if prevSID, _ := record["session_id"].(string); prevSID != "" {
 				if newSID, _ := event["session_id"].(string); newSID != "" && newSID != prevSID {
 					record["title"] = nil
@@ -672,6 +685,16 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 	if eventName == "prompt" || (eventName == "pre_invocation" && previousState != "working") {
 		record["reply"] = nil
 		record["waiting_on"] = nil
+		if codex {
+			children, _ := record["children"].([]any)
+			active := make([]any, 0, len(children))
+			for _, raw := range children {
+				if child, ok := raw.(map[string]any); ok && isActiveBgState(stringKey(child["state"])) {
+					active = append(active, child)
+				}
+			}
+			record["children"] = active
+		}
 	}
 
 	// Fold parent tool-level child updates (e.g. invoke_subagent / manage_subagents).
@@ -806,6 +829,18 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 	return record, true
 }
 
+func codexChildEventApplies(children []any, child map[string]any, event string) bool {
+	if event == "subagent_start" {
+		return true
+	}
+	for _, raw := range children {
+		if known, ok := raw.(map[string]any); ok && stringKey(known["id"]) == stringKey(child["id"]) {
+			return event == "subagent_stop" || isActiveBgState(stringKey(known["state"]))
+		}
+	}
+	return false
+}
+
 // recordIsStale mirrors _record_is_stale.
 func recordIsStale(record map[string]any, now int64) bool {
 	state, _ := record["state"].(string)
@@ -860,6 +895,19 @@ func PruneStore(store map[string]any, now int64) map[string]any {
 					cp := make(map[string]any, len(rec))
 					for k, val := range rec {
 						cp[k] = val
+					}
+					if stringKey(rec["agent"]) == "codex" {
+						if started := toInt64(rec["turn_started_ms"]); started > 0 {
+							children, _ := rec["children"].([]any)
+							var current []any
+							for _, raw := range children {
+								child, ok := raw.(map[string]any)
+								if ok && (isActiveBgState(stringKey(child["state"])) || toInt64(child["ended_ms"]) >= started) {
+									current = append(current, child)
+								}
+							}
+							cp["children"] = current
+						}
 					}
 					kept[pane] = cp
 				}

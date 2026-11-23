@@ -52,6 +52,13 @@ type convItem struct {
 	Hit             *model.ConversationSearchHit
 }
 
+func (it convItem) spaceName() string {
+	if it.Live != nil {
+		return it.Live.Space
+	}
+	return strings.TrimSpace(it.Conv.Space)
+}
+
 type convLayout struct {
 	topY         int
 	bodyHeight   int
@@ -1473,18 +1480,9 @@ func (m Model) renderConvPrimaryRow(it convItem, selected bool, width int) strin
 		innerW = 10
 	}
 
-	// Status / live icon.
 	icon := "·"
 	iconColor := ColorOverlay0
-	iconBold := false
-	if it.Live != nil {
-		icon = it.Live.Status.Icon()
-		iconColor = StatusColor(it.Live.Status)
-		if it.Live.Status == model.StatusIdle {
-			iconColor = ColorTeal
-		}
-		iconBold = true
-	} else {
+	if it.Live == nil {
 		switch strings.ToLower(strings.TrimSpace(it.Conv.LastOutcome)) {
 		case "done":
 			icon = "✓"
@@ -1513,13 +1511,7 @@ func (m Model) renderConvPrimaryRow(it convItem, selected bool, width int) strin
 	harnessBadge := st(ColorOverlay0, false).Render(truncate(baseApp, 14))
 
 	var spaceBadge string
-	if it.Live != nil {
-		if it.Live.Status == model.StatusNeedsYou {
-			spaceBadge = st(ColorLavender, true).Render("● " + truncate(it.Live.Space, 14))
-		} else {
-			spaceBadge = st(ColorTeal, selected).Render("live·" + truncate(it.Live.Space, 12))
-		}
-	} else if sp := strings.TrimSpace(it.Conv.Space); sp != "" {
+	if sp := it.spaceName(); sp != "" {
 		spaceBadge = st(ColorOverlay0, false).Render(truncate(sp, 14))
 	}
 
@@ -1603,7 +1595,7 @@ func (m Model) renderConvPrimaryRow(it convItem, selected bool, width int) strin
 
 	var lb strings.Builder
 	lb.WriteString(st(bg, false).Render("  "))
-	lb.WriteString(st(iconColor, iconBold).Render(icon))
+	lb.WriteString(st(iconColor, false).Render(icon))
 	lb.WriteString(st(bg, false).Render("  "))
 
 	titleBudget := maxLeft - indentAndIconW
@@ -1747,7 +1739,7 @@ func (m Model) renderConvDetailLines(items []convItem, width, maxLines int) []st
 	it := items[m.selected]
 	c := it.Conv
 
-	// Line 1: Title · Folder · Branch · Space/Live · Harness (no profile) · Model · Messages
+	// Line 1: Title · Folder · Branch · Space · Harness · Model · Messages
 	var l1 []string
 	if title := singleLineText(strings.TrimSpace(c.Title)); title != "" {
 		l1 = append(l1, st(ColorText, true).Render(truncate(title, 48)))
@@ -1758,11 +1750,7 @@ func (m Model) renderConvDetailLines(items []convItem, width, maxLines int) []st
 	if br := strings.TrimSpace(c.Branch); br != "" {
 		l1 = append(l1, st(ColorTeal, false).Render("⎇ "+br))
 	}
-	if it.Live != nil {
-		l1 = append(l1, st(StatusColor(it.Live.Status), it.Live.Status.IsAttention()).Render(
-			it.Live.Status.Icon()+" live in "+it.Live.Space,
-		))
-	} else if sp := strings.TrimSpace(c.Space); sp != "" {
+	if sp := it.spaceName(); sp != "" {
 		l1 = append(l1, st(ColorLavender, false).Render("space "+sp))
 	}
 	baseApp := c.DisplayApp()

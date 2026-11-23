@@ -156,6 +156,11 @@ func cmdShim(args []string, env Env) int {
 
 	// Prime the pane so it stays visible while idle, then run the child.
 	if pane := env.Getenv("TMUX_PANE"); pane != "" && env.Client != nil {
+		if plugin, ok := agent.DefaultRegistry().ResolveRuntime(rawAgent); ok && plugin.Spec().ID == "codex" {
+			if id := plugin.SessionResolver().ExtractSessionIDFromArgs(childArgs); id != "" {
+				_ = env.Client.SetPaneOption(pane, "@spaces_resume_session", id)
+			}
+		}
 		var launchBase []string
 		if isDirectProfile {
 			canon := agent.DefaultRegistry().CanonicalID(rawAgent)

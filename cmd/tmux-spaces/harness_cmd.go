@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/arhammahajan/spaces/internal/agent"
+	"github.com/arhammahajan/spaces/internal/cli"
 	"github.com/arhammahajan/spaces/internal/harness/agents"
 	"github.com/arhammahajan/spaces/internal/harness/doctor"
 	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
@@ -21,9 +22,89 @@ import (
 	"github.com/arhammahajan/spaces/internal/harness/profiles"
 	"github.com/arhammahajan/spaces/internal/harness/routerctl"
 	usageagg "github.com/arhammahajan/spaces/internal/harness/usage"
+	hookclient "github.com/arhammahajan/spaces/internal/hooks/client"
+	"github.com/arhammahajan/spaces/internal/model"
 )
 
 const harnessProgName = "spaces"
+const resumeAccessEnv = "SPACES_RESUME_ACCESS"
+
+func runHarnessResume(argv0 string, args []string) int {
+	if len(args) < 2 {
+		return failHarnessUsage("resume requires an access level and a launch command")
+	}
+	if err := os.Setenv(resumeAccessEnv, args[0]); err != nil {
+		return failHarnessUsage("%v", err)
+	}
+	defer os.Unsetenv(resumeAccessEnv)
+	if code, handled := maybeRunHarnessCommand(argv0, args[1:]); handled {
+		return code
+	}
+	return failHarnessUsage("invalid resume command: %s", args[1])
+}
+
+func preselectHarnessAccess(spec *harnessenv.LaunchSpec, args []string) error {
+	level, resumed := os.LookupEnv(resumeAccessEnv)
+	if !resumed && os.Getenv("HARNESS_AGENT") != "" {
+		return nil
+	}
+	plugin, ok := agent.DefaultRegistry().ResolveRuntime(spec.Agent)
+	if ok && level == "" {
+		sessionID := plugin.SessionResolver().ExtractSessionIDFromArgs(args)
+		if sessionID != "" {
+			resumed = true
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, level, _ = agent.HarnessLaunchArgs(model.ConversationLaunchCommand(ctx, spec.Agent, sessionID))
+		} else {
+			native := plugin.Spec()
+			for _, arg := range args {
+				if arg == "--" {
+					break
+				}
+				if arg == "--continue" || (native.ResumeSubcommand != "" && arg == native.ResumeSubcommand) ||
+					(native.ResumeFlag != "" && (arg == native.ResumeFlag || strings.HasPrefix(arg, native.ResumeFlag+"="))) {
+					resumed = true
+					break
+				}
+			}
+		}
+	}
+	if resumed {
+		agents.ApplyResumeAccess(spec, level)
+		return nil
+	}
+	return agents.PreselectAccessLevel(spec)
+}
+
+func chooseHarnessAccess(spec *harnessenv.LaunchSpec, args []string) error {
+	if err := preselectHarnessAccess(spec, args); err != nil {
+		return err
+	}
+	return agents.PromptAccessLevelForLaunch(spec)
+}
+
+func recordHarnessLaunch(spec harnessenv.LaunchSpec, profile string, args []string) {
+	if os.Getenv("TMUX_PANE") == "" {
+		return
+	}
+	level := spec.AccessLevel
+	if level == "" {
+		if os.Getenv("HARNESS_AGENT") != "" || len(agents.AccessLevels(spec.Agent)) == 0 {
+			return
+		}
+		level = "default"
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return
+	}
+	base := cli.StripResumeArgs(spec.Agent, append([]string{self}, args...))
+	cmd := agent.HarnessResumeCommand(self, level, agent.HarnessProfileCommand(spec.Agent, profile, base[1:]...)...)
+	if raw, err := json.Marshal(cmd); err == nil {
+		hookclient.SetTmuxPaneOption("", "@spaces_launch_cmd", string(raw))
+	}
+}
 
 // isSpacesSubcommand reports whether cmd is a built-in spaces/tmux-spaces
 // subcommand (or hook subcommand) that must never be shadowed by HARNESS_AGENT
@@ -233,7 +314,8 @@ func formatAvailableProfiles(canonical string, paths harnessenv.Paths) string {
 }
 
 func runHarnessAgentLaunch(args []string) int {
-	if envAgent := os.Getenv("HARNESS_AGENT"); envAgent != "" {
+	_, resumed := os.LookupEnv(resumeAccessEnv)
+	if envAgent := os.Getenv("HARNESS_AGENT"); envAgent != "" && !resumed {
 		canonical, ok := agents.Normalize(envAgent)
 		if !ok {
 			return failHarnessUsage("unknown agent: %s", envAgent)
@@ -287,7 +369,7 @@ func runHarnessBareAgent(canonical string, paths harnessenv.Paths, agentArgs []s
 			return 1
 		}
 	}
-	if err := agents.ApplyAccessLevel(&spec); err != nil {
+	if err := chooseHarnessAccess(&spec, agentArgs); err != nil {
 		if errors.Is(err, agents.ErrAccessCancelled) {
 			fmt.Fprintln(os.Stderr, "spaces: launch cancelled")
 			return 0
@@ -300,6 +382,7 @@ func runHarnessBareAgent(canonical string, paths harnessenv.Paths, agentArgs []s
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
 	}
+	recordHarnessLaunch(spec, profile, agentArgs)
 	return harnessLaunchAgent(resolved, canonical, profile)
 }
 
@@ -334,7 +417,7 @@ func launchHarnessDefaultProfile(resolution profiles.Resolution, paths harnessen
 	spec := profiles.LaunchSpecFromPaths(resolution, paths)
 	router := harnessenv.RouterEnv(paths)
 	if describe {
-		if err := agents.PreselectAccessLevel(&spec); err != nil {
+		if err := preselectHarnessAccess(&spec, rest); err != nil {
 			fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 			return 2
 		}
@@ -350,7 +433,7 @@ func launchHarnessDefaultProfile(resolution profiles.Resolution, paths harnessen
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
 	}
-	if err := agents.ApplyAccessLevel(&spec); err != nil {
+	if err := chooseHarnessAccess(&spec, rest); err != nil {
 		if errors.Is(err, agents.ErrAccessCancelled) {
 			fmt.Fprintln(os.Stderr, "spaces: launch cancelled")
 			return 0
@@ -363,13 +446,14 @@ func launchHarnessDefaultProfile(resolution profiles.Resolution, paths harnessen
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
 	}
+	recordHarnessLaunch(spec, resolution.Name, rest)
 	return harnessLaunchAgent(resolved, spec.Agent, resolution.Name)
 }
 
 func launchHarnessResolvedProfile(resolution profiles.Resolution, paths harnessenv.Paths, rest []string, describe bool) int {
 	spec := profiles.LaunchSpecFromPaths(resolution, paths)
 	router := harnessenv.RouterEnv(paths)
-	if err := agents.PreselectAccessLevel(&spec); err != nil {
+	if err := preselectHarnessAccess(&spec, rest); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 2
 	}
@@ -399,12 +483,14 @@ func launchHarnessResolvedProfile(resolution profiles.Resolution, paths harnesse
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
 	}
+	recordHarnessLaunch(spec, resolution.Name, rest)
 	return harnessLaunchAgent(resolved, spec.Agent, resolution.Name)
 }
 
 func launchHarnessAgent(resolved agents.Resolved, _, profile string) int {
 	profile = strings.TrimSpace(profile)
 	resolved.Env = withProfileEnv(resolved.Env, profile)
+	resolved.UnsetEnv = append(resolved.UnsetEnv, resumeAccessEnv)
 	if profile == "" {
 		resolved.UnsetEnv = append(resolved.UnsetEnv, "HARNESS_PROFILE")
 	}
@@ -459,11 +545,7 @@ func runHarnessChild(agentName, profile string, extraArgs []string) int {
 			return 1
 		}
 	}
-	if err := agents.ApplyAccessLevel(&spec); err != nil {
-		if errors.Is(err, agents.ErrAccessCancelled) {
-			fmt.Fprintln(os.Stderr, "spaces: launch cancelled")
-			return 0
-		}
+	if err := preselectHarnessAccess(&spec, extraArgs); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 2
 	}
@@ -477,6 +559,7 @@ func runHarnessChild(agentName, profile string, extraArgs []string) int {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", harnessProgName, err)
 		return 1
 	}
+	recordHarnessLaunch(spec, resolution.Name, extraArgs)
 	resolved.Env = withProfileEnv(resolved.Env, strings.TrimSpace(resolution.Name))
 	childEnv := agents.BuildChildEnv(os.Environ(), resolved)
 	bin, err := agents.ResolveBinary(resolved.Binary, resolved.PathPrepend)

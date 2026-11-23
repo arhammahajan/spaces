@@ -262,6 +262,10 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 								goto skipHook
 							}
 						}
+						if canonicalApp(pane.App) == "codex" && pane.ResumeSession != "" && h.SessionID != "" &&
+							pane.ResumeSession != h.SessionID {
+							goto skipHook
+						}
 						hc := h
 						hook = &hc
 						pane.Hook = &hc
@@ -286,6 +290,7 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 			clearDone := false
 			reading, hasReading := readings[pane.ID]
 			visibleBlocker := false
+			codexTurnEnded := false
 			prevNewlyDoneLen := len(a.newlyDone)
 			if hasReading {
 				if reading.App != "" && pane.App != "" &&
@@ -294,7 +299,8 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 					hasReading = false
 				} else {
 					visibleBlocker = reading.VisibleBlocker
-					status, clearDone = a.screenStatus(pane, reading, base, nowMs)
+					codexTurnEnded = codexIdleCompletesTurn(pane, reading, nowMs)
+					status, clearDone = a.screenStatus(pane, reading, base, nowMs, codexTurnEnded)
 					if st := strings.TrimSpace(reading.Title); st != "" {
 						pane.ScreenTitle = st
 					}
@@ -336,7 +342,7 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 				hookSilence := saturatingSub(nowMs, hook.TsMs)
 				screenFinishedNewerTurn := !isDaemonSSE && len(a.newlyDone) > prevNewlyDoneLen &&
 					status == StatusDone &&
-					pane.BaseAgeMs > 0 && pane.BaseAgeMs < hookSilence
+					(codexTurnEnded || (pane.BaseAgeMs > 0 && pane.BaseAgeMs < hookSilence))
 				var policy agent.HookPolicy = agent.BaseHookPolicy{StaleLocalCmdMs: hookWorkingStaleMs}
 				if p, ok := agent.DefaultRegistry().ResolveRuntime(pane.App); ok {
 					policy = p.HookPolicy()
@@ -405,7 +411,7 @@ func (a *Arbitrator) Apply(spaces []Space, hooks *HookSnapshot, readings map[str
 
 // screenStatus folds one screen reading over the base status and reports
 // the resulting status plus whether Done memory should be cleared.
-func (a *Arbitrator) screenStatus(pane *Pane, reading ScreenReading, base Status, nowMs int64) (Status, bool) {
+func (a *Arbitrator) screenStatus(pane *Pane, reading ScreenReading, base Status, nowMs int64, codexTurnEnded bool) (Status, bool) {
 	if reading.SkipStateUpdate {
 		return base, false
 	}
@@ -424,7 +430,7 @@ func (a *Arbitrator) screenStatus(pane *Pane, reading ScreenReading, base Status
 		}
 		return StatusDone, true
 	}
-	if authorityActive {
+	if authorityActive && !codexTurnEnded {
 		// A complete live lifecycle owns working/idle.
 		return base, false
 	}
@@ -449,7 +455,7 @@ func (a *Arbitrator) screenStatus(pane *Pane, reading ScreenReading, base Status
 			return base, false
 		}
 		wasWorking := base == StatusWorking || base == StatusNeedsYou ||
-			a.prev[pane.ID] == "working"
+			a.prev[pane.ID] == "working" || codexTurnEnded
 		_, hasDone := a.done[pane.ID]
 		switch {
 		case wasWorking:
@@ -464,4 +470,22 @@ func (a *Arbitrator) screenStatus(pane *Pane, reading ScreenReading, base Status
 	default:
 		return base, false
 	}
+}
+
+func codexIdleCompletesTurn(pane *Pane, reading ScreenReading, nowMs int64) bool {
+	const graceMs = 10_000
+	if canonicalApp(pane.App) != "codex" || reading.State != "idle" ||
+		!reading.VisibleIdle || reading.VisibleWorking || reading.VisibleBlocker {
+		return false
+	}
+	if pane.BaseStatus == StatusWorking && pane.BaseAgeMs <= graceMs {
+		return false
+	}
+	hook := pane.Hook
+	if hook != nil && (hook.HasActiveFiniteWork() ||
+		(hook.State == "working" && saturatingSub(nowMs, hook.TsMs) <= graceMs)) {
+		return false
+	}
+	return pane.BaseStatus == StatusWorking ||
+		(pane.BaseStatus == StatusIdle && hook != nil && hook.State == "working")
 }

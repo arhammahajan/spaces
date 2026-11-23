@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -216,7 +217,7 @@ const paneFormat = "#{session_name}\x1f#{window_id}\x1f#{window_index}\x1f" +
 	"#{window_silence_flag}\x1f#{@spaces_state}\x1f#{@spaces_app}\x1f" +
 	"#{@spaces_kind}\x1f#{@spaces_msg}\x1f#{@spaces_ts}\x1f" +
 	"#{pane_index}\x1f#{@spaces_resume_session}\x1f#{@spaces_profile}\x1f#{@spaces_source}\x1f#{@spaces_title}\x1f" +
-	"#{pane_width}\x1f#{pane_height}\x1f#{pane_in_mode}\x1f#{pane_synchronized}\x1f#{pane_start_command}\x1f#{pane_dead_status}"
+	"#{pane_width}\x1f#{pane_height}\x1f#{pane_in_mode}\x1f#{pane_synchronized}\x1f#{pane_start_command}\x1f#{pane_dead_status}\x1f#{@spaces_launch_cmd}"
 
 // paneFieldCount is the minimum number of \x1f-separated fields ListPanes expects.
 const paneFieldCount = 20
@@ -282,6 +283,12 @@ func parsePaneRecord(line string) (Pane, bool) {
 	}
 	if len(fields) > 30 {
 		p.DeadStatus = parseTmuxInt(fields[30])
+	}
+	if len(fields) > 31 && fields[31] != "" {
+		var command []string
+		if json.Unmarshal([]byte(fields[31]), &command) == nil {
+			p.LaunchCommand = command
+		}
 	}
 	return p, true
 }

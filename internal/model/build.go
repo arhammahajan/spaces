@@ -161,6 +161,7 @@ func buildPane(p tmux.Pane, nowMs int64) Pane {
 		ConversationTitle: convTitle,
 		BaseConvTitle:     convTitle,
 		ResumeSession:     resumeSession,
+		LaunchCommand:     p.LaunchCommand,
 		Profile:           profile,
 		Command:           p.CurrentCommand,
 		StartCommand:      p.StartCommand,

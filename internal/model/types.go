@@ -743,6 +743,7 @@ type Pane struct {
 	Command           string // #{pane_current_command}
 	StartCommand      string // #{pane_start_command}
 	ForegroundCmd     string // deepest live child cmdline from /proc (when available)
+	LaunchCommand     []string
 	ChildProcessCount int    // live descendant process count under PID
 	App               string // resolved display app name
 	Status            Status

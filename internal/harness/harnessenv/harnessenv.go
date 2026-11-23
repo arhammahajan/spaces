@@ -257,6 +257,7 @@ func DotfilesRoot(paths Paths) (string, bool) {
 // Binary replaces the agent's default executable.
 type LaunchSpec struct {
 	Agent       string
+	AccessLevel string
 	DisplayName string
 	Env         map[string]string
 	PrependArgs []string

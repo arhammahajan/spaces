@@ -3,10 +3,8 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -29,12 +27,12 @@ func TestParseConversationsOptions(t *testing.T) {
 }
 
 func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
-	// Harness-managed agent with explicit profile launches directly in-process via __shim.
+	// The shim launches the saved profile in resume mode.
 	cmd := buildConversationOpenCommand("claude", "work", "sess-123", "/repo", "Fix retries", nil, "/usr/local/bin/tmux-spaces")
 	joined := strings.Join(cmd, " ")
 	for _, want := range []string{
 		"/bin/sh -c",
-		"/usr/local/bin/tmux-spaces __shim --profile work claude-code -- --resume sess-123",
+		"/usr/local/bin/tmux-spaces __shim --profile work claude-code /usr/local/bin/tmux-spaces __resume-access '' claude profile work --resume sess-123",
 		"status clear",
 		`exec "${SHELL:-/bin/sh}"`,
 	} {
@@ -49,7 +47,7 @@ func TestBuildConversationOpenCommandHarnessAndFallback(t *testing.T) {
 	// Harness-managed agent with empty profile defaults to --profile default.
 	cmdDefault := buildConversationOpenCommand("claude", "", "sess-456", "/repo", "Fix retries", nil, "/usr/local/bin/tmux-spaces")
 	joinedDefault := strings.Join(cmdDefault, " ")
-	if !strings.Contains(joinedDefault, "/usr/local/bin/tmux-spaces __shim --profile default claude-code -- --resume sess-456") {
+	if !strings.Contains(joinedDefault, "/usr/local/bin/tmux-spaces __shim --profile default claude-code /usr/local/bin/tmux-spaces __resume-access '' claude profile default --resume sess-456") {
 		t.Errorf("default claude cmd = %s", joinedDefault)
 	}
 
@@ -84,7 +82,7 @@ func TestBuildConversationOpenCommandReplayLaunchCmd(t *testing.T) {
 	stored := []string{"/opt/bin/harness", "claude", "profile", "work", "--model", "opus", "--resume", "old-sess"}
 	cmd := buildConversationOpenCommand("claude", "", "new-sess-99", "/repo", "Title", stored, "/usr/local/bin/tmux-spaces")
 	joined := strings.Join(cmd, " ")
-	want := "/usr/local/bin/tmux-spaces __shim --profile work claude-code /opt/bin/harness claude profile work --model opus --resume new-sess-99"
+	want := "/usr/local/bin/tmux-spaces __shim --profile work claude-code /usr/local/bin/tmux-spaces __resume-access '' claude profile work --model opus --resume new-sess-99"
 	if !strings.Contains(joined, want) {
 		t.Errorf("replay launch cmd = %s, want substring %q", joined, want)
 	}
@@ -96,7 +94,7 @@ func TestBuildConversationOpenCommandReplayLaunchCmd(t *testing.T) {
 	storedCodex := []string{"/opt/bin/harness", "codex", "profile", "dev", "resume", "old-codex"}
 	cmdCodex := buildConversationOpenCommand("codex", "dev", "new-codex", "/repo", "Title", storedCodex, "/usr/local/bin/tmux-spaces")
 	joinedCodex := strings.Join(cmdCodex, " ")
-	wantCodex := "/usr/local/bin/tmux-spaces __shim --profile dev codex /opt/bin/harness codex profile dev resume new-codex"
+	wantCodex := "/usr/local/bin/tmux-spaces __shim --profile dev codex /usr/local/bin/tmux-spaces __resume-access '' codex profile dev resume new-codex"
 	if !strings.Contains(joinedCodex, wantCodex) {
 		t.Errorf("replay codex launch cmd = %s, want substring %q", joinedCodex, wantCodex)
 	}
@@ -207,13 +205,8 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 	if gotSID != "conv-id-1" || gotSpace != "alpha" || gotProfile != "work" {
 		t.Errorf("unexpected recorded overlay row: sid=%q space=%q profile=%q", gotSID, gotSpace, gotProfile)
 	}
-	var gotLaunchCmd []string
-	if err := json.Unmarshal([]byte(gotLaunchJSON), &gotLaunchCmd); err != nil {
-		t.Fatalf("unmarshal launch_cmd_json %q: %v", gotLaunchJSON, err)
-	}
-	wantLaunchCmd := []string{"/usr/local/bin/tmux-spaces", "claude", "profile", "work"}
-	if !reflect.DeepEqual(gotLaunchCmd, wantLaunchCmd) {
-		t.Errorf("recorded launch_cmd = %v, want %v", gotLaunchCmd, wantLaunchCmd)
+	if gotLaunchJSON != "" {
+		t.Errorf("open-only overlay wrote launch metadata: %q", gotLaunchJSON)
 	}
 
 	// When CurrentSession is unavailable, falls back to conv.Space ("beta"), skips missing CWD, and switches to beta.
@@ -232,7 +225,7 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 		t.Fatalf("expected 2 new-window calls, got %d", len(newWindows))
 	}
 	joined2 := strings.Join(newWindows[1], " ")
-	wantDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex -- resume conv-id-2"
+	wantDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex /usr/local/bin/tmux-spaces __resume-access '' codex profile default resume conv-id-2"
 	if !strings.Contains(joined2, "-t beta:") || !strings.Contains(joined2, "-n codex") || strings.Contains(joined2, "-c /missing/dir") || !strings.Contains(joined2, wantDefaultCmd) || strings.Contains(joined2, "__resume-wrap") {
 		t.Errorf("fallback new-window args = %v", newWindows[1])
 	}
@@ -256,13 +249,13 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 		t.Fatalf("expected 3 new-window calls, got %d", len(newWindows))
 	}
 	joined3 := strings.Join(newWindows[2], " ")
-	wantExplicitDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex -- resume conv-id-3"
+	wantExplicitDefaultCmd := "/usr/local/bin/tmux-spaces __shim --profile default codex /usr/local/bin/tmux-spaces __resume-access '' codex profile default resume conv-id-3"
 	if !strings.Contains(joined3, "-n codex") || strings.Contains(joined3, "-n default") || !strings.Contains(joined3, wantExplicitDefaultCmd) || strings.Contains(joined3, "__resume-wrap") {
 		t.Errorf("default profile new-window args = %v", newWindows[2])
 	}
 }
 
-func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
+func TestTUIBackendOpenConversationKeepsLaunchMetadataOwnedByLauncher(t *testing.T) {
 	var newWindows [][]string
 	runner := &fakeRunner{
 		handler: func(args []string) (string, string, int, error) {
@@ -301,7 +294,7 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 		return nil
 	}
 
-	// Empty LaunchCmd gets populated with harness command before RecordConversationOpen.
+	// An older conversation uses the fallback launcher without recording a choice.
 	err := b.OpenConversation(context.Background(), model.ConversationEntry{
 		Agent:   "claude",
 		ID:      "conv-1",
@@ -311,12 +304,11 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConversation error: %v", err)
 	}
-	want1 := []string{"/usr/local/bin/tmux-spaces", "claude", "profile", "work"}
-	if len(recorded) != 1 || !reflect.DeepEqual(recorded[0].LaunchCmd, want1) {
-		t.Fatalf("recorded[0].LaunchCmd = %v, want %v", recorded, want1)
+	if len(recorded) != 1 || len(recorded[0].LaunchCmd) != 0 {
+		t.Fatalf("open event overwrote launch metadata: %v", recorded)
 	}
 
-	// Empty Profile defaults to "default" in populated LaunchCmd.
+	// An empty profile still uses the default profile at launch.
 	err = b.OpenConversation(context.Background(), model.ConversationEntry{
 		Agent: "codex",
 		ID:    "conv-2",
@@ -325,13 +317,12 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConversation error: %v", err)
 	}
-	want2 := []string{"/usr/local/bin/tmux-spaces", "codex", "profile", "default"}
-	if len(recorded) != 2 || !reflect.DeepEqual(recorded[1].LaunchCmd, want2) {
-		t.Fatalf("recorded[1].LaunchCmd = %v, want %v", recorded, want2)
+	if len(recorded) != 2 || len(recorded[1].LaunchCmd) != 0 {
+		t.Fatalf("open event overwrote launch metadata: %v", recorded)
 	}
 
 	// Existing LaunchCmd is preserved and replayed.
-	existing := []string{"/opt/bin/harness", "claude", "profile", "custom", "--model", "opus"}
+	existing := []string{"/old/tmux-spaces", "__resume-access", "read-only", "claude", "profile", "custom", "--model", "opus"}
 	err = b.OpenConversation(context.Background(), model.ConversationEntry{
 		Agent:     "claude",
 		ID:        "conv-3",
@@ -342,10 +333,10 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConversation error: %v", err)
 	}
-	if len(recorded) != 3 || !reflect.DeepEqual(recorded[2].LaunchCmd, existing) {
-		t.Fatalf("recorded[2].LaunchCmd = %v, want %v", recorded, existing)
+	if len(recorded) != 3 || len(recorded[2].LaunchCmd) != 0 {
+		t.Fatalf("open event overwrote launch metadata: %v", recorded)
 	}
-	if len(newWindows) != 3 || !strings.Contains(strings.Join(newWindows[2], " "), "/opt/bin/harness claude profile custom --model opus --resume conv-3") {
+	if len(newWindows) != 3 || !strings.Contains(strings.Join(newWindows[2], " "), "/usr/local/bin/tmux-spaces __resume-access read-only claude profile custom --model opus --resume conv-3") {
 		t.Errorf("replayed new-window args = %v", newWindows[2])
 	}
 
@@ -361,12 +352,11 @@ func TestTUIBackendOpenConversationRecordsLaunchCmd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenConversation override error: %v", err)
 	}
-	want4 := []string{"/usr/local/bin/tmux-spaces", "claude", "profile", "pratham"}
-	if len(recorded) != 4 || !reflect.DeepEqual(recorded[3].LaunchCmd, want4) {
-		t.Fatalf("recorded[3].LaunchCmd = %v, want %v", recorded[3].LaunchCmd, want4)
+	if len(recorded) != 4 || len(recorded[3].LaunchCmd) != 0 {
+		t.Fatalf("open event overwrote launch metadata: %v", recorded)
 	}
 	joined4 := strings.Join(newWindows[3], " ")
-	wantCmd4 := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code -- --resume conv-4"
+	wantCmd4 := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code /usr/local/bin/tmux-spaces __resume-access '' claude profile pratham --resume conv-4"
 	if !strings.Contains(joined4, wantCmd4) || strings.Contains(joined4, "oldprof") {
 		t.Errorf("override new-window args = %v, want %q without oldprof", newWindows[3], wantCmd4)
 	}
@@ -376,7 +366,7 @@ func TestBuildConversationOpenCommandExplicitProfileOverridesStaleLaunchCmd(t *t
 	stale := []string{"/opt/bin/harness", "claude", "profile", "work", "--model", "opus", "--resume", "old-sess"}
 	cmd := buildConversationOpenCommand("claude", "pratham", "new-sess-1", "/repo", "Title", stale, "/usr/local/bin/tmux-spaces")
 	joined := strings.Join(cmd, " ")
-	want := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code -- --resume new-sess-1"
+	want := "/usr/local/bin/tmux-spaces __shim --profile pratham claude-code /usr/local/bin/tmux-spaces __resume-access '' claude profile pratham --resume new-sess-1"
 	if !strings.Contains(joined, want) {
 		t.Errorf("override cmd = %s, want substring %q", joined, want)
 	}
@@ -454,5 +444,45 @@ func TestPopulateSessionStoreTitlesRecordsLiveProfileAndDeduplicates(t *testing.
 	b.populateSessionStoreTitles(context.Background(), spaces, now.Add(2*time.Second))
 	if len(calls) != 3 || calls[2].sid != "sid-live-3" || calls[2].profile != "pratham" {
 		t.Fatalf("expected 3rd call for new sid, got %+v", calls)
+	}
+}
+
+func TestReopenLiveCodexFocusesExistingPane(t *testing.T) {
+	var selected, launched int
+	runner := &fakeRunner{handler: func(args []string) (string, string, int, error) {
+		switch args[0] {
+		case "list-panes":
+			fields := make([]string, 23)
+			fields[0], fields[1], fields[4], fields[6], fields[21] = "work", "@4", "%7", "codex", "live-thread"
+			return strings.Join(fields, "\x1f") + "\n", "", 0, nil
+		case "display-message":
+			return "work\n", "", 0, nil
+		case "select-pane":
+			if args[len(args)-1] == "%7" {
+				selected++
+			}
+		case "new-window":
+			launched++
+		}
+		return "", "", 0, nil
+	}}
+	backend := newTUIBackend(tmux.NewClient(runner))
+	backend.recordConvOpen = func(context.Context, model.ConversationEntry, string, int64) error { return nil }
+	ctx := context.Background()
+	conv := model.ConversationEntry{Agent: "codex", ID: "live-thread"}
+	if err := backend.OpenConversation(ctx, conv, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := backend.OpenOutcome(ctx, model.OutcomeEntry{Agent: "codex", Session: "work", SessionID: conv.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if selected != 2 || launched != 0 {
+		t.Fatalf("ordinary reopen selected %d panes and launched %d windows", selected, launched)
+	}
+	if err := backend.OpenConversation(ctx, conv, true); err != nil {
+		t.Fatal(err)
+	}
+	if selected != 2 || launched != 1 {
+		t.Fatalf("explicit new tab selected %d panes and launched %d windows", selected, launched)
 	}
 }

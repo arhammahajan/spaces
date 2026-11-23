@@ -170,38 +170,38 @@ func TestBuildPaneCommandAndRestore(t *testing.T) {
 
 	// 2. Agent with profile launches directly in-process via `__shim --profile <profile> <agent>`.
 	profCmd := BuildPaneCommand(PaneSnapshot{Agent: "codex", Profile: "codex-work"}, opts)
-	if strings.Join(profCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex" {
+	if strings.Join(profCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex /bin/tmux-spaces __resume-access  codex profile codex-work" {
 		t.Fatalf("profile resume cmd = %v", profCmd)
 	}
 	profResumeCmd := BuildPaneCommand(PaneSnapshot{Agent: "codex", Profile: "codex-work", SessionID: "c-9"}, opts)
-	if strings.Join(profResumeCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex -- resume c-9" {
+	if strings.Join(profResumeCmd, " ") != "/bin/tmux-spaces __shim --profile codex-work codex /bin/tmux-spaces __resume-access  codex profile codex-work resume c-9" {
 		t.Fatalf("profile resume cmd with session = %v", profResumeCmd)
 	}
 
-	// 2b. Legacy harness launchers use the current Spaces binary while preserving
-	// the profile and native resume arguments.
+	// 2b. Harness profile launcher (e.g. `harness agy profile saucerf166`) is preserved
+	// with optional --profile and native resume flag without duplication.
 	agyCmd := BuildPaneCommand(PaneSnapshot{
 		Agent:       "antigravity",
 		Profile:     "saucerf166",
 		FullCommand: []string{"harness", "agy", "profile", "saucerf166"},
 	}, opts)
-	if strings.Join(agyCmd, " ") != "/bin/tmux-spaces __shim --profile saucerf166 antigravity /bin/tmux-spaces agy profile saucerf166" {
+	if strings.Join(agyCmd, " ") != "/bin/tmux-spaces __shim --profile saucerf166 antigravity /bin/tmux-spaces __resume-access  agy profile saucerf166" {
 		t.Fatalf("harness antigravity cmd = %v", agyCmd)
 	}
 	agyResumeCmd := BuildPaneCommand(PaneSnapshot{
 		Agent:       "antigravity",
 		SessionID:   "agy-1",
-		FullCommand: []string{"harness", "agy", "profile", "saucerf166"},
+		FullCommand: []string{"/old/bin/harness", "agy", "profile", "saucerf166"},
 	}, opts)
-	if strings.Join(agyResumeCmd, " ") != "/bin/tmux-spaces __shim antigravity /bin/tmux-spaces agy profile saucerf166 --conversation agy-1" {
+	if strings.Join(agyResumeCmd, " ") != "/bin/tmux-spaces __shim antigravity /bin/tmux-spaces __resume-access  agy profile saucerf166 --conversation agy-1" {
 		t.Fatalf("harness antigravity resume cmd = %v", agyResumeCmd)
 	}
 	agyDedupCmd := BuildPaneCommand(PaneSnapshot{
 		Agent:       "antigravity",
 		SessionID:   "agy-1",
-		FullCommand: []string{"/old/bin/harness", "agy", "profile", "saucerf166", "--conversation", "agy-1"},
+		FullCommand: []string{"/old/tmux-spaces", "__resume-access", "sandboxed", "agy", "profile", "saucerf166", "--conversation", "agy-1"},
 	}, opts)
-	if strings.Join(agyDedupCmd, " ") != "/bin/tmux-spaces __shim antigravity /bin/tmux-spaces agy profile saucerf166 --conversation agy-1" {
+	if strings.Join(agyDedupCmd, " ") != "/bin/tmux-spaces __shim antigravity /bin/tmux-spaces __resume-access sandboxed agy profile saucerf166 --conversation agy-1" {
 		t.Fatalf("harness antigravity dedup cmd = %v", agyDedupCmd)
 	}
 
@@ -357,14 +357,14 @@ func TestRestoreMultipleAntigravityPanesDistinctConversations(t *testing.T) {
 		t.Fatalf("resolver calls = %v, want 2", calls)
 	}
 	joined := strings.Join(fr.ops, "\n")
-	if !strings.Contains(joined, "new-session:work:/repo:agy:/bin/tmux-spaces __shim antigravity /bin/tmux-spaces agy profile saucerf166 --conversation conv-older") {
+	if !strings.Contains(joined, "new-session:work:/repo:agy:/bin/tmux-spaces __shim antigravity /bin/tmux-spaces __resume-access  agy profile saucerf166 --conversation conv-older") {
 		t.Fatalf("pane 1 did not preserve conv-older:\n%s", joined)
 	}
-	if !strings.Contains(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity /bin/tmux-spaces agy profile saucerf166 --conversation conv-newest") {
+	if !strings.Contains(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity /bin/tmux-spaces __resume-access  agy profile saucerf166 --conversation conv-newest") {
 		t.Fatalf("pane 2 did not get distinct conv-newest:\n%s", joined)
 	}
-	if !strings.Contains(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity /bin/tmux-spaces agy profile saucerf166\n") &&
-		!strings.HasSuffix(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity /bin/tmux-spaces agy profile saucerf166") {
+	if !strings.Contains(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity /bin/tmux-spaces __resume-access  agy profile saucerf166\n") &&
+		!strings.HasSuffix(joined, "split:work:1:/repo:/bin/tmux-spaces __shim antigravity /bin/tmux-spaces __resume-access  agy profile saucerf166") {
 		t.Fatalf("pane 3 did not skip resume when all conversations claimed:\n%s", joined)
 	}
 	if strings.Count(joined, "--conversation conv-newest") != 1 {
@@ -929,5 +929,24 @@ func TestAutoRestoreNamedMatchingSessionAndCustomSession(t *testing.T) {
 	}
 	if strings.Contains(strings.Join(c2.ops, "\n"), "kill-session:scratch") {
 		t.Fatalf("must not kill user-named session scratch")
+	}
+}
+
+func TestRestoreDuplicateCodexSessionStartsOneAgent(t *testing.T) {
+	fr := &fakeRestorer{}
+	snap := SpaceSnapshot{Name: "example", CWD: "/repo", Windows: []WindowSnapshot{{
+		Name: "codex",
+		Panes: []PaneSnapshot{
+			{Agent: "codex", SessionID: "same-thread"},
+			{Agent: "codex", FullCommand: []string{"codex", "resume", "same-thread"}},
+		},
+	}}}
+	if err := Restore(context.Background(), fr, snap, RestoreOptions{SelfPath: "/bin/tmux-spaces"}); err != nil {
+		t.Fatal(err)
+	}
+	ops := strings.Join(fr.ops, "\n")
+	if strings.Count(ops, "__shim codex") != 1 || strings.Count(ops, "resume same-thread") != 1 ||
+		!strings.HasSuffix(ops, "split:example:1:/repo:") {
+		t.Fatalf("expected one Codex resume and a shell in the duplicate pane:\n%s", ops)
 	}
 }

@@ -301,10 +301,13 @@ func TestConversationsLivePaneDetectionEnterVsCtrlO(t *testing.T) {
 		t.Fatalf("expected first item sess-claude-1 to be detected as live, got %+v", items)
 	}
 
-	// View shows live working glyph + space name.
+	// A running conversation shows its space and available actions.
 	plain := ansi.Strip(m.View())
-	if !strings.Contains(plain, "◐") || !strings.Contains(plain, "live·work") {
-		t.Errorf("expected live pane status in view:\n%s", plain)
+	if strings.Contains(plain, "◐") || strings.Contains(plain, "live·") || strings.Contains(plain, "live in") {
+		t.Errorf("unexpected live status indicator in view:\n%s", plain)
+	}
+	if !strings.Contains(plain, "work · claude-code") || !strings.Contains(plain, "Enter focus live pane") {
+		t.Errorf("expected space name and focus action in view:\n%s", plain)
 	}
 
 	// Enter on live conversation focuses the live tmux pane and quits.

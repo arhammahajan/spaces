@@ -896,3 +896,38 @@ func TestDaemonSSESourceAttributionAndArbitration(t *testing.T) {
 		t.Fatalf("visible screen blocker over daemon_sse working: got %v, want StatusNeedsYou", got4.Panes[0].Status)
 	}
 }
+
+func TestCodexIdleScreenCompletesMissedStop(t *testing.T) {
+	const now int64 = 1_700_000_000_000
+	reading := map[string]ScreenReading{
+		"%%1": {App: "codex", State: "idle", VisibleIdle: true, OSCAuthority: true},
+	}
+	for _, tc := range []struct {
+		name  string
+		age   int64
+		child bool
+		want  Status
+	}{
+		{"missed Stop", 15_000, false, StatusDone},
+		{"recent work", 1_000, false, StatusWorking},
+		{"active subagent", 15_000, true, StatusWorking},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := arbSpace("work", "codex", StatusWorking, false)
+			sp.Panes[0].BaseAgeMs = tc.age
+			hook := HookSummary{App: "codex", Agent: "codex", State: "working", TsMs: now - tc.age}
+			if tc.child {
+				hook.Children = []HookChild{{ID: "child", State: "working"}}
+			}
+			hooks := &HookSnapshot{OK: true, Panes: map[string]map[string]HookSummary{"work": {"1": hook}}}
+			arb := NewArbitrator()
+			got := applyOne(t, arb, sp, hooks, reading, now)
+			if got.Panes[0].Status != tc.want {
+				t.Fatalf("status = %v, want %v", got.Panes[0].Status, tc.want)
+			}
+			if done := arb.TakeNewlyDone(); (len(done) == 1) != (tc.want == StatusDone) {
+				t.Fatalf("newly done = %v", done)
+			}
+		})
+	}
+}

@@ -244,6 +244,14 @@ func capturePane(p tmux.Pane, hook *model.HookSummary) PaneSnapshot {
 		ps.SessionID = sid
 	}
 
+	if args, level, ok := agent.HarnessLaunchArgs(p.LaunchCommand); ok && level != "" &&
+		ps.Agent != "" && CanonicalAgent(args[0]) == ps.Agent {
+		ps.FullCommand = p.LaunchCommand
+		if ps.Profile == "" {
+			ps.Profile = agent.HarnessProfileFromArgv(p.LaunchCommand)
+		}
+	}
+
 	if ps.App == "" && ps.Agent != "" {
 		ps.App = ps.Agent
 	}
@@ -277,7 +285,7 @@ func readChildCmdline(pid int) []string {
 			// (and legacy `harness ...`) launchers intact so profile/shadow-home
 			// setup is preserved on restore, while descending past internal wrappers.
 			best = argv
-			if isHarnessLauncher(argv) {
+			if _, _, ok := agent.HarnessLaunchArgs(argv); ok {
 				return argv
 			}
 			if CanonicalAgent(base) != "" {

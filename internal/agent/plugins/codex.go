@@ -25,7 +25,7 @@ func NewCodex() agent.Plugin {
 			{HarnessLabel: "codex", RelPath: ".codex/config.toml"},
 		},
 		CustomTitleExtractor:  agent.TitleExtractorFunc(extractCodexTitle),
-		CustomSessionResolver: agent.BaseSessionResolver{PositionalResume: true},
+		CustomSessionResolver: agent.BaseSessionResolver{PositionalResume: true, UniqueExplicitSessions: true},
 	}
 }
 

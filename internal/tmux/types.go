@@ -71,9 +71,10 @@ type Pane struct {
 	SpacesMsg     string
 	SpacesTitle   string // #{@spaces_title}
 	SpacesTsMs    int64
-	SpacesSource  string // #{@spaces_source} ("osc7501", "hook", etc.)
-	ResumeSession string // #{@spaces_resume_session}
-	ResumeProfile string // #{@spaces_profile}
+	SpacesSource  string   // #{@spaces_source} ("osc7501", "hook", etc.)
+	ResumeSession string   // #{@spaces_resume_session}
+	ResumeProfile string   // #{@spaces_profile}
+	LaunchCommand []string // #{@spaces_launch_cmd}
 }
 
 // ServerSnapshot holds a consistent view of sessions, windows, and panes.

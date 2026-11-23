@@ -294,8 +294,9 @@ type SessionPaneRef struct {
 // SessionResolution holds resolved session IDs and skip-resume decisions for
 // panes belonging to an agent during restore.
 type SessionResolution struct {
-	SessionIDs map[string]string
-	SkipResume map[string]bool
+	SessionIDs     map[string]string
+	SkipResume     map[string]bool
+	DuplicatePanes map[string]bool
 }
 
 // SessionLookupFunc resolves an unclaimed session ID for an agent in a CWD.

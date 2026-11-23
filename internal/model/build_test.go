@@ -1,6 +1,7 @@
 package model
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -198,7 +199,7 @@ func TestBuildSpacesIdempotentBaseline(t *testing.T) {
 			t.Errorf("space %s differs across builds", a[i].Name)
 		}
 		for j := range a[i].Panes {
-			if a[i].Panes[j] != b[i].Panes[j] {
+			if !reflect.DeepEqual(a[i].Panes[j], b[i].Panes[j]) {
 				t.Errorf("pane %s differs across builds", a[i].Panes[j].ID)
 			}
 		}

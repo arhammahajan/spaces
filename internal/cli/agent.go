@@ -74,11 +74,8 @@ func cmdAgent(args []string, env Env) int {
 		if profile != "default" {
 			label = profile
 		}
-		cmd = []string{env.Self, "__shim", "--profile", profile, canonicalApp(name)}
-		if len(extra) > 0 {
-			cmd = append(cmd, "--")
-			cmd = append(cmd, extra...)
-		}
+		cmd = []string{env.Self, "__shim", "--profile", profile, canonicalApp(name), env.Self}
+		cmd = append(cmd, agent.HarnessProfileCommand(name, profile, extra...)...)
 	} else {
 		bin := agent.DefaultRegistry().BinaryName(name)
 		if _, lerr := env.LookPath(bin); lerr != nil {

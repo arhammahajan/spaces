@@ -1,16 +1,21 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	"github.com/arhammahajan/spaces/internal/harness/agents"
 	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
 	"github.com/arhammahajan/spaces/internal/harness/profiles"
+	hookclient "github.com/arhammahajan/spaces/internal/hooks/client"
+	"github.com/arhammahajan/spaces/internal/model"
 )
 
 type capturedHarnessLaunch struct {
@@ -47,6 +52,58 @@ func stubHarnessLaunch(t *testing.T) *capturedHarnessLaunch {
 		return 0
 	}
 	return cap
+}
+
+func TestResumeUsesInitialAccessInsteadOfCurrentEnvironment(t *testing.T) {
+	isolateHarnessEnv(t)
+	capture := stubHarnessLaunch(t)
+	t.Setenv("TMUX", "test")
+	t.Setenv("TMUX_PANE", "%42")
+	t.Setenv("HARNESS_ACCESS", "read-only")
+	var saved []string
+	oldTmux := hookclient.TmuxFunc
+	t.Cleanup(func() { hookclient.TmuxFunc = oldTmux })
+	hookclient.TmuxFunc = func(args []string, _ time.Duration) (string, int, error) {
+		if len(args) == 6 && args[4] == "@spaces_launch_cmd" {
+			if err := json.Unmarshal([]byte(args[5]), &saved); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return "", 0, nil
+	}
+
+	if code := runHarnessAgentLaunch([]string{"codex", "profile", "default"}); code != 0 {
+		t.Fatalf("initial launch exited %d", code)
+	}
+	if _, level, ok := agent.HarnessLaunchArgs(saved); !ok || level != "read-only" {
+		t.Fatalf("initial launch saved %v", saved)
+	}
+	if err := model.RecordConversationLaunch(context.Background(), "codex", "session-1", "default", "", "", saved, "", 1); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HARNESS_ACCESS", "full")
+	for _, tt := range []struct {
+		name, level, session, wantSandbox string
+	}{
+		{"snapshot", "read-only", "session-1", "read-only"},
+		{"inbox lookup", "", "session-1", "read-only"},
+		{"older record", "", "unrecorded", ""},
+		{"explicit default", "default", "session-1", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := []string{tt.level, "codex", "profile", "default", "resume", tt.session}
+			if code := runHarnessResume("spaces", cmd); code != 0 {
+				t.Fatalf("resume exited %d", code)
+			}
+			args := capture.resolved.Args
+			if containsArg(args, "--dangerously-bypass-approvals-and-sandbox") {
+				t.Fatalf("resume inherited ambient full access: %v", args)
+			}
+			if containsArg(args, "read-only") != (tt.wantSandbox != "") || !containsArg(args, tt.session) {
+				t.Fatalf("resume args = %v, want sandbox %q and session %q", args, tt.wantSandbox, tt.session)
+			}
+		})
+	}
 }
 
 func mustCreateHarnessProfile(t *testing.T, paths harnessenv.Paths, name, agent string, enabled bool, prepend ...string) {

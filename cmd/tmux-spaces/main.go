@@ -34,6 +34,9 @@ const (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == agent.ResumeAccessCommand {
+		os.Exit(runHarnessResume(os.Args[0], os.Args[2:]))
+	}
 	if code, handled := maybeRunHarnessEnvAgent(os.Args[1:]); handled {
 		os.Exit(code)
 	}
@@ -752,8 +755,8 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 				}
 			}
 			if sid != "" {
-				if prof := strings.TrimSpace(p.Profile); prof != "" {
-					key := sid + "\x1f" + prof
+				if prof := strings.TrimSpace(p.Profile); prof != "" || len(p.LaunchCommand) > 0 {
+					key := sid + "\x1f" + prof + "\x1f" + strings.Join(p.LaunchCommand, "\x00")
 					b.mu.Lock()
 					if b.recordedLiveProfiles == nil {
 						b.recordedLiveProfiles = make(map[string]string)
@@ -768,7 +771,7 @@ func (b *tuiBackend) populateSessionStoreTitles(ctx context.Context, spaces []mo
 						if recordLaunch == nil {
 							recordLaunch = model.RecordConversationLaunch
 						}
-						_ = recordLaunch(ctx, p.App, sid, prof, p.CWD, p.ConversationTitle, nil, spaces[si].Name, now.UnixMilli())
+						_ = recordLaunch(ctx, p.App, sid, prof, p.CWD, p.ConversationTitle, p.LaunchCommand, spaces[si].Name, now.UnixMilli())
 					}
 				}
 			}
@@ -1187,19 +1190,46 @@ func (b *tuiBackend) LoadOutcomes(ctx context.Context) ([]model.OutcomeEntry, er
 	return out, nil
 }
 
+func (b *tuiBackend) focusLiveCodex(ctx context.Context, agentName, sessionID string) (bool, error) {
+	if agentName != "codex" || sessionID == "" {
+		return false, nil
+	}
+	panes, err := b.client.ListPanes(ctx)
+	if err != nil {
+		return false, nil
+	}
+	for _, pane := range panes {
+		if pane.Dead || pane.ResumeSession != sessionID {
+			continue
+		}
+		isCodex := resurrect.CanonicalAgent(pane.CurrentCommand) == "codex"
+		if !isCodex && pane.PID > 0 && model.DetectDescendantAgentFn != nil {
+			isCodex = resurrect.CanonicalAgent(model.DetectDescendantAgentFn(pane.PID)) == "codex"
+		}
+		if isCodex {
+			return true, b.client.FocusPane(ctx, pane.SessionName, pane.WindowID, pane.ID)
+		}
+	}
+	return false, nil
+}
+
 func (b *tuiBackend) OpenOutcome(ctx context.Context, outcome model.OutcomeEntry) error {
-	agent := resurrect.CanonicalAgent(outcome.Agent)
-	if agent == "" {
-		agent = resurrect.CanonicalAgent(outcome.App)
+	agentName := resurrect.CanonicalAgent(outcome.Agent)
+	if agentName == "" {
+		agentName = resurrect.CanonicalAgent(outcome.App)
 	}
-	if agent == "" {
-		agent = strings.TrimSpace(outcome.Agent)
+	if agentName == "" {
+		agentName = strings.TrimSpace(outcome.Agent)
 	}
-	if agent == "" {
-		agent = strings.TrimSpace(outcome.App)
+	if agentName == "" {
+		agentName = strings.TrimSpace(outcome.App)
 	}
-	if agent == "" {
+	if agentName == "" {
 		return fmt.Errorf("outcome has no agent to open")
+	}
+	sessionID := strings.TrimSpace(outcome.SessionID)
+	if focused, err := b.focusLiveCodex(ctx, agentName, sessionID); focused {
+		return err
 	}
 
 	targetSession := ""
@@ -1235,13 +1265,16 @@ func (b *tuiBackend) OpenOutcome(ctx context.Context, outcome model.OutcomeEntry
 	}
 
 	profile := strings.TrimSpace(outcome.Profile)
-	sessionID := strings.TrimSpace(outcome.SessionID)
-	cmd := buildOutcomeOpenCommand(agent, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), nil, b.selfPath)
+	var launchCmd []string
+	if sessionID != "" && len(agent.DefaultRegistry().ResumeArgs(agentName, sessionID)) == 0 {
+		launchCmd = model.ConversationLaunchCommand(ctx, agentName, sessionID)
+	}
+	cmd := buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), launchCmd, b.selfPath)
 	if len(cmd) == 0 {
-		return fmt.Errorf("could not build resume command for %s", agent)
+		return fmt.Errorf("could not build resume command for %s", agentName)
 	}
 
-	label := agent
+	label := agentName
 	if profile != "" && profile != "default" {
 		label = profile
 	}
@@ -1295,7 +1328,6 @@ func (b *tuiBackend) SearchConversations(ctx context.Context, req model.Conversa
 }
 
 func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.ConversationEntry, forceNewTab bool) error {
-	_ = forceNewTab
 	agentName := resurrect.CanonicalAgent(conv.Agent)
 	if agentName == "" {
 		agentName = resurrect.CanonicalAgent(conv.App)
@@ -1311,6 +1343,12 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 	}
 	if agentName == "" {
 		return fmt.Errorf("conversation has no agent to open")
+	}
+	sessionID := conv.ResumeSessionID()
+	if !forceNewTab {
+		if focused, err := b.focusLiveCodex(ctx, agentName, sessionID); focused {
+			return err
+		}
 	}
 
 	// Open in the current tmux session by default, falling back to conv.Space
@@ -1343,26 +1381,9 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 	}
 
 	profile := strings.TrimSpace(conv.Profile)
-	sessionID := conv.ResumeSessionID()
-	launcherPath := b.selfPath
-
 	cmd := buildConversationOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(conv.Title), conv.LaunchCmd, b.selfPath)
 	if len(cmd) == 0 {
 		return fmt.Errorf("could not build resume command for %s", agentName)
-	}
-
-	if launcherPath != "" && agent.DefaultRegistry().IsHarnessManaged(agentName) {
-		if len(conv.LaunchCmd) == 0 {
-			prof := profile
-			if prof == "" {
-				prof = "default"
-			}
-			conv.LaunchCmd = []string{launcherPath, agentName, "profile", prof}
-		} else if profile != "" {
-			if launchProf := agent.HarnessProfileFromArgv(conv.LaunchCmd); launchProf != "" && launchProf != profile {
-				conv.LaunchCmd = []string{launcherPath, agentName, "profile", profile}
-			}
-		}
 	}
 
 	label := agentName
@@ -1377,6 +1398,7 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 	if recordOpen == nil {
 		recordOpen = model.RecordConversationOpen
 	}
+	conv.LaunchCmd = nil // Opening updates activity. The launcher records the actual invocation.
 	_ = recordOpen(ctx, conv, targetSession, b.now().UnixMilli())
 	if cur, err := b.client.CurrentSession(ctx); err != nil || cur != targetSession {
 		if err := b.client.SwitchToSpace(ctx, targetSession); err != nil {
@@ -1447,10 +1469,8 @@ func (b *tuiBackend) OpenSharedFile(ctx context.Context, path string) error {
 // then clears pane status and drops into an interactive shell on exit so
 // closing the harness does not close the tmux tab.
 //
-// For harness-managed agents, it launches directly in-process via
-// `tmux-spaces __shim --profile <profile|default> <app> [-- <resumeArgs...>]`
-// (or replays a stored custom LaunchCmd when present). For non-harness agents,
-// it launches the plugin's resolved binary with native resume flags under `__shim`.
+// Harness launches use the saved access level, or look it up at launch time
+// when the caller only has the conversation ID.
 func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOutcome string, launchCmd []string, selfPath string) []string {
 	_, _ = cwd, title
 	reg := agent.DefaultRegistry()
@@ -1463,6 +1483,7 @@ func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOut
 	var inner []string
 	if reg.IsHarnessManaged(agentName) {
 		trimmedProfile := strings.TrimSpace(profile)
+		_, level, _ := agent.HarnessLaunchArgs(launchCmd)
 		useLaunchCmd := len(launchCmd) > 0
 		if useLaunchCmd && trimmedProfile != "" {
 			if launchProf := agent.HarnessProfileFromArgv(launchCmd); launchProf != "" && launchProf != trimmedProfile {
@@ -1479,6 +1500,9 @@ func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOut
 				inner = append(inner, "--profile", trimmedProfile)
 			}
 			inner = append(inner, appLabel)
+			if args, _, ok := agent.HarnessLaunchArgs(baseCmd); ok {
+				baseCmd = agent.HarnessResumeCommand(selfPath, level, args...)
+			}
 			inner = append(inner, baseCmd...)
 			inner = append(inner, resumeArgs...)
 		} else {
@@ -1487,10 +1511,8 @@ func buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, title, priorOut
 				prof = "default"
 			}
 			inner = []string{selfPath, "__shim", "--profile", prof, appLabel}
-			if len(resumeArgs) > 0 {
-				inner = append(inner, "--")
-				inner = append(inner, resumeArgs...)
-			}
+			args := agent.HarnessProfileCommand(agentName, prof, resumeArgs...)
+			inner = append(inner, agent.HarnessResumeCommand(selfPath, level, args...)...)
 		}
 	} else {
 		bin := reg.BinaryName(agentName)

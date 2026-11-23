@@ -176,6 +176,7 @@ type BaseSessionResolver struct {
 	PositionalResume              bool
 	DisableMultiPaneTitleSuppress bool
 	DisableRestoreDedup           bool
+	UniqueExplicitSessions        bool
 }
 
 func (r BaseSessionResolver) ExtractSessionIDFromArgs(argv []string) string {
@@ -201,8 +202,9 @@ func (r BaseSessionResolver) ResolveRestoreSessions(
 		return SessionResolution{}
 	}
 	res := SessionResolution{
-		SessionIDs: map[string]string{},
-		SkipResume: map[string]bool{},
+		SessionIDs:     map[string]string{},
+		SkipResume:     map[string]bool{},
+		DuplicatePanes: map[string]bool{},
 	}
 	if len(panes) == 0 {
 		return res
@@ -216,6 +218,9 @@ func (r BaseSessionResolver) ResolveRestoreSessions(
 			sid = r.ExtractSessionIDFromArgs(p.FullCommand)
 		}
 		if sid != "" {
+			if r.UniqueExplicitSessions && claimed[sid] {
+				res.DuplicatePanes[p.Key] = true
+			}
 			claimed[sid] = true
 			continue
 		}
@@ -384,7 +389,7 @@ func HarnessProfileFromArgv(argv []string) string {
 		return ""
 	}
 	base := strings.ToLower(filepath.Base(argv[0]))
-	if base != "harness" && base != "spaces" && base != "tmux-spaces" {
+	if base != "harness" && base != "spaces" && base != "tmux-spaces" && argv[1] != ResumeAccessCommand {
 		return ""
 	}
 	for i := 1; i < len(argv); i++ {

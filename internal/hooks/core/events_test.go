@@ -336,3 +336,35 @@ func TestPruneStoreByState(t *testing.T) {
 		})
 	}
 }
+
+func TestCodexSubagentsAreScopedToActualLaunchesAndActiveTurns(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	merge := func(record map[string]any, raw, sid string, extra map[string]any, offset int64) map[string]any {
+		t.Helper()
+		payload := map[string]any{"session_id": sid}
+		for key, value := range extra {
+			payload[key] = value
+		}
+		return MergeEvent(record, NormalizeEvent("codex", raw, payload, nil), t0+offset)
+	}
+	record := merge(nil, "UserPromptSubmit", "parent", nil, 0)
+	record = merge(record, "PreToolUse", "orphan", map[string]any{"agent_id": "orphan", "agent_type": "default"}, 2000)
+	if children := record["children"].([]any); len(children) != 0 || record["session_id"] != "parent" {
+		t.Fatalf("an orphan tool event changed parent attribution: children=%#v session=%v", children, record["session_id"])
+	}
+	worker := map[string]any{"agent_id": "child", "agent_type": "default"}
+	record = merge(record, "SubagentStart", "parent", worker, 4000)
+	if children := record["children"].([]any); len(children) != 1 {
+		t.Fatalf("actual launch was not tracked: %#v", children)
+	}
+	record = merge(record, "SubagentStop", "parent", worker, 6000)
+	record = merge(record, "PostToolUse", "child", worker, 8000)
+	record = merge(record, "Stop", "parent", nil, 10000)
+	if record["state"] != "done" {
+		t.Fatalf("late child tool event kept the parent working: %v", record["state"])
+	}
+	record = merge(record, "UserPromptSubmit", "parent", nil, 12000)
+	if children := record["children"].([]any); len(children) != 0 {
+		t.Fatalf("previous turn's completed child appeared in the next turn: %#v", children)
+	}
+}

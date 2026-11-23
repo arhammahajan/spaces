@@ -402,6 +402,12 @@ func childInfo(agent string, payload map[string]any, event, tool, text string) m
 	subConv := isSubagentConversation(payload)
 	agentID := firstStr(payload, "agent_id", "agentId", "parent_agent_id", "parentAgentId")
 	agentType := firstStr(payload, "agentName", "agent_name", "agent_type", "agentType", "subagent_type", "subagentType")
+	if agent == "codex" {
+		agentID = firstStr(payload, "agent_id", "agentId")
+		if agentID == "" {
+			return nil
+		}
+	}
 	var agyPromptHint string
 	if agent == "antigravity" && !subConv {
 		if meta := inspectAntigravitySubagent(payload); meta.IsSubagent {

@@ -52,6 +52,18 @@ func ApplyAccessLevel(spec *harnessenv.LaunchSpec) error {
 	return PromptAccessLevelForLaunch(spec)
 }
 
+// ApplyResumeAccess restores a recorded level without consulting the launch
+// environment or asking the user. Missing or obsolete levels use defaults.
+func ApplyResumeAccess(spec *harnessenv.LaunchSpec, id string) {
+	level, ok := FindAccessLevel(spec.Agent, id)
+	if !ok {
+		level, ok = FindAccessLevel(spec.Agent, "default")
+	}
+	if ok {
+		layerAccessLevel(spec, level)
+	}
+}
+
 // PreselectAccessLevel applies a deterministic HARNESS_ACCESS choice and
 // never prompts. Launches, `describe`, and other resolutions share it.
 func PreselectAccessLevel(spec *harnessenv.LaunchSpec) error {
@@ -79,6 +91,9 @@ func PreselectAccessLevel(spec *harnessenv.LaunchSpec) error {
 // invocations never reach it, and an explicit HARNESS_ACCESS preselect has
 // already decided the level.
 func PromptAccessLevelForLaunch(spec *harnessenv.LaunchSpec) error {
+	if spec.AccessLevel != "" {
+		return nil
+	}
 	if os.Getenv("HARNESS_AGENT") != "" {
 		return nil
 	}
@@ -100,6 +115,7 @@ func PromptAccessLevelForLaunch(spec *harnessenv.LaunchSpec) error {
 // layerAccessLevel prepends the level's flags ahead of every other
 // argument so they land before any subcommand the caller passes.
 func layerAccessLevel(spec *harnessenv.LaunchSpec, level AccessLevel) {
+	spec.AccessLevel = level.ID
 	if len(level.Args) > 0 {
 		spec.PrependArgs = append(append([]string{}, level.Args...), spec.PrependArgs...)
 	}

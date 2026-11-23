@@ -3,6 +3,7 @@ package resurrect
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -113,27 +114,22 @@ func buildPaneCommand(p PaneSnapshot, opts RestoreOptions, skipResume bool) []st
 		}
 
 		// Case 1: Harness launcher (e.g. `spaces agy profile saucerf166` or legacy `harness agy profile saucerf166`).
-		if isHarnessLauncher(p.FullCommand) {
+		if _, _, ok := agent.HarnessLaunchArgs(p.FullCommand); ok {
 			cmdWithResume := appendResumeArgs(p.FullCommand, p.Agent, p.SessionID, skipResume)
-			if filepath.Base(cmdWithResume[0]) == "harness" {
-				cmdWithResume[0] = self
-			}
+			args, level, _ := agent.HarnessLaunchArgs(cmdWithResume)
 			cmd := []string{self, "__shim"}
 			if p.Profile != "" {
 				cmd = append(cmd, "--profile", p.Profile)
 			}
 			cmd = append(cmd, p.Agent)
-			return append(cmd, cmdWithResume...)
+			return append(cmd, agent.HarnessResumeCommand(self, level, args...)...)
 		}
 
-		// Case 2: Profiled agent pane (in-process __shim launch).
+		// Case 2: Profiled agent pane.
 		if p.Profile != "" {
 			cmd := []string{self, "__shim", "--profile", p.Profile, p.Agent}
-			if len(resumeArgs) > 0 {
-				cmd = append(cmd, "--")
-				cmd = append(cmd, resumeArgs...)
-			}
-			return cmd
+			args := agent.HarnessProfileCommand(p.Agent, p.Profile, resumeArgs...)
+			return append(cmd, agent.HarnessResumeCommand(self, "", args...)...)
 		}
 
 		// Case 3: Direct agent invocation captured in FullCommand.
@@ -159,19 +155,6 @@ func buildPaneCommand(p PaneSnapshot, opts RestoreOptions, skipResume bool) []st
 		}
 	}
 	return nil
-}
-
-func isHarnessLauncher(argv []string) bool {
-	if len(argv) < 2 {
-		return false
-	}
-	base := filepath.Base(argv[0])
-	switch base {
-	case "harness", "spaces", "tmux-spaces":
-		return argv[1] == "profile" || argv[1] == "launch" || CanonicalAgent(argv[1]) != ""
-	default:
-		return false
-	}
 }
 
 // resolveRestoreCWD resolves a pane or space CWD for resurrection when the
@@ -221,7 +204,7 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 		return nil
 	}
 
-	assigned, skipResume := resolveAgentSessions(ctx, snap, opts)
+	resolution := resolveAgentSessions(ctx, snap, opts)
 
 	activeWinTarget := ""
 	for wi, win := range snap.Windows {
@@ -238,9 +221,6 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 			firstPane = PaneSnapshot{CWD: snap.CWD}
 		}
 		firstKey := paneResolveKey(wi, 0)
-		if sid := assigned[firstKey]; sid != "" {
-			firstPane.SessionID = sid
-		}
 		winWT := win.WorktreePath
 		if winWT == "" {
 			winWT = snap.WorktreePath
@@ -250,7 +230,7 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 			firstCWD = snap.CWD
 		}
 		firstCWD = resolveRestoreCWD(firstCWD, winWT, snap.MainRepoRoot)
-		firstCmd := buildPaneCommand(firstPane, opts, skipResume[firstKey])
+		firstCmd := restoredPaneCommand(firstPane, opts, firstKey, resolution)
 
 		var createdPaneIDs []string
 		if hasRich {
@@ -300,15 +280,12 @@ func Restore(ctx context.Context, r TmuxRestorer, snap SpaceSnapshot, opts Resto
 		for pi := 1; pi < len(win.Panes); pi++ {
 			p := win.Panes[pi]
 			pKey := paneResolveKey(wi, pi)
-			if sid := assigned[pKey]; sid != "" {
-				p.SessionID = sid
-			}
 			pCWD := p.CWD
 			if pCWD == "" {
 				pCWD = firstCWD
 			}
 			pCWD = resolveRestoreCWD(pCWD, winWT, snap.MainRepoRoot)
-			pCmd := buildPaneCommand(p, opts, skipResume[pKey])
+			pCmd := restoredPaneCommand(p, opts, pKey, resolution)
 			if hasRich {
 				splitTarget := winTarget
 				if lastPaneID != "" {
@@ -405,9 +382,22 @@ func paneResolveKey(wi, pi int) string {
 
 // resolveAgentSessions delegates restore-time session resolution and
 // deduplication to each agent plugin's SessionResolver.
-func resolveAgentSessions(ctx context.Context, snap SpaceSnapshot, opts RestoreOptions) (map[string]string, map[string]bool) {
-	assigned := map[string]string{}
-	skipResume := map[string]bool{}
+func restoredPaneCommand(p PaneSnapshot, opts RestoreOptions, key string, resolution agent.SessionResolution) []string {
+	if resolution.DuplicatePanes[key] {
+		return nil
+	}
+	if sid := resolution.SessionIDs[key]; sid != "" {
+		p.SessionID = sid
+	}
+	return buildPaneCommand(p, opts, resolution.SkipResume[key])
+}
+
+func resolveAgentSessions(ctx context.Context, snap SpaceSnapshot, opts RestoreOptions) agent.SessionResolution {
+	resolution := agent.SessionResolution{
+		SessionIDs:     map[string]string{},
+		SkipResume:     map[string]bool{},
+		DuplicatePanes: map[string]bool{},
+	}
 
 	byAgent := map[string][]agent.SessionPaneRef{}
 	var agentOrder []string
@@ -440,7 +430,7 @@ func resolveAgentSessions(ctx context.Context, snap SpaceSnapshot, opts RestoreO
 	}
 
 	if len(agentOrder) == 0 {
-		return assigned, skipResume
+		return resolution
 	}
 
 	lookup := func(ctx context.Context, agentID, cwd, profile, title string, exclude map[string]bool) (string, bool) {
@@ -459,16 +449,11 @@ func resolveAgentSessions(ctx context.Context, snap SpaceSnapshot, opts RestoreO
 			continue
 		}
 		res := plugin.SessionResolver().ResolveRestoreSessions(ctx, byAgent[agentID], lookup)
-		for k, v := range res.SessionIDs {
-			assigned[k] = v
-		}
-		for k, v := range res.SkipResume {
-			if v {
-				skipResume[k] = true
-			}
-		}
+		maps.Copy(resolution.SessionIDs, res.SessionIDs)
+		maps.Copy(resolution.SkipResume, res.SkipResume)
+		maps.Copy(resolution.DuplicatePanes, res.DuplicatePanes)
 	}
-	return assigned, skipResume
+	return resolution
 }
 
 func defaultResolveAgentSession(ctx context.Context, agentID, cwd, profile, title string, exclude map[string]bool) (string, bool) {
