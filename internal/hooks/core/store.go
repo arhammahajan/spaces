@@ -94,6 +94,23 @@ func WriteStore(store map[string]any) error {
 	return atomicWrite(StorePath(), payload, 0o600)
 }
 
+// Notification describes a terminal notification triggered by a pane state
+// transition to done, failed, or blocked.
+type Notification struct {
+	Session string
+	Pane    string
+	Agent   string
+	App     string
+	State   string // "done", "failed", "blocked"
+	Title   string
+	Body    string
+}
+
+// NotifyFunc is an optional seam wired by cmd/tmux-spaces to emit terminal
+// desktop notifications (OSC 99 / OSC 9) when any coding agent finishes,
+// fails, or needs input. Nil by default in tests.
+var NotifyFunc func(Notification)
+
 // MergeIntoStore folds a normalized envelope into the pane record and
 // persists the pruned store under the store flock, mirroring
 // merge_into_store.
@@ -103,10 +120,14 @@ func MergeIntoStore(session string, pane any, event map[string]any) error {
 	if err != nil {
 		return err
 	}
-	defer unlockFile(handle)
 	store := LoadStore()
-	foldEventIntoStore(store, session, pane, event, now)
-	return WriteStore(PruneStore(store, now))
+	notif := foldEventIntoStore(store, session, pane, event, now)
+	writeErr := WriteStore(PruneStore(store, now))
+	unlockFile(handle)
+	if writeErr == nil && notif != nil && NotifyFunc != nil {
+		NotifyFunc(*notif)
+	}
+	return writeErr
 }
 
 // ApplyEventToCopy folds a spool/store entry (session+pane+envelope fields)
@@ -123,10 +144,10 @@ func ApplyEventToCopy(store map[string]any, entry map[string]any, now int64) {
 			event[k] = v
 		}
 	}
-	foldEventIntoStore(store, stringKey(session), pane, event, now)
+	_ = foldEventIntoStore(store, stringKey(session), pane, event, now)
 }
 
-func foldEventIntoStore(store map[string]any, session string, pane any, event map[string]any, now int64) {
+func foldEventIntoStore(store map[string]any, session string, pane any, event map[string]any, now int64) *Notification {
 	panes, ok := store["panes"].(map[string]any)
 	if !ok {
 		panes = map[string]any{}
@@ -146,18 +167,43 @@ func foldEventIntoStore(store map[string]any, session string, pane any, event ma
 	}
 	merged, applied := mergeEventApplied(previous, event, now)
 	sessionPanes[key] = merged
-	if applied {
-		recordOutcomeIfTerminal(store, session, key, previousState, merged, event, now)
+	if !applied {
+		return nil
 	}
+	if notif := recordOutcomeIfTerminal(store, session, key, previousState, merged, event, now); notif != nil {
+		return notif
+	}
+	if child, ok := event["child"].(map[string]any); ok && child != nil {
+		return nil
+	}
+	if newState, _ := merged["state"].(string); newState == "blocked" && previousState != "blocked" {
+		agent, _ := merged["agent"].(string)
+		app, _ := merged["app"].(string)
+		title := stringKey(merged["title"])
+		if title == "" {
+			title = stringKey(merged["prompt"])
+		}
+		text, _ := merged["text"].(string)
+		return &Notification{
+			Session: session,
+			Pane:    key,
+			Agent:   agent,
+			App:     app,
+			State:   "blocked",
+			Title:   title,
+			Body:    text,
+		}
+	}
+	return nil
 }
 
-func recordOutcomeIfTerminal(store map[string]any, session, paneKey, previousState string, merged, event map[string]any, now int64) {
+func recordOutcomeIfTerminal(store map[string]any, session, paneKey, previousState string, merged, event map[string]any, now int64) *Notification {
 	if child, ok := event["child"].(map[string]any); ok && child != nil {
-		return
+		return nil
 	}
 	newState, _ := merged["state"].(string)
 	if (newState != "done" && newState != "failed") || previousState == newState {
-		return
+		return nil
 	}
 	tsMs := toInt64(event["ts_ms"])
 	if tsMs <= 0 {
@@ -184,7 +230,18 @@ func recordOutcomeIfTerminal(store map[string]any, session, paneKey, previousSta
 		"cwd":        merged["cwd"],
 		"ts_ms":      tsMs,
 	}
-	appendOutcome(store, entry, DedupeMS)
+	if appendOutcome(store, entry, OutcomeDedupeMS) {
+		return &Notification{
+			Session: session,
+			Pane:    paneKey,
+			Agent:   agent,
+			App:     app,
+			State:   newState,
+			Title:   stringKey(title),
+			Body:    text,
+		}
+	}
+	return nil
 }
 
 // RecordOutcome persists one recent completion ("done") or failure ("failed")
@@ -243,10 +300,27 @@ func RecordOutcome(entry map[string]any) error {
 	if err != nil {
 		return err
 	}
-	defer unlockFile(handle)
 	store := LoadStore()
-	appendOutcome(store, normalized, OutcomeDedupeMS)
-	return WriteStore(PruneStore(store, now))
+	isNew := appendOutcome(store, normalized, OutcomeDedupeMS)
+	writeErr := WriteStore(PruneStore(store, now))
+	unlockFile(handle)
+	if writeErr == nil && isNew && NotifyFunc != nil {
+		textStr := strings.TrimSpace(stringKey(normalized["text"]))
+		// Skip trivial exit-0 "finished" outcomes emitted when the user
+		// manually quits an interactive agent.
+		if !(outcome == "done" && strings.EqualFold(textStr, "finished")) {
+			NotifyFunc(Notification{
+				Session: session,
+				Pane:    stringKey(normalized["pane"]),
+				Agent:   agent,
+				App:     app,
+				State:   outcome,
+				Title:   stringKey(normalized["title"]),
+				Body:    textStr,
+			})
+		}
+	}
+	return writeErr
 }
 
 // PaneState returns the current non-stale state recorded for (session, pane)
@@ -353,29 +427,92 @@ func RemoveOutcome(match map[string]any) error {
 	return WriteStore(PruneStore(store, now))
 }
 
-func appendOutcome(store map[string]any, entry map[string]any, dedupeWindow int64) {
+func outcomeTextQuality(raw any) int {
+	t := strings.ToLower(strings.TrimSpace(stringKey(raw)))
+	switch t {
+	case "":
+		return 0
+	case "finished", "turn complete":
+		return 1
+	default:
+		return 2
+	}
+}
+
+func mergeOutcomeMetadata(dst, src map[string]any) {
+	if !truthy(dst["session_id"]) && truthy(src["session_id"]) {
+		dst["session_id"] = src["session_id"]
+	}
+	if !truthy(dst["title"]) && truthy(src["title"]) {
+		dst["title"] = src["title"]
+	}
+	if !truthy(dst["profile"]) && truthy(src["profile"]) {
+		dst["profile"] = src["profile"]
+	}
+	if !truthy(dst["model"]) && truthy(src["model"]) {
+		dst["model"] = src["model"]
+	}
+	if !truthy(dst["cwd"]) && truthy(src["cwd"]) {
+		dst["cwd"] = src["cwd"]
+	}
+	if outcomeTextQuality(dst["text"]) < outcomeTextQuality(src["text"]) {
+		dst["text"] = src["text"]
+	}
+}
+
+func outcomeRichness(rec map[string]any) int {
+	score := outcomeTextQuality(rec["text"])
+	if truthy(rec["session_id"]) {
+		score += 4
+	}
+	if truthy(rec["title"]) {
+		score += 2
+	}
+	if truthy(rec["model"]) {
+		score += 1
+	}
+	if truthy(rec["profile"]) {
+		score += 1
+	}
+	return score
+}
+
+func outcomeAgentKey(rec map[string]any) string {
+	a := strings.ToLower(strings.TrimSpace(stringKey(rec["agent"])))
+	if a == "" {
+		a = strings.ToLower(strings.TrimSpace(stringKey(rec["app"])))
+	}
+	return a
+}
+
+func appendOutcome(store map[string]any, entry map[string]any, dedupeWindow int64) bool {
 	session, _ := entry["session"].(string)
 	paneKey := stringKey(entry["pane"])
 	outcome, _ := entry["outcome"].(string)
 	tsMs := toInt64(entry["ts_ms"])
 	convKey := outcomeConversationKey(entry)
+	entryAgent := outcomeAgentKey(entry)
+	entryCWD := strings.TrimSpace(stringKey(entry["cwd"]))
+	entryTitle := strings.ToLower(strings.TrimSpace(stringKey(entry["title"])))
 
 	existing, _ := store["outcomes"].([]any)
 	items := make([]map[string]any, 0, len(existing)+1)
+	mergedRecentSameOutcome := false
 	for _, raw := range existing {
 		rec, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
+		recConvKey := outcomeConversationKey(rec)
+		recOutcome, _ := rec["outcome"].(string)
+		d := tsMs - toInt64(rec["ts_ms"])
+		if d < 0 {
+			d = -d
+		}
 		// One entry per conversation: when the same (agent, session_id)
 		// completes or fails again (e.g. after reopening and closing), replace
 		// the older entry with the latest outcome instead of duplicating it.
-		if convKey != "" && outcomeConversationKey(rec) == convKey {
-			recOutcome, _ := rec["outcome"].(string)
-			d := tsMs - toInt64(rec["ts_ms"])
-			if d < 0 {
-				d = -d
-			}
+		if convKey != "" && recConvKey == convKey {
 			// A generic exit "finished" ("done") arriving right after a failed
 			// outcome (e.g. async __osc-watch delivering attn.Finish(0) after
 			// recordLaunchOutcome preserved a failed turn) must not overwrite
@@ -383,39 +520,58 @@ func appendOutcome(store map[string]any, entry map[string]any, dedupeWindow int6
 			if recOutcome == "failed" && outcome == "done" &&
 				strings.EqualFold(strings.TrimSpace(stringKey(entry["text"])), "finished") &&
 				d <= dedupeWindow {
-				return
+				return false
+			}
+			if recOutcome == outcome && d <= dedupeWindow {
+				mergedRecentSameOutcome = true
 			}
 			// Preserve richer metadata from the existing entry for the same conversation.
-			if !truthy(entry["title"]) && truthy(rec["title"]) {
-				entry["title"] = rec["title"]
-			}
-			if !truthy(entry["profile"]) && truthy(rec["profile"]) {
-				entry["profile"] = rec["profile"]
-			}
-			if !truthy(entry["model"]) && truthy(rec["model"]) {
-				entry["model"] = rec["model"]
-			}
-			if !truthy(entry["cwd"]) && truthy(rec["cwd"]) {
-				entry["cwd"] = rec["cwd"]
-			}
+			mergeOutcomeMetadata(entry, rec)
 			continue
 		}
-		if recSession, _ := rec["session"].(string); recSession == session {
-			if recPane := stringKey(rec["pane"]); recPane == paneKey {
-				recOutcome, _ := rec["outcome"].(string)
-				d := tsMs - toInt64(rec["ts_ms"])
-				if d < 0 {
-					d = -d
+		recSession, _ := rec["session"].(string)
+		recPane := stringKey(rec["pane"])
+		recAgent := outcomeAgentKey(rec)
+		if recSession == session && recPane == paneKey {
+			if d <= dedupeWindow {
+				if recOutcome == "failed" && outcome == "done" &&
+					strings.EqualFold(strings.TrimSpace(stringKey(entry["text"])), "finished") {
+					return false
 				}
-				if d <= dedupeWindow {
-					if recOutcome == outcome {
-						return
+				if recOutcome == outcome {
+					// When both OSC and hook report the same completion on the
+					// same pane within the dedupe window, keep whichever has
+					// richer metadata (e.g. session_id, reply text, model)
+					// instead of dropping the richer hook record.
+					if outcomeRichness(entry) > outcomeRichness(rec) {
+						mergeOutcomeMetadata(entry, rec)
+						mergedRecentSameOutcome = true
+						continue
 					}
-					if recOutcome == "failed" && outcome == "done" &&
-						strings.EqualFold(strings.TrimSpace(stringKey(entry["text"])), "finished") {
-						return
-					}
+					return false
 				}
+			}
+			// An unattributed (session_id == "") outcome on the same
+			// (session, pane, agent) is superseded by a newer outcome for the
+			// same pane so repeated turns without session_id never pile up.
+			if recConvKey == "" && entryAgent != "" && recAgent == entryAgent {
+				mergeOutcomeMetadata(entry, rec)
+				continue
+			}
+		}
+		// When a session_id-bearing outcome arrives right after an unattributed
+		// OSC outcome for the same (agent, cwd, title) — or vice versa — merge
+		// them so one turn never produces two entries.
+		if d <= dedupeWindow && recOutcome == outcome && entryAgent != "" && recAgent == entryAgent &&
+			entryTitle != "" && strings.ToLower(strings.TrimSpace(stringKey(rec["title"]))) == entryTitle &&
+			(entryCWD == "" || strings.TrimSpace(stringKey(rec["cwd"])) == "" || strings.TrimSpace(stringKey(rec["cwd"])) == entryCWD) {
+			if convKey != "" && recConvKey == "" {
+				mergeOutcomeMetadata(entry, rec)
+				mergedRecentSameOutcome = true
+				continue
+			}
+			if convKey == "" && recConvKey != "" {
+				return false
 			}
 		}
 		items = append(items, rec)
@@ -432,4 +588,5 @@ func appendOutcome(store map[string]any, entry map[string]any, dedupeWindow int6
 		out[i] = m
 	}
 	store["outcomes"] = out
+	return !mergedRecentSameOutcome
 }

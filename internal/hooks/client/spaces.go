@@ -234,14 +234,15 @@ func EnrichOutcomeMap(entry map[string]any) {
 			entry["title"] = t
 		}
 	}
-	if (len(launchCmd) > 0 || strings.TrimSpace(profile) != "") && agentName != "" && strings.TrimSpace(sid) != "" && RecordConversationLaunchFunc != nil {
+	outcomeStr, _ := entry["outcome"].(string)
+	textStr, _ := entry["text"].(string)
+	if !strings.EqualFold(strings.TrimSpace(outcomeStr), "failed") &&
+		(len(launchCmd) > 0 || strings.TrimSpace(profile) != "") &&
+		agentName != "" && strings.TrimSpace(sid) != "" && RecordConversationLaunchFunc != nil {
 		ctx, cancel := contextWithTimeout(2 * time.Second)
 		defer cancel()
 		_ = RecordConversationLaunchFunc(ctx, agentName, strings.TrimSpace(sid), strings.TrimSpace(profile), strings.TrimSpace(cwd), strings.TrimSpace(title), launchCmd, strings.TrimSpace(session), tmuxNowMs())
 	}
-
-	outcomeStr, _ := entry["outcome"].(string)
-	textStr, _ := entry["text"].(string)
 	if strings.EqualFold(strings.TrimSpace(outcomeStr), "done") {
 		paneFailed := PaneState != nil && session != "" && paneStr != "" &&
 			PaneState(session, strings.TrimPrefix(paneStr, "%")) == "failed"

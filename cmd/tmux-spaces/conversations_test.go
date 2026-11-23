@@ -155,6 +155,7 @@ func TestTUIBackendOpenConversationTargetsCurrentSessionAndRecords(t *testing.T)
 	b.selfPath = "/usr/local/bin/tmux-spaces"
 	b.now = func() time.Time { return time.UnixMilli(1700000555000) }
 	b.dirExists = func(p string) bool { return p == "/repo/work" }
+	b.profileExists = func(agentName, profile string) bool { return true }
 	b.lookPath = func(bin string) (string, error) {
 		if bin == "harness" {
 			return "/usr/local/bin/harness", nil
@@ -281,6 +282,7 @@ func TestTUIBackendOpenConversationKeepsLaunchMetadataOwnedByLauncher(t *testing
 	b.selfPath = "/usr/local/bin/tmux-spaces"
 	b.now = func() time.Time { return time.UnixMilli(1700000555000) }
 	b.dirExists = func(p string) bool { return p == "/repo/work" }
+	b.profileExists = func(agentName, profile string) bool { return true }
 	b.lookPath = func(bin string) (string, error) {
 		if bin == "harness" {
 			return "/usr/local/bin/harness", nil
@@ -484,5 +486,48 @@ func TestReopenLiveCodexFocusesExistingPane(t *testing.T) {
 	}
 	if selected != 2 || launched != 1 {
 		t.Fatalf("explicit new tab selected %d panes and launched %d windows", selected, launched)
+	}
+}
+
+func TestNonexistentProfileFallsBackToDefault(t *testing.T) {
+	var newWindows [][]string
+	runner := &fakeRunner{handler: func(args []string) (string, string, int, error) {
+		switch args[0] {
+		case "list-panes":
+			return "", "", 0, nil
+		case "list-sessions":
+			return "$1\x1fdev\x1f1\x1f1\x1f1700000000\n", "", 0, nil
+		case "display-message":
+			return "dev\n", "", 0, nil
+		case "new-window":
+			newWindows = append(newWindows, append([]string(nil), args...))
+		}
+		return "", "", 0, nil
+	}}
+	backend := newTUIBackend(tmux.NewClient(runner))
+	backend.selfPath = "/usr/local/bin/tmux-spaces"
+	backend.recordConvOpen = func(context.Context, model.ConversationEntry, string, int64) error { return nil }
+	backend.profileExists = func(agentName, profile string) bool {
+		return profile == "" || profile == "default"
+	}
+
+	ctx := context.Background()
+	if err := backend.OpenConversation(ctx, model.ConversationEntry{
+		Agent:     "codex",
+		ID:        "sid-1",
+		Profile:   "work",
+		LaunchCmd: []string{"/usr/local/bin/tmux-spaces", "__resume-access", "", "codex", "profile", "work"},
+	}, false); err != nil {
+		t.Fatalf("OpenConversation error: %v", err)
+	}
+	if len(newWindows) != 1 {
+		t.Fatalf("expected 1 new-window call, got %d", len(newWindows))
+	}
+	joined := strings.Join(newWindows[0], " ")
+	if strings.Contains(joined, "work") {
+		t.Fatalf("must not launch nonexistent profile work: %s", joined)
+	}
+	if !strings.Contains(joined, "-n codex") || !strings.Contains(joined, "profile default") || !strings.Contains(joined, "resume sid-1") {
+		t.Fatalf("expected fallback to default profile with resume sid-1, got: %s", joined)
 	}
 }

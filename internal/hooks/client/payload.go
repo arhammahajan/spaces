@@ -188,26 +188,42 @@ func procStatFields(pid int) ([]string, error) {
 // `pipe-pane -o`) AND projects onto native `@spaces_*` per-pane options as a
 // direct fallback when no pipe watcher is attached.
 func EmitProgramStatus(state, app, msg, kind string) {
-	body := "state=" + state + ":app=" + app
-	if kind != "" {
-		body += ":kind=" + kind
-	}
-	if msg != "" {
-		body += ":msg=" + b64Encode(msg)
-	}
-	sequence := "\x1b]7501;" + body + "\x1b\\"
-	for _, path := range TtyPathsFunc() {
-		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
-		if err != nil {
-			continue
+	EmitProgramStatusToPane("", state, app, msg, kind)
+}
+
+// EmitProgramStatusToPane is like EmitProgramStatus but targets an explicit
+// tmux paneRef (e.g. "%20") when non-empty. When paneRef differs from
+// $TMUX_PANE (for example when Codex's shared app-server daemon executes a
+// hook on behalf of another pane), OSC tty writes are skipped so status never
+// leaks onto the daemon's original pane, and native tmux options are written
+// directly to paneRef.
+func EmitProgramStatusToPane(paneRef, state, app, msg, kind string) {
+	envPane := os.Getenv("TMUX_PANE")
+	routedOtherPane := paneRef != "" && paneRef != envPane
+	if !routedOtherPane {
+		body := "state=" + state + ":app=" + app
+		if kind != "" {
+			body += ":kind=" + kind
 		}
-		_, werr := f.WriteString(sequence)
-		cerr := f.Close()
-		if werr == nil && cerr == nil {
-			break
+		if msg != "" {
+			body += ":msg=" + b64Encode(msg)
+		}
+		sequence := "\x1b]7501;" + body + "\x1b\\"
+		for _, path := range TtyPathsFunc() {
+			f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o666)
+			if err != nil {
+				continue
+			}
+			_, werr := f.WriteString(sequence)
+			cerr := f.Close()
+			if werr == nil && cerr == nil {
+				break
+			}
 		}
 	}
-	if inTmuxPane() {
+	if paneRef != "" && os.Getenv("ZELLIJ_SESSION_NAME") == "" {
+		emitTmuxProgramStatusToPane(paneRef, state, app, msg, kind)
+	} else if inTmuxPane() {
 		emitTmuxProgramStatus(state, app, msg, kind)
 	}
 	// Hook stdout is consumed by the agent; never leak protocol bytes there.
@@ -263,6 +279,12 @@ func EmitAgentEvent(agent string, event string) {
 
 // EmitHookStatus projects a normalized hook event onto OSC 7501 and tmux options.
 func EmitHookStatus(event map[string]any) {
+	EmitHookStatusToPane("", event)
+}
+
+// EmitHookStatusToPane projects a normalized hook event onto OSC 7501 and tmux
+// options for an explicit paneRef (or $TMUX_PANE when empty).
+func EmitHookStatusToPane(paneRef string, event map[string]any) {
 	if event == nil {
 		return
 	}
@@ -281,21 +303,25 @@ func EmitHookStatus(event map[string]any) {
 	}
 	text, _ := event["text"].(string)
 	if raw == "session_start" {
-		EmitProgramStatus("working", app, "", "")
-		EmitProgramStatus("idle", app, "", "")
+		EmitProgramStatusToPane(paneRef, "working", app, "", "")
+		EmitProgramStatusToPane(paneRef, "idle", app, "", "")
 		return
 	}
 	if raw == "session_end" {
-		EmitProgramStatus("idle", app, text, "")
+		EmitProgramStatusToPane(paneRef, "idle", app, text, "")
 		return
 	}
-	if inTmuxPane() {
+	if paneRef != "" && os.Getenv("ZELLIJ_SESSION_NAME") == "" {
+		if title, _ := event["title"].(string); strings.TrimSpace(title) != "" {
+			recordTmuxConversationTitleToPane(paneRef, title)
+		}
+	} else if inTmuxPane() {
 		if title, _ := event["title"].(string); strings.TrimSpace(title) != "" {
 			recordTmuxConversationTitle(title)
 		}
 	}
 	if osc, ok := OSCStates[state]; ok && osc != "" {
-		EmitProgramStatus(osc, app, text, kind)
+		EmitProgramStatusToPane(paneRef, osc, app, text, kind)
 	}
 }
 
@@ -344,8 +370,18 @@ func hookTarget() (string, string, bool) {
 
 // RecordResumeTarget stores the conversation id on the current tmux pane.
 func RecordResumeTarget(agent string, payload map[string]any) {
+	RecordResumeTargetToPane("", agent, payload)
+}
+
+// RecordResumeTargetToPane stores the conversation id on paneRef (or $TMUX_PANE
+// when paneRef is empty).
+func RecordResumeTargetToPane(paneRef, agent string, payload map[string]any) {
 	sessionID := ExtractSessionID(payload)
 	if sessionID == "" {
+		return
+	}
+	if paneRef != "" && os.Getenv("ZELLIJ_SESSION_NAME") == "" {
+		recordTmuxResumeTargetToPane(paneRef, agent, sessionID)
 		return
 	}
 	if inTmuxPane() {

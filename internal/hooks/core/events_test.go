@@ -368,3 +368,72 @@ func TestCodexSubagentsAreScopedToActualLaunchesAndActiveTurns(t *testing.T) {
 		t.Fatalf("previous turn's completed child appeared in the next turn: %#v", children)
 	}
 }
+
+func TestAppendOutcomeMergesOSCAndHookWithoutDuplicates(t *testing.T) {
+	t0 := int64(1_700_000_000_000)
+	store := map[string]any{"v": Version, "panes": map[string]any{}, "outcomes": []any{}}
+
+	// 1. OSC fires first with empty session_id and empty text.
+	appendOutcome(store, map[string]any{
+		"session": "dev", "pane": "20", "agent": "codex", "app": "codex",
+		"outcome": "done", "text": "", "title": "hello who are you",
+		"cwd": "/repo", "session_id": nil, "ts_ms": t0,
+	}, OutcomeDedupeMS)
+
+	// 2. Hook Stop fires 800ms later on the same pane with rich session_id + reply + model.
+	appendOutcome(store, map[string]any{
+		"session": "dev", "pane": "20", "agent": "codex", "app": "codex",
+		"outcome": "done", "text": "I'm Codex.", "title": "hello who are you",
+		"cwd": "/repo", "model": "gpt-6-luna", "session_id": "sid-20", "ts_ms": t0 + 800,
+	}, OutcomeDedupeMS)
+
+	outcomes := store["outcomes"].([]any)
+	if len(outcomes) != 1 {
+		t.Fatalf("expected 1 merged outcome, got %d: %#v", len(outcomes), outcomes)
+	}
+	got := outcomes[0].(map[string]any)
+	if got["session_id"] != "sid-20" || got["text"] != "I'm Codex." || got["model"] != "gpt-6-luna" {
+		t.Fatalf("expected richer hook metadata to win, got %#v", got)
+	}
+
+	// 3. Repeated unattributed OSC outcomes on the same (session, pane, agent)
+	// > OutcomeDedupeMS apart collapse to a single entry instead of piling up.
+	appendOutcome(store, map[string]any{
+		"session": "spaces", "pane": "11", "agent": "codex", "app": "codex",
+		"outcome": "done", "text": "", "title": "Diagnose launch failure",
+		"cwd": "/repo/spaces", "session_id": nil, "ts_ms": t0 + 1000,
+	}, OutcomeDedupeMS)
+	appendOutcome(store, map[string]any{
+		"session": "spaces", "pane": "11", "agent": "codex", "app": "codex",
+		"outcome": "done", "text": "", "title": "Diagnose launch failure",
+		"cwd": "/repo/spaces", "session_id": nil, "ts_ms": t0 + 400_000,
+	}, OutcomeDedupeMS)
+
+	outcomes = store["outcomes"].([]any)
+	if len(outcomes) != 2 {
+		t.Fatalf("expected 2 total outcomes (no unattributed pane duplicates), got %d: %#v", len(outcomes), outcomes)
+	}
+
+	// 4. PruneStore removes pre-existing unattributed duplicates when an
+	// attributed outcome exists for the same (agent, cwd, title).
+	dirty := map[string]any{
+		"v": Version, "panes": map[string]any{},
+		"outcomes": []any{
+			map[string]any{
+				"session": "spaces", "pane": "11", "agent": "codex", "app": "codex",
+				"outcome": "done", "title": "Diagnose launch failure", "cwd": "/repo/spaces",
+				"session_id": nil, "ts_ms": t0 + 2000,
+			},
+			map[string]any{
+				"session": "dev", "pane": "5", "agent": "codex", "app": "codex",
+				"outcome": "done", "title": "Diagnose launch failure", "cwd": "/repo/spaces",
+				"session_id": "sid-diag", "ts_ms": t0 + 1000,
+			},
+		},
+	}
+	pruned := PruneStore(dirty, t0+5000)
+	pOutcomes := pruned["outcomes"].([]any)
+	if len(pOutcomes) != 1 || pOutcomes[0].(map[string]any)["session_id"] != "sid-diag" {
+		t.Fatalf("expected PruneStore to drop unattributed duplicate and keep attributed entry, got %#v", pOutcomes)
+	}
+}

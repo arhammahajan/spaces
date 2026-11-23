@@ -75,6 +75,7 @@ type seamSnapshot struct {
 	serve         func(bool, *int) int
 	discoverTitle func(string, string, string) string
 	recordLaunch  func(context.Context, string, string, string, string, string, []string, string, int64) error
+	paneProcArgv  func(int) []string
 	stdin         interface{ Read([]byte) (int, error) }
 	now           func() time.Time
 }
@@ -87,7 +88,7 @@ func saveSeams() seamSnapshot {
 		EnsureServer, SpaceHooksSummary, SpaceHooksDetail,
 		RecordOutcome, RemoveOutcome, PaneState,
 		HooksStatus, HooksStop, HooksStart, Daemonize, Serve,
-		DiscoverTitleFunc, RecordConversationLaunchFunc,
+		DiscoverTitleFunc, RecordConversationLaunchFunc, PaneProcArgvFunc,
 		StdinValue, NowFunc,
 	}
 }
@@ -99,6 +100,6 @@ func (s seamSnapshot) restore() {
 	EnsureServer, SpaceHooksSummary, SpaceHooksDetail = s.ensure, s.summary, s.detail
 	RecordOutcome, RemoveOutcome, PaneState = s.recordOutcome, s.removeOutcome, s.paneState
 	HooksStatus, HooksStop, HooksStart, Daemonize, Serve = s.status, s.stop, s.start, s.daemon, s.serve
-	DiscoverTitleFunc, RecordConversationLaunchFunc = s.discoverTitle, s.recordLaunch
+	DiscoverTitleFunc, RecordConversationLaunchFunc, PaneProcArgvFunc = s.discoverTitle, s.recordLaunch, s.paneProcArgv
 	StdinValue, NowFunc = s.stdin, s.now
 }

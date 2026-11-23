@@ -833,10 +833,18 @@ func maxAppLabelWidth(width int) int {
 
 // appColumnWidth computes a tight, consistent column width for the app (and
 // optional profile) column across visible rows so Spaces and Inbox columns stay
-// vertically aligned without excessive empty padding.
+// vertically aligned without excessive empty padding. In Inbox mode
+// (showSpaceCol == true), profiles are omitted and the baseline width is
+// len("antigravity") (11) so all harness labels align cleanly.
 func (m Model) appColumnWidth(showSpaceCol bool, maxW int) int {
 	colW := 10
+	if showSpaceCol {
+		colW = len("antigravity")
+	}
 	consider := func(app, profile string) {
+		if showSpaceCol {
+			profile = ""
+		}
 		if w := ansi.StringWidth(truncate(formatAppLabel(app, profile), maxW)); w > colW {
 			colW = w
 		}
@@ -906,10 +914,29 @@ func renderStatusTail(status model.Status, ageStr string, isOutcome bool, bg str
 	return b.String()
 }
 
+// renderInboxAgeTail renders the right-aligned age tail for Inbox rows without
+// repeating the section status label.
+func renderInboxAgeTail(ageStr string, isOutcome bool, bg string, st cellStyleFn) string {
+	var b strings.Builder
+	if isOutcome {
+		b.WriteString(st(ColorOverlay0, false).Render("↺ "))
+	} else {
+		b.WriteString(st(bg, false).Render("  "))
+	}
+	if ageStr != "" {
+		b.WriteString(st(ColorOverlay0, false).Render(fmt.Sprintf("%3s", ageStr)))
+	} else {
+		b.WriteString(st(bg, false).Render("   "))
+	}
+	return b.String()
+}
+
 // renderUnifiedPanePrimaryRow renders Line 1 of a pane row shared by Spaces and Inbox:
 //
-//	Left:  `▌   <icon>  <App [— Profile]>  [Space in Inbox]  <Conversation Title>`
-//	Right: `[1-line only: git/model]  [▸ bg badge]  <status (fixed)> <age (fixed)>`
+//	Spaces: Left  `▌   <icon>  <App [— Profile]>  <Conversation Title>`
+//	        Right `[1-line only: git/model]  [▸ bg badge]  <status (fixed)> <age (fixed)>`
+//	Inbox:  Left  `▌   <icon>  <Conversation Title>`
+//	        Right `<Space>  <App>  [1-line only: git/model]  [▸ bg badge]  <age (fixed)>`
 //
 // When a pane has an active 2nd line (Working / NeedsYou / Failed), git and
 // model move cleanly onto Line 2 so Line 1 stays calm and titles never crush.
@@ -948,19 +975,45 @@ func (m Model) renderUnifiedPanePrimaryRow(sp model.Space, p model.Pane, selecte
 	}
 	hasActionLine := paneHasActiveActionLine(sp, p, showSpaceCol, m.opts.HomeDir)
 
-	// Mandatory fixed-width right tail: status + age.
+	// Mandatory fixed-width right tail: status + age (Spaces) or age only (Inbox).
 	ageStr := ""
 	if p.AgeMs > 0 {
 		ageStr = formatAge(p.AgeMs)
 	}
-	tailStyled := renderStatusTail(p.Status, ageStr, false, bg, st)
+	var tailStyled string
+	if showSpaceCol {
+		tailStyled = renderInboxAgeTail(ageStr, false, bg, st)
+	} else {
+		tailStyled = renderStatusTail(p.Status, ageStr, false, bg, st)
+	}
 	tailW := ansi.StringWidth(tailStyled)
 
-	// Minimum left width: "  ●  " (5) + appCol + [spaceCol] + readable title.
-	const indentAndIconW = 5
-	minLeftW := indentAndIconW + appColW
+	// In Inbox mode, Space + Harness sit on the right side (in fixed columns)
+	// while the thread title takes the primary left column.
+	var inboxMetaStyled string
+	inboxMetaW := 0
 	if showSpaceCol {
-		minLeftW += 2 + spaceColW
+		spaceCol := truncate(sp.Name, spaceColW)
+		if sw := ansi.StringWidth(spaceCol); sw < spaceColW {
+			spaceCol += strings.Repeat(" ", spaceColW-sw)
+		}
+		spaceFg := ColorSubtext0
+		if sp.IsCurrent {
+			spaceFg = ColorLavender
+		}
+		var mb strings.Builder
+		mb.WriteString(st(spaceFg, selected || sp.IsCurrent).Render(spaceCol))
+		mb.WriteString(st(bg, false).Render("  "))
+		mb.WriteString(renderStyledAppCol(p.App, "", appColW, maxAppW, selected, bg, st))
+		inboxMetaStyled = mb.String()
+		inboxMetaW = ansi.StringWidth(inboxMetaStyled) + 2
+	}
+
+	// Minimum left width: "  ●  " (5) + primary content.
+	const indentAndIconW = 5
+	minLeftW := indentAndIconW
+	if !showSpaceCol {
+		minLeftW += appColW
 	}
 	if conv != "" {
 		cw := ansi.StringWidth(conv)
@@ -971,9 +1024,13 @@ func (m Model) renderUnifiedPanePrimaryRow(sp model.Space, p model.Pane, selecte
 		if cw > minTitle {
 			cw = minTitle
 		}
-		minLeftW += 2 + cw
+		if showSpaceCol {
+			minLeftW += cw
+		} else {
+			minLeftW += 2 + cw
+		}
 	}
-	availRight := innerW - minLeftW - tailW - 2
+	availRight := innerW - minLeftW - inboxMetaW - tailW - 2
 	if availRight < 0 {
 		availRight = 0
 	}
@@ -1018,6 +1075,10 @@ func (m Model) renderUnifiedPanePrimaryRow(sp model.Space, p model.Pane, selecte
 			rb.WriteString(gap)
 		}
 	}
+	if showSpaceCol && inboxMetaStyled != "" {
+		rb.WriteString(inboxMetaStyled)
+		rb.WriteString(gap)
+	}
 	rb.WriteString(tailStyled)
 	rightStyled := rb.String()
 	rightW := ansi.StringWidth(rightStyled)
@@ -1032,26 +1093,17 @@ func (m Model) renderUnifiedPanePrimaryRow(sp model.Space, p model.Pane, selecte
 	lb.WriteString(st(StatusColor(p.Status), p.Status != model.StatusIdle).Render(p.Status.Icon()))
 	lb.WriteString(st(bg, false).Render("  "))
 
-	if conv != "" || showSpaceCol {
+	if showSpaceCol {
+		titleBudget := maxLeft - indentAndIconW
+		if conv != "" && titleBudget > 3 {
+			titleBold := selected || p.Status.IsAttention()
+			lb.WriteString(st(ColorText, titleBold).Render(ansi.Truncate(conv, titleBudget, "…")))
+		}
+	} else if conv != "" {
 		lb.WriteString(renderStyledAppCol(p.App, p.Profile, appColW, maxAppW, selected, bg, st))
 		usedW := indentAndIconW + appColW
-
-		if showSpaceCol {
-			spaceCol := truncate(sp.Name, spaceColW)
-			if sw := ansi.StringWidth(spaceCol); sw < spaceColW {
-				spaceCol += strings.Repeat(" ", spaceColW-sw)
-			}
-			spaceFg := ColorSubtext0
-			if sp.IsCurrent {
-				spaceFg = ColorLavender
-			}
-			lb.WriteString(st(bg, false).Render("  "))
-			lb.WriteString(st(spaceFg, selected || sp.IsCurrent).Render(spaceCol))
-			usedW += 2 + spaceColW
-		}
-
 		titleBudget := maxLeft - usedW - 2
-		if conv != "" && titleBudget > 3 {
+		if titleBudget > 3 {
 			lb.WriteString(st(bg, false).Render("  "))
 			titleBold := selected || p.Status.IsAttention()
 			lb.WriteString(st(ColorText, titleBold).Render(ansi.Truncate(conv, titleBudget, "…")))

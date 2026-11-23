@@ -471,6 +471,7 @@ func TestTUIBackendLoadOutcomesAndOpenOutcomeInNewTab(t *testing.T) {
 	b := newTUIBackend(client)
 	b.selfPath = "/usr/local/bin/tmux-spaces"
 	b.dirExists = func(p string) bool { return p == "/repo/beta" }
+	b.profileExists = func(agentName, profile string) bool { return true }
 	b.lookPath = func(bin string) (string, error) {
 		if bin == "harness" {
 			return "/usr/local/bin/harness", nil

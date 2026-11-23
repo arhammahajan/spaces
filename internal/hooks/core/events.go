@@ -955,12 +955,49 @@ func pruneOutcomes(raw any, now int64) []any {
 	})
 	deduped := make([]map[string]any, 0, len(kept))
 	seenConv := map[string]bool{}
+	seenUnattributedPane := map[string]bool{}
+	// Index session_id-bearing entries by (agent, cwd, title) so unattributed
+	// (session_id == "") duplicates for the same task are dropped on prune.
+	attributedTasks := map[string]bool{}
+	for _, m := range kept {
+		if outcomeConversationKey(m) == "" {
+			continue
+		}
+		a := strings.ToLower(strings.TrimSpace(stringKey(m["agent"])))
+		if a == "" {
+			a = strings.ToLower(strings.TrimSpace(stringKey(m["app"])))
+		}
+		t := strings.ToLower(strings.TrimSpace(stringKey(m["title"])))
+		c := strings.TrimSpace(stringKey(m["cwd"]))
+		if a != "" && t != "" {
+			attributedTasks[a+"\x00"+c+"\x00"+t] = true
+		}
+	}
 	for _, m := range kept {
 		if key := outcomeConversationKey(m); key != "" {
 			if seenConv[key] {
 				continue
 			}
 			seenConv[key] = true
+		} else {
+			a := strings.ToLower(strings.TrimSpace(stringKey(m["agent"])))
+			if a == "" {
+				a = strings.ToLower(strings.TrimSpace(stringKey(m["app"])))
+			}
+			t := strings.ToLower(strings.TrimSpace(stringKey(m["title"])))
+			c := strings.TrimSpace(stringKey(m["cwd"]))
+			if a != "" && t != "" && attributedTasks[a+"\x00"+c+"\x00"+t] {
+				continue
+			}
+			s := strings.TrimSpace(stringKey(m["session"]))
+			p := strings.TrimPrefix(strings.TrimSpace(stringKey(m["pane"])), "%")
+			if a != "" && s != "" && p != "" {
+				pk := a + "\x00" + s + "\x00" + p
+				if seenUnattributedPane[pk] {
+					continue
+				}
+				seenUnattributedPane[pk] = true
+			}
 		}
 		deduped = append(deduped, m)
 		if len(deduped) >= MaxOutcomes {

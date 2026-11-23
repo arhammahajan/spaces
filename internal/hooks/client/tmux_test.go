@@ -615,3 +615,141 @@ func TestRecordResumeTargetRecordsProfileWithoutLaunchCmd(t *testing.T) {
 		t.Fatalf("case 4 expected no record when both launchCmd and profile are empty, got %+v", recorded)
 	}
 }
+
+func TestCodexAppServerDaemonRoutesToRealPane(t *testing.T) {
+	saveTmuxTestSeams(t)
+	clearSpaceEnv(t)
+
+	// Simulate Codex's shared managed app-server daemon inheriting stale
+	// TMUX_PANE=%5 and HARNESS_PROFILE=work from whichever pane started it.
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,6465,3")
+	t.Setenv("TMUX_PANE", "%5")
+	t.Setenv("HARNESS_PROFILE", "work")
+
+	AncestorsFunc = func() [][]string {
+		return [][]string{
+			{"/home/user/.codex/packages/app-server-daemon/bin/codex", "app-server", "--listen", "unix://", "--managed-daemon"},
+		}
+	}
+	PaneProcArgvFunc = func(pid int) []string {
+		if pid == 400 {
+			return []string{"/usr/local/bin/codex", "resume", "sid-4"}
+		}
+		if pid == 2000 {
+			return []string{"/usr/local/bin/codex"}
+		}
+		return nil
+	}
+	TtyPathsFunc = func() []string { return nil }
+
+	listOut := strings.Join([]string{
+		"harnesses\x1f%4\x1f0\x1ftmux-spaces\x1f/repo/dots\x1f400\x1fcodex\x1f\x1fidle\x1f1000\x1f1\x1f1\x1f1",
+		"dev\x1f%20\x1f0\x1fcodex\x1f/repo/app\x1f2000\x1fcodex\x1f\x1fworking\x1f2000\x1f1\x1f1\x1f1",
+		"dev\x1f%5\x1f0\x1fzsh\x1f/repo/app\x1f500\x1f\x1f\x1f\x1f0\x1f0\x1f0\x1f1",
+	}, "\n")
+
+	var tmuxCalls []tmuxCall
+	TmuxFunc = func(args []string, _ time.Duration) (string, int, error) {
+		tmuxCalls = append(tmuxCalls, tmuxCall{args: append([]string{}, args...)})
+		if len(args) > 0 && args[0] == "list-panes" {
+			return listOut, 0, nil
+		}
+		return "", 0, nil
+	}
+
+	// 1. Exact argv resume match routes to %4 (harnesses).
+	sess, pane, paneRef, ok := hookTargetForAgent("codex", map[string]any{
+		"session_id": "sid-4",
+		"cwd":        "/repo/dots",
+	})
+	if !ok || sess != "harnesses" || pane != "4" || paneRef != "%4" {
+		t.Fatalf("argv match = (%q, %q, %q, %v), want (harnesses, 4, %%4, true)", sess, pane, paneRef, ok)
+	}
+
+	// 2. Unbound brand-new session matches %20 by CWD and writes options to %20,
+	// never to stale %5, and never leaks daemon HARNESS_PROFILE=work.
+	tmuxCalls = nil
+	var published map[string]any
+	HookDisabled = func() bool { return false }
+	NormalizeEvent = func(agent, event string, payload map[string]any, env map[string]string) map[string]any {
+		return map[string]any{
+			"agent":      agent,
+			"app":        agent,
+			"event":      "stop",
+			"state":      "done",
+			"session_id": payload["session_id"],
+			"cwd":        payload["cwd"],
+			"title":      "Hello world",
+			"text":       "done reply",
+		}
+	}
+	Publish = func(env map[string]any) bool {
+		published = env
+		return true
+	}
+	code := hookClientWithPayload("codex", "stop", map[string]any{
+		"session_id": "sid-20",
+		"cwd":        "/repo/app",
+	}, true)
+	if code != 0 {
+		t.Fatalf("hookClientWithPayload code = %d", code)
+	}
+	if published == nil || published["session"] != "dev" || published["pane"] != "20" {
+		t.Fatalf("published = %+v, want session=dev pane=20", published)
+	}
+	sawResumeOn20 := false
+	for _, c := range tmuxCalls {
+		joined := callArgs(c)
+		if strings.Contains(joined, "-t %5") {
+			t.Fatalf("must not touch stale daemon pane %%5: %s", joined)
+		}
+		if strings.Contains(joined, "set-option") && strings.Contains(joined, "@spaces_profile") {
+			t.Fatalf("must not overwrite target pane @spaces_profile with daemon env: %s", joined)
+		}
+		if joined == "set-option -p -t %20 @spaces_resume_session sid-20" {
+			sawResumeOn20 = true
+		}
+	}
+	if !sawResumeOn20 {
+		t.Fatalf("expected @spaces_resume_session sid-20 on %%20, calls = %v", tmuxCalls)
+	}
+
+	// 3. Non-tmux client (no matching live Codex pane) returns ok=false instead
+	// of falling back to stale %5.
+	if s, p, pr, ok := hookTargetForAgent("codex", map[string]any{
+		"session_id": "sid-other",
+		"cwd":        "/elsewhere",
+	}); ok {
+		t.Fatalf("expected non-matching daemon hook to be ignored, got (%q, %q, %q)", s, p, pr)
+	}
+}
+
+func TestCodexAppServerDaemonRoutesWithoutTmuxEnvAndTieBreaksByTimestamp(t *testing.T) {
+	saveTmuxTestSeams(t)
+	clearSpaceEnv(t)
+
+	// Daemon started outside tmux (no TMUX or TMUX_PANE env vars).
+	AncestorsFunc = func() [][]string {
+		return [][]string{{"/usr/local/bin/codex", "app-server", "--managed-daemon"}}
+	}
+	PaneProcArgvFunc = func(int) []string { return nil }
+
+	listOut := strings.Join([]string{
+		"dev\x1f%10\x1f0\x1fcodex\x1f/repo/shared\x1f100\x1fcodex\x1f\x1fidle\x1f1000\x1f0\x1f1\x1f1",
+		"dev\x1f%20\x1f0\x1fcodex\x1f/repo/shared\x1f200\x1fcodex\x1f\x1fworking\x1f5000\x1f1\x1f1\x1f1",
+	}, "\n")
+	TmuxFunc = func(args []string, _ time.Duration) (string, int, error) {
+		if len(args) > 0 && args[0] == "list-panes" {
+			return listOut, 0, nil
+		}
+		return "", 0, nil
+	}
+
+	sess, pane, paneRef, ok := hookTargetForAgent("codex", map[string]any{
+		"session_id": "sid-fresh",
+		"cwd":        "/repo/shared",
+	})
+	if !ok || sess != "dev" || pane != "20" || paneRef != "%20" {
+		t.Fatalf("tie-break = (%q, %q, %q, %v), want (dev, 20, %%20, true)", sess, pane, paneRef, ok)
+	}
+}

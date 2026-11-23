@@ -18,6 +18,8 @@ import (
 	_ "github.com/arhammahajan/spaces/internal/agent/plugins"
 	"github.com/arhammahajan/spaces/internal/cli"
 	"github.com/arhammahajan/spaces/internal/gitinfo"
+	"github.com/arhammahajan/spaces/internal/harness/harnessenv"
+	"github.com/arhammahajan/spaces/internal/harness/profiles"
 	"github.com/arhammahajan/spaces/internal/model"
 	"github.com/arhammahajan/spaces/internal/resurrect"
 	"github.com/arhammahajan/spaces/internal/tmux"
@@ -437,6 +439,7 @@ type tuiBackend struct {
 	wt         *worktree.Manager
 	now              func() time.Time
 	dirExists        func(string) bool
+	profileExists    func(agentName, profile string) bool
 	lookPath         func(string) (string, error)
 	recordConvOpen   func(ctx context.Context, conv model.ConversationEntry, space string, nowMs int64) error
 	recordConvLaunch func(ctx context.Context, agent, sessionID, profile, cwd, title string, launchCmd []string, space string, nowMs int64) error
@@ -463,6 +466,43 @@ func isExistingDir(path string) bool {
 	return err == nil && fi.IsDir()
 }
 
+func isExistingHarnessProfile(agentName, profile string) bool {
+	p := strings.TrimSpace(profile)
+	if p == "" || p == "default" {
+		return true
+	}
+	canon := resurrect.CanonicalAgent(agentName)
+	if canon == "" {
+		canon = strings.ToLower(strings.TrimSpace(agentName))
+	}
+	if canon == "" || !agent.DefaultRegistry().IsHarnessManaged(canon) {
+		return true
+	}
+	_, err := profiles.ResolveForAgent(canon, p, harnessenv.DefaultPaths())
+	return err == nil
+}
+
+func (b *tuiBackend) sanitizeProfile(agentName, profile string) string {
+	p := strings.TrimSpace(profile)
+	if p == "" || p == "default" || b.profileExists == nil {
+		return p
+	}
+	if !b.profileExists(agentName, p) {
+		return ""
+	}
+	return p
+}
+
+func (b *tuiBackend) sanitizeLaunchCmd(agentName string, launchCmd []string) []string {
+	if len(launchCmd) == 0 || b.profileExists == nil {
+		return launchCmd
+	}
+	if prof := agent.HarnessProfileFromArgv(launchCmd); prof != "" && prof != "default" && !b.profileExists(agentName, prof) {
+		return nil
+	}
+	return launchCmd
+}
+
 func newTUIBackend(client *tmux.Client) *tuiBackend {
 	self, _ := os.Executable()
 	if self == "" {
@@ -476,6 +516,7 @@ func newTUIBackend(client *tmux.Client) *tuiBackend {
 		wt:                 worktree.NewManager(),
 		now:                time.Now,
 		dirExists:          isExistingDir,
+		profileExists:      isExistingHarnessProfile,
 		lookPath:           exec.LookPath,
 		selfPath:           self,
 		cachedScreens:        make(map[string]model.ScreenReading),
@@ -1172,6 +1213,9 @@ func (b *tuiBackend) LoadOutcomes(ctx context.Context) ([]model.OutcomeEntry, er
 	if b.hasOutcomes {
 		out := append([]model.OutcomeEntry(nil), b.lastOutcomes...)
 		b.mu.Unlock()
+		for i := range out {
+			out[i].Profile = b.sanitizeProfile(out[i].Agent, out[i].Profile)
+		}
 		return out, nil
 	}
 	b.mu.Unlock()
@@ -1183,6 +1227,9 @@ func (b *tuiBackend) LoadOutcomes(ctx context.Context) ([]model.OutcomeEntry, er
 		return nil, nil
 	}
 	out := append([]model.OutcomeEntry(nil), hs.Outcomes...)
+	for i := range out {
+		out[i].Profile = b.sanitizeProfile(out[i].Agent, out[i].Profile)
+	}
 	b.mu.Lock()
 	b.lastOutcomes = append([]model.OutcomeEntry(nil), out...)
 	b.hasOutcomes = true
@@ -1198,15 +1245,37 @@ func (b *tuiBackend) focusLiveCodex(ctx context.Context, agentName, sessionID st
 	if err != nil {
 		return false, nil
 	}
+	var hooks *model.HookSnapshot
+	if hs, err := model.FetchHooks(ctx); err == nil && hs.OK {
+		hooks = &hs
+	}
+	codexPlugin, _ := agent.DefaultRegistry().ResolveRuntime("codex")
 	for _, pane := range panes {
-		if pane.Dead || pane.ResumeSession != sessionID {
+		if pane.Dead {
 			continue
 		}
-		isCodex := resurrect.CanonicalAgent(pane.CurrentCommand) == "codex"
+		isCodex := resurrect.CanonicalAgent(pane.CurrentCommand) == "codex" ||
+			resurrect.CanonicalAgent(pane.SpacesApp) == "codex"
 		if !isCodex && pane.PID > 0 && model.DetectDescendantAgentFn != nil {
 			isCodex = resurrect.CanonicalAgent(model.DetectDescendantAgentFn(pane.PID)) == "codex"
 		}
-		if isCodex {
+		if !isCodex {
+			continue
+		}
+		paneSID := strings.TrimSpace(pane.ResumeSession)
+		if paneSID == "" && hooks != nil {
+			if sp, ok := hooks.Panes[pane.SessionName]; ok {
+				if h, ok := sp[strconv.Itoa(pane.NumericID)]; ok {
+					paneSID = strings.TrimSpace(h.SessionID)
+				}
+			}
+		}
+		if paneSID == "" && pane.PID > 0 && codexPlugin != nil && resurrect.ProcCommandFunc != nil {
+			if argv := resurrect.ProcCommandFunc(pane.PID); len(argv) > 0 {
+				paneSID = strings.TrimSpace(codexPlugin.SessionResolver().ExtractSessionIDFromArgs(argv))
+			}
+		}
+		if paneSID == sessionID {
 			return true, b.client.FocusPane(ctx, pane.SessionName, pane.WindowID, pane.ID)
 		}
 	}
@@ -1264,10 +1333,10 @@ func (b *tuiBackend) OpenOutcome(ctx context.Context, outcome model.OutcomeEntry
 		cwd = ""
 	}
 
-	profile := strings.TrimSpace(outcome.Profile)
+	profile := b.sanitizeProfile(agentName, outcome.Profile)
 	var launchCmd []string
 	if sessionID != "" && len(agent.DefaultRegistry().ResumeArgs(agentName, sessionID)) == 0 {
-		launchCmd = model.ConversationLaunchCommand(ctx, agentName, sessionID)
+		launchCmd = b.sanitizeLaunchCmd(agentName, model.ConversationLaunchCommand(ctx, agentName, sessionID))
 	}
 	cmd := buildOutcomeOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(outcome.Title), strings.TrimSpace(outcome.Outcome), launchCmd, b.selfPath)
 	if len(cmd) == 0 {
@@ -1316,7 +1385,15 @@ func (b *tuiBackend) removeCachedOutcome(outcome model.OutcomeEntry) {
 var _ tui.ConversationsBackend = (*tuiBackend)(nil)
 
 func (b *tuiBackend) LoadConversations(ctx context.Context, refresh, includeArchived bool) (model.ConversationSnapshot, error) {
-	return model.FetchConversations(ctx, refresh, includeArchived)
+	snap, err := model.FetchConversations(ctx, refresh, includeArchived)
+	if err != nil {
+		return snap, err
+	}
+	for i := range snap.Conversations {
+		snap.Conversations[i].Profile = b.sanitizeProfile(snap.Conversations[i].Agent, snap.Conversations[i].Profile)
+		snap.Conversations[i].LaunchCmd = b.sanitizeLaunchCmd(snap.Conversations[i].Agent, snap.Conversations[i].LaunchCmd)
+	}
+	return snap, nil
 }
 
 func (b *tuiBackend) SearchConversations(ctx context.Context, req model.ConversationSearchRequest) ([]model.ConversationSearchHit, error) {
@@ -1380,8 +1457,9 @@ func (b *tuiBackend) OpenConversation(ctx context.Context, conv model.Conversati
 		cwd = ""
 	}
 
-	profile := strings.TrimSpace(conv.Profile)
-	cmd := buildConversationOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(conv.Title), conv.LaunchCmd, b.selfPath)
+	profile := b.sanitizeProfile(agentName, conv.Profile)
+	launchCmd := b.sanitizeLaunchCmd(agentName, conv.LaunchCmd)
+	cmd := buildConversationOpenCommand(agentName, profile, sessionID, cwd, strings.TrimSpace(conv.Title), launchCmd, b.selfPath)
 	if len(cmd) == 0 {
 		return fmt.Errorf("could not build resume command for %s", agentName)
 	}

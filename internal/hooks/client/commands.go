@@ -1,6 +1,7 @@
 package client
 
 import (
+	"os"
 	"strconv"
 	"strings"
 )
@@ -39,7 +40,7 @@ func hookClientWithPayload(agentName, event string, payload map[string]any, tran
 	if AgentIsNoninteractive(agent) {
 		return 0
 	}
-	session, pane, ok := hookTarget()
+	session, pane, paneRef, ok := hookTargetForAgent(agent, payload)
 	if !ok {
 		// Outside tmux/Zellij there is no pane to attribute the event to.
 		return 0
@@ -52,7 +53,11 @@ func hookClientWithPayload(agentName, event string, payload map[string]any, tran
 		EmitAgentEvent(agent, event)
 		return 0
 	}
-	normalized := NormalizeEvent(agent, event, payload, environMap())
+	envMap := environMap()
+	if paneRef != "" && paneRef != os.Getenv("TMUX_PANE") {
+		delete(envMap, "HARNESS_PROFILE")
+	}
+	normalized := NormalizeEvent(agent, event, payload, envMap)
 	if normalized == nil {
 		return 0
 	}
@@ -71,15 +76,15 @@ func hookClientWithPayload(agentName, event string, payload map[string]any, tran
 				normalized["title"] = discovered
 			}
 		}
-		EmitHookStatus(normalized)
-		RecordResumeTarget(agent, payload)
+		EmitHookStatusToPane(paneRef, normalized)
+		RecordResumeTargetToPane(paneRef, agent, payload)
 		if ev == "stop" {
 			if st, _ := normalized["state"].(string); st == "done" {
-				UnsetTmuxPaneOption("", "@spaces_prior_outcome")
+				UnsetTmuxPaneOption(paneRef, "@spaces_prior_outcome")
 			}
 		}
 	} else {
-		EmitHookStatus(normalized)
+		EmitHookStatusToPane(paneRef, normalized)
 	}
 	if transport {
 		envelope := map[string]any{
