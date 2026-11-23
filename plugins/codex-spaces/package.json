@@ -1,0 +1,13 @@
+{
+  "name": "codex-spaces",
+  "version": "1.0.0",
+  "description": "RICH OpenAI Codex CLI companion plugin for tmux-spaces: hooks.json lifecycle bridge + legacy notify fallback + OTLP telemetry bridge pushing v2 envelopes to spacecore over UDS HTTP.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

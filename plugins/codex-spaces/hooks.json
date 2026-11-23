@@ -1,0 +1,54 @@
+{
+  "$comment": "Template Codex hooks.json for the tmux-spaces codex-spaces companion plugin. Copy to ~/.codex/hooks.json and replace <PLUGIN_DIR> with the absolute path of this plugin directory (plugins/codex-spaces in your tmux-spaces checkout). Each hook POSTs a rich v2 envelope to spacecore over UDS HTTP and always exits 0 (fail-open: hooks can never block Codex).",
+  "hooks": {
+    "SessionStart": [
+      {
+        "type": "command",
+        "command": "node \"<PLUGIN_DIR>/scripts/hook-bridge.mjs\" SessionStart",
+        "timeout_ms": 5000
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "type": "command",
+        "command": "node \"<PLUGIN_DIR>/scripts/hook-bridge.mjs\" UserPromptSubmit",
+        "timeout_ms": 5000
+      }
+    ],
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "node \"<PLUGIN_DIR>/scripts/hook-bridge.mjs\" PreToolUse",
+        "timeout_ms": 5000
+      }
+    ],
+    "PostToolUse": [
+      {
+        "type": "command",
+        "command": "node \"<PLUGIN_DIR>/scripts/hook-bridge.mjs\" PostToolUse",
+        "timeout_ms": 5000
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "type": "command",
+        "command": "node \"<PLUGIN_DIR>/scripts/hook-bridge.mjs\" PermissionRequest",
+        "timeout_ms": 5000
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node \"<PLUGIN_DIR>/scripts/hook-bridge.mjs\" Stop",
+        "timeout_ms": 5000
+      }
+    ],
+    "SessionEnd": [
+      {
+        "type": "command",
+        "command": "node \"<PLUGIN_DIR>/scripts/hook-bridge.mjs\" SessionEnd",
+        "timeout_ms": 5000
+      }
+    ]
+  }
+}
