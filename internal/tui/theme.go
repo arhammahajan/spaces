@@ -6,23 +6,24 @@ import (
 	"github.com/arhammahajan/spaces/internal/model"
 )
 
-// Catppuccin Mocha palette, matching plugins/zellij-spaces/src/theme.rs.
+// Obsidian & muted slate-blue palette (matching kitty #0b0b0c so surfaces
+// inherit Kitty's 0.68 frosted blur uniformly).
 const (
-	ColorCrust    = "#11111b"
-	ColorMantle   = "#181825"
-	ColorBase     = "#1e1e2e"
-	ColorSurface0 = "#313244"
-	ColorSurface1 = "#45475a"
-	ColorOverlay0 = "#6c7086"
-	ColorSubtext0 = "#a6adc8"
-	ColorText     = "#cdd6f4"
-	ColorLavender = "#b4befe"
-	ColorBlue     = "#89b4fa"
-	ColorTeal     = "#94e2d5"
-	ColorMauve    = "#cba6f7"
-	ColorGreen    = "#a6e3a1"
-	ColorYellow   = "#f9e2af"
-	ColorRed      = "#f38ba8"
+	ColorCrust    = "#0b0b0c"
+	ColorMantle   = "#0b0b0c"
+	ColorBase     = "#0b0b0c"
+	ColorSurface0 = "#2b323e"
+	ColorSurface1 = "#3d4758"
+	ColorOverlay0 = "#61768f"
+	ColorSubtext0 = "#8c93a0"
+	ColorText     = "#d8dadd"
+	ColorLavender = "#b7d4ed"
+	ColorBlue     = "#758a9b"
+	ColorTeal     = "#88b8c8"
+	ColorMauve    = "#9db4cc"
+	ColorGreen    = "#98c379"
+	ColorYellow   = "#e5c07b"
+	ColorRed      = "#e06c75"
 )
 
 // StatusColor maps a pane/space status to its Catppuccin Mocha color.
