@@ -367,7 +367,7 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("expected Weekly after g")
 	}
 	weeklyView := ansi.Strip(m.View())
-	if !strings.Contains(weeklyView, "Weekly usage") || !strings.Contains(weeklyView, "Less □") {
+	if !strings.Contains(weeklyView, "Weekly usage") || !strings.Contains(weeklyView, "Token activity") || !strings.Contains(weeklyView, "󰝣") {
 		t.Errorf("expected Weekly usage top chart + Token activity heatmap:\n%s", weeklyView)
 	}
 	m, _ = sendKey(m, runeKey("g"))
@@ -375,7 +375,7 @@ func TestUsageKeyboardNavigationAndInteractions(t *testing.T) {
 		t.Fatalf("expected Cumulative after second g")
 	}
 	cumView := ansi.Strip(m.View())
-	if !strings.Contains(cumView, "Cumulative usage") || !strings.Contains(cumView, "Less □") {
+	if !strings.Contains(cumView, "Cumulative usage") || !strings.Contains(cumView, "Token activity") || !strings.Contains(cumView, "󰝣") {
 		t.Errorf("expected Cumulative usage top chart + Token activity heatmap:\n%s", cumView)
 	}
 	// Cycle back to Daily for day-by-day cursor assertions below.

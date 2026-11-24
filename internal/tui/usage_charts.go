@@ -146,9 +146,9 @@ type usageTabHit struct {
 }
 
 var (
-	usageSeriesPalette = [4]string{ColorBlue, ColorMauve, ColorGreen, ColorOverlay0}
+	usageSeriesPalette = [4]string{"#60a5fa", "#c084fc", "#fb923c", "#34d399"}
 	usageLowerBlocks   = [9]rune{' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'}
-	usageHeatmapRamp   = [5]string{ColorSurface1, ColorBlue, ColorLavender, ColorTeal, ColorGreen}
+	usageHeatmapRamp   = [5]string{"#3a3633", "#5c3d2e", "#8c5a3c", "#c08552", "#e8c59e"}
 )
 
 // renderUsageTabBar renders the Codex-styled filled chip tab bar with overflow chevrons.
@@ -292,12 +292,19 @@ func renderActivityHeatmap(daily []usage.DailyBucket, aggMode usageOverviewAgg, 
 	}
 
 	cellStep := 1
-	if availCols >= 40 {
+	if aggMode == usageAggDaily && availCols >= 212 {
+		cellStep = 4
+	} else if aggMode == usageAggDaily && availCols >= 105 {
+		cellStep = 3
+	} else if availCols >= 40 {
 		cellStep = 2
 	}
 	weeks := availCols / cellStep
 	if weeks < 12 {
 		weeks = 12
+	}
+	if aggMode == usageAggDaily && weeks > 53 {
+		weeks = 53
 	}
 
 	startSun := endSat.AddDate(0, 0, -(weeks*7 - 1))
@@ -382,42 +389,33 @@ func renderActivityDailyGrid(grid [][7]float64, maxDaily float64, startSun, toda
 		lipgloss.NewStyle().Foreground(lipgloss.Color(usageHeatmapRamp[4])),
 	}
 
+	const (
+		emptyGlyph = "󰝣"
+		fillGlyph  = "󰝤"
+	)
+	cellPad := strings.Repeat(" ", cellStep-1)
+	blankCell := strings.Repeat(" ", cellStep)
+
 	for dow := 0; dow < 7; dow++ {
 		var row strings.Builder
 		row.WriteString(styleMuted.Render(fmt.Sprintf("%*s  ", gutterW-2, dayLabels[dow])))
 		for w := 0; w < weeks; w++ {
 			dt := startSun.AddDate(0, 0, w*7+dow)
 			if dt.After(today) {
-				if cellStep == 2 {
-					row.WriteString("  ")
-				} else {
-					row.WriteByte(' ')
-				}
+				row.WriteString(blankCell)
 				continue
 			}
 			val := grid[w][dow]
 			lvl := heatmapIntensityLevel(val, maxDaily)
 			if lvl == 0 {
-				row.WriteString(emptySt.Render("□"))
+				row.WriteString(emptySt.Render(emptyGlyph))
 			} else {
-				row.WriteString(lvlSt[lvl].Render("■"))
+				row.WriteString(lvlSt[lvl].Render(fillGlyph))
 			}
-			if cellStep == 2 {
-				row.WriteByte(' ')
-			}
+			row.WriteString(cellPad)
 		}
 		lines = append(lines, fitCellWidth(row.String(), width))
 	}
-
-	// Legend line: Less □ ■ ■ ■ ■ More
-	legend := styleMuted.Render(gutterPad+"Less ") +
-		emptySt.Render("□") + " " +
-		lvlSt[1].Render("■") + " " +
-		lvlSt[2].Render("■") + " " +
-		lvlSt[3].Render("■") + " " +
-		lvlSt[4].Render("■") +
-		styleMuted.Render(" More")
-	lines = append(lines, fitCellWidth(legend, width))
 	return lines
 }
 
