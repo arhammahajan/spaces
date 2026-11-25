@@ -24,6 +24,7 @@ import (
 	"github.com/arhammahajan/spaces/internal/resurrect"
 	"github.com/arhammahajan/spaces/internal/tmux"
 	"github.com/arhammahajan/spaces/internal/tui"
+	"github.com/arhammahajan/spaces/internal/usage"
 	"github.com/arhammahajan/spaces/internal/worktree"
 )
 
@@ -119,6 +120,17 @@ func buildEnv(client *tmux.Client) cli.Env {
 		opts.HomeDir = homeDir()
 		if err := tui.Run(backend, opts); err != nil {
 			fmt.Fprintf(e.Stderr, "tmux-spaces tabs: %v\n", err)
+			return cli.ExitError
+		}
+		return cli.ExitOK
+	}
+	env.RunUsage = func(e cli.Env, _ []string) int {
+		opts := tui.Options{
+			InitialMode: tui.ModeUsage,
+			HomeDir:     homeDir(),
+		}
+		if err := tui.Run(backend, opts); err != nil {
+			fmt.Fprintf(e.Stderr, "tmux-spaces usage: %v\n", err)
 			return cli.ExitError
 		}
 		return cli.ExitOK
@@ -437,6 +449,9 @@ type tuiBackend struct {
 	store      *resurrect.Store
 	git        *gitinfo.Collector
 	wt         *worktree.Manager
+	telemetry  *model.TelemetryCollector
+	usage      *usage.Collector
+	limits     *usage.LimitsCollector
 	now              func() time.Time
 	dirExists        func(string) bool
 	profileExists    func(agentName, profile string) bool
@@ -514,6 +529,9 @@ func newTUIBackend(client *tmux.Client) *tuiBackend {
 		store:              resurrect.DefaultStore(),
 		git:                gitinfo.NewCollector(),
 		wt:                 worktree.NewManager(),
+		telemetry:          model.NewTelemetryCollector(agent.DefaultRegistry()),
+		usage:              usage.NewCollector(homeDir()),
+		limits:             usage.NewLimitsCollector(homeDir()),
 		now:                time.Now,
 		dirExists:          isExistingDir,
 		profileExists:      isExistingHarnessProfile,
@@ -566,6 +584,21 @@ func (b *tuiBackend) LoadPRStatus(ctx context.Context, gitByCWD map[string]*mode
 		return nil
 	}
 	return b.git.FetchPR(ctx, gitByCWD, force)
+}
+
+func (b *tuiBackend) LoadTelemetry(ctx context.Context, spaces []model.Space, force bool) (model.TelemetrySnapshot, error) {
+	if b.telemetry == nil {
+		return model.TelemetrySnapshot{}, nil
+	}
+	home, _ := os.UserHomeDir()
+	return b.telemetry.Collect(ctx, spaces, home, force), nil
+}
+
+func (b *tuiBackend) KillOrphanPorts(ctx context.Context, orphans []model.OrphanPort) (int, error) {
+	if b.telemetry == nil {
+		return 0, nil
+	}
+	return b.telemetry.KillOrphanPorts(ctx, orphans)
 }
 
 // ResolveSnapshot returns a tmux.ServerSnapshot whose panes have been enriched
@@ -1620,6 +1653,24 @@ func wrapOutcomeInShell(cmd []string, priorOutcome, selfPath string) []string {
 	}
 	script += `; exec "${SHELL:-/bin/sh}"`
 	return []string{"/bin/sh", "-c", script}
+}
+
+// LoadUsage implements tui.UsageBackend by collecting historical token/cost
+// usage across registered provider plugins and live burndown/quota windows.
+func (b *tuiBackend) LoadUsage(ctx context.Context, force bool) (usage.Report, error) {
+	if b.usage == nil {
+		b.usage = usage.NewCollector(homeDir())
+	}
+	return b.usage.Collect(ctx, force)
+}
+
+// LoadUsageLimits implements tui.UsageLimitsBackend by loading and refreshing
+// per-profile & per-harness usage limits cached in ~/.harness.
+func (b *tuiBackend) LoadUsageLimits(ctx context.Context, force bool) (usage.LimitsSnapshot, error) {
+	if b.limits == nil {
+		b.limits = usage.NewLimitsCollector(homeDir())
+	}
+	return b.limits.Collect(ctx, force)
 }
 
 func shellQuoteWord(s string) string {

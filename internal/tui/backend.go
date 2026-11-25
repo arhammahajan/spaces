@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/arhammahajan/spaces/internal/model"
+	"github.com/arhammahajan/spaces/internal/usage"
 )
 
 // Backend abstracts all I/O the TUI needs so it compiles and tests
@@ -131,6 +132,25 @@ type WorktreeBackend interface {
 	PruneWorktrees(ctx context.Context, spaces []model.Space, removeOrphanedMerged bool) (string, error)
 }
 
+// TelemetryBackend is an optional extension of Backend for asynchronously
+// collecting abtop-style session, context, quota, project, port, and MCP telemetry.
+type TelemetryBackend interface {
+	LoadTelemetry(ctx context.Context, spaces []model.Space, force bool) (model.TelemetrySnapshot, error)
+	KillOrphanPorts(ctx context.Context, orphans []model.OrphanPort) (int, error)
+}
+
+// UsageBackend is an optional extension of Backend for loading aggregated
+// multi-provider token/cost usage and burndown reports.
+type UsageBackend interface {
+	LoadUsage(ctx context.Context, force bool) (usage.Report, error)
+}
+
+// UsageLimitsBackend is an optional extension of Backend for loading and
+// refreshing per-profile & per-harness usage limits cached in ~/.harness.
+type UsageLimitsBackend interface {
+	LoadUsageLimits(ctx context.Context, force bool) (usage.LimitsSnapshot, error)
+}
+
 // Mode selects which screen the TUI shows.
 type Mode int
 
@@ -149,6 +169,7 @@ const (
 	ModeTabs
 	ModeWorktrees
 	ModeConfirmRemoveWorktree
+	ModeUsage
 )
 
 // Options configures a TUI run.

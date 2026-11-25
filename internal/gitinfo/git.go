@@ -125,6 +125,8 @@ func CollectGitStatus(ctx context.Context, dir string, run CommandRunner) *model
 	info.Ahead = obs.ahead
 	info.Behind = obs.behind
 	info.IsDirty = obs.dirty
+	info.FilesAdded = obs.filesAdded
+	info.FilesModified = obs.filesModified
 
 	// Discover base branch and compute committed branch diff stats when on a feature branch.
 	if info.Branch != "" {
@@ -204,11 +206,13 @@ func isRebasingDir(gitDir string) bool {
 }
 
 type porcelainObservation struct {
-	branch   string
-	ahead    int
-	behind   int
-	dirty    bool
-	upstream bool
+	branch        string
+	ahead         int
+	behind        int
+	dirty         bool
+	upstream      bool
+	filesAdded    int
+	filesModified int
 }
 
 // parsePorcelainV2 parses `git status --porcelain=v2 --branch -z` output.
@@ -245,12 +249,28 @@ func parsePorcelainV2(data []byte) porcelainObservation {
 			continue
 		}
 		switch rec[0] {
-		case '1', 'u', '?':
+		case '?':
 			obs.dirty = true
+			obs.filesAdded++
+		case '1':
+			obs.dirty = true
+			if len(rec) >= 4 && (rec[2] == 'A' || rec[3] == 'A') {
+				obs.filesAdded++
+			} else {
+				obs.filesModified++
+			}
 		case '2':
 			// Renamed/copied entries are followed by a second NUL-terminated original path record.
 			obs.dirty = true
+			if len(rec) >= 4 && (rec[2] == 'A' || rec[3] == 'A') {
+				obs.filesAdded++
+			} else {
+				obs.filesModified++
+			}
 			i++
+		case 'u':
+			obs.dirty = true
+			obs.filesModified++
 		}
 	}
 	return obs

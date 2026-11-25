@@ -288,6 +288,8 @@ func (m Model) renderFull(width, height int) string {
 			return styleHeader.Render("Tabs")
 		case ModeWorktrees:
 			return styleHeader.Render("Worktrees")
+		case ModeUsage:
+			return styleHeader.Render("Usage")
 		default:
 			return styleHeader.Render("Spaces")
 		}
@@ -319,6 +321,8 @@ func (m Model) renderFull(width, height int) string {
 		return m.renderTabs(width, height)
 	case ModeWorktrees:
 		return m.renderWorktrees(width, height)
+	case ModeUsage:
+		return m.renderUsage(width, height)
 	}
 	return m.renderNavigator(width, height)
 }

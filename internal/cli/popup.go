@@ -134,3 +134,25 @@ func cmdTabs(args []string, env Env) int {
 	}
 	return env.RunTabs(env, args)
 }
+
+// cmdUsage opens the Usage & Burndown popup TUI.
+func cmdUsage(args []string, env Env) int {
+	f, err := parseFlags(args, nil, nil, nil)
+	if err != nil {
+		if err == errHelp {
+			env.outf("usage: tmux-spaces usage\n")
+			return ExitOK
+		}
+		env.errf("tmux-spaces usage: %s\n", err)
+		return ExitUsage
+	}
+	if len(f.pos) > 0 {
+		env.errf("usage: tmux-spaces usage\n")
+		return ExitUsage
+	}
+	if env.RunUsage == nil {
+		env.errf("tmux-spaces usage: TUI not wired (cmd/tmux-spaces must provide RunUsage)\n")
+		return ExitError
+	}
+	return env.RunUsage(env, args)
+}

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"path"
 	"sort"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/arhammahajan/spaces/internal/model"
+	"github.com/arhammahajan/spaces/internal/usage"
 )
 
 // RowKind identifies a visible navigator row.
@@ -58,6 +60,14 @@ type (
 	}
 	prInfoMsg struct {
 		info map[string]*model.GitInfo
+	}
+	telemetryMsg struct {
+		snap model.TelemetrySnapshot
+		err  string
+	}
+	killOrphansMsg struct {
+		killed int
+		err    string
 	}
 )
 
@@ -206,6 +216,42 @@ type Model struct {
 	tabsInitSelected      bool
 	tabsHookInFlight      string
 
+	telemetry           model.TelemetrySnapshot
+	telemetryLoaded     bool
+	telemetryFetching   bool
+	tabsMonitorMode      bool
+	tabsMonitorSelected  int
+	tabsMonitorTab       int          // narrow (<100 col): 0=Work, 1=Usage, 2=System
+	tabsMonitorHidden    map[int]bool // panels 1..7 visibility toggles
+	tabsMonitorFilter    string
+	tabsMonitorFiltering bool
+	tabsMonitorSort      monitorSortMode
+
+	usageReport            usage.Report
+	usageLoaded            bool
+	usageLoading           bool
+	usageRefreshing        bool
+	usageErr               string
+	usageLimits            usage.LimitsSnapshot
+	usageLimitsLoaded      bool
+	usageLimitsRefreshing  bool
+	usageLimitsRefreshedAt time.Time
+	usageLimitsErr         string
+	usageTab               int
+	usageRange       usageRange
+	usageOverviewAgg usageOverviewAgg
+	usageGroupBy     usageGroupBy
+	usageUseCost     bool
+	usageProvider    string
+	usageSessionSort usageSessionSort
+	usageDayIdx      int
+	usageRowSel      int
+	usageExpanded    bool
+	usageScroll      int
+	usageDashboard   bool
+	usageDashFocus   int
+	usageHelp        bool
+
 	pendingTarget string
 	quitting      bool
 }
@@ -225,8 +271,9 @@ func New(backend Backend, opts Options) Model {
 		bgDetails:      map[string]*model.HookDetail{},
 		previews:       map[string]string{},
 		gitInfo:        map[string]*model.GitInfo{},
-		tabsPaneSel:    map[string]int{},
-		convScope:      "all",
+		tabsPaneSel:       map[string]int{},
+		tabsMonitorHidden: map[int]bool{},
+		convScope:         "all",
 		convSearchHits: map[string]model.ConversationSearchHit{},
 		lastClickRow:   -1,
 		pendingTarget:  strings.TrimSpace(opts.Target),
@@ -269,6 +316,16 @@ func New(backend Backend, opts Options) Model {
 	if m.mode == ModeShared {
 		m.sharedLoading = true
 	}
+	if m.mode == ModeUsage {
+		m.usageLoading = true
+		m.usageRefreshing = true
+		if _, ok := backend.(UsageLimitsBackend); ok {
+			m.usageLimitsRefreshing = true
+		}
+		m.usageRange = usageRange30d
+		m.usageUseCost = true
+		m.usageDayIdx = -1
+	}
 	if m.mode == ModeNavigate || m.mode == ModeSearch || m.mode == ModeInbox || m.mode == ModeTabs || m.mode == ModeWorktrees {
 		m.spacesLoading = true
 	}
@@ -302,6 +359,14 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.mode == ModeShared {
 		return m.loadSharedCmd()
+	}
+	if m.mode == ModeUsage {
+		return tea.Batch(
+			m.loadUsageCmd(false),
+			m.loadUsageCmd(true),
+			m.loadUsageLimitsCmd(false),
+			m.loadUsageLimitsCmd(true),
+		)
 	}
 	if m.mode == ModeRename && m.renameStandalone {
 		return m.loadSpacesCmd()
@@ -398,6 +463,36 @@ func (m Model) loadPRStatusCmd(gitByCWD map[string]*model.GitInfo, force bool) t
 	}
 }
 
+func (m Model) loadTelemetryCmd(spaces []model.Space, force bool) tea.Cmd {
+	tb, ok := m.backend.(TelemetryBackend)
+	if !ok {
+		return nil
+	}
+	spacesCopy := append([]model.Space(nil), spaces...)
+	return func() tea.Msg {
+		snap, err := tb.LoadTelemetry(context.Background(), spacesCopy, force)
+		if err != nil {
+			return telemetryMsg{err: err.Error()}
+		}
+		return telemetryMsg{snap: snap}
+	}
+}
+
+func (m Model) killOrphanPortsCmd(orphans []model.OrphanPort) tea.Cmd {
+	tb, ok := m.backend.(TelemetryBackend)
+	if !ok || len(orphans) == 0 {
+		return nil
+	}
+	orphansCopy := append([]model.OrphanPort(nil), orphans...)
+	return func() tea.Msg {
+		killed, err := tb.KillOrphanPorts(context.Background(), orphansCopy)
+		if err != nil {
+			return killOrphansMsg{killed: killed, err: err.Error()}
+		}
+		return killOrphansMsg{killed: killed}
+	}
+}
+
 func (m *Model) collectCWDs() []string {
 	seen := make(map[string]struct{})
 	var cwds []string
@@ -454,11 +549,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.clampSelection()
 		return m, nil
 	case tickMsg:
-		if m.mode == ModeAgents || m.mode == ModeConversations || m.mode == ModeShared || m.mode == ModeWorktrees || m.mode == ModeConfirmRemoveWorktree {
+		if m.mode == ModeAgents || m.mode == ModeConversations || m.mode == ModeShared || m.mode == ModeWorktrees || m.mode == ModeConfirmRemoveWorktree || m.mode == ModeUsage {
 			// Static in modal/secondary modes: no polling flicker.
 			return m, nil
 		}
 		return m, tea.Batch(m.nextLoadSpacesCmd(), m.tickCmd())
+	case usageMsg:
+		return m.handleUsageMsg(msg)
+	case usageLimitsMsg:
+		return m.handleUsageLimitsMsg(msg)
 	case wtInspectMsg:
 		return m.handleWtInspectMsg(msg)
 	case wtPromptDetailMsg:
@@ -552,6 +651,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cmd := m.syncTabsInspectorCmd(false); cmd != nil {
 				cmds = append(cmds, cmd)
 			}
+			if !m.telemetryFetching {
+				if cmd := m.loadTelemetryCmd(m.spaces, false); cmd != nil {
+					m.telemetryFetching = true
+					cmds = append(cmds, cmd)
+				}
+			}
 		}
 		if len(cmds) > 0 {
 			return m, tea.Batch(cmds...)
@@ -582,6 +687,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.gitInfo[cwd] = g
 		}
 		m.applyGitInfo()
+		return m, nil
+	case telemetryMsg:
+		m.telemetryFetching = false
+		if msg.err == "" {
+			m.telemetry = msg.snap
+			m.telemetryLoaded = true
+			m.clampMonitorSelection()
+		}
+		return m, nil
+	case killOrphansMsg:
+		if msg.err != "" {
+			m.toast = "Kill orphan ports failed: " + msg.err
+		} else if msg.killed == 1 {
+			m.toast = "Killed 1 orphan port."
+		} else {
+			m.toast = fmt.Sprintf("Killed %d orphan ports.", msg.killed)
+		}
+		if cmd := m.loadTelemetryCmd(m.spaces, true); cmd != nil {
+			m.telemetryFetching = true
+			return m, cmd
+		}
 		return m, nil
 	case hookDetailMsg:
 		if m.tabsHookInFlight == tabsHookKey(msg.session, msg.paneNum) {
@@ -1473,6 +1599,11 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.sharedLoading = true
 			return m, m.loadSharedCmd()
 		}
+		if m.mode == ModeUsage {
+			m.usageLoading = true
+			m.usageErr = ""
+			return m, m.loadUsageCmd(true)
+		}
 		if m.mode == ModeWorktrees {
 			m.worktreesLoading = true
 			return m, tea.Batch(m.nextLoadSpacesCmd(), m.loadAllWorktreesCmd())
@@ -1529,6 +1660,8 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleTabs(msg)
 	case ModeWorktrees:
 		return m.handleWorktrees(msg)
+	case ModeUsage:
+		return m.handleUsage(msg)
 	}
 	return m, nil
 }
@@ -2359,6 +2492,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.clampWorktreeSelection()
 			return m, nil
 		}
+		if m.mode == ModeUsage {
+			return m.handleUsageWheel(-1)
+		}
 		m.moveSelection(-1)
 		return m, nil
 	case tea.MouseButtonWheelDown:
@@ -2399,6 +2535,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.clampWorktreeSelection()
 			return m, nil
 		}
+		if m.mode == ModeUsage {
+			return m.handleUsageWheel(1)
+		}
 		m.moveSelection(1)
 		return m, nil
 	case tea.MouseButtonLeft:
@@ -2425,6 +2564,9 @@ func (m Model) handleLeftClick(x, y int) (tea.Model, tea.Cmd) {
 	}
 	if m.mode == ModeWorktrees {
 		return m.handleWorktreesLeftClick(x, y)
+	}
+	if m.mode == ModeUsage {
+		return m.handleUsageLeftClick(x, y)
 	}
 	if m.mode == ModeAgents {
 		idx := y - agentsListTop()
