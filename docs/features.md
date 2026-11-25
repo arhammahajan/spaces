@@ -17,12 +17,16 @@ architecture (native transcript tailing, ordered input delivery, and terminal We
 fallback). The pane-watch design draws on zellij-agent-tools. workmux informed the
 git/PR/CI badges and automatic worktree lifecycle, tracking, monitoring, and management.
 TUIOS informed Inbox triage, pane status, prompt delivery, event replay, worktree review,
-and config provenance.
+and config provenance. `diffs-rs`, `leaf`, and T3 Code informed the custom Go diffing
+engine, turn-level checkpoint diffs, and agent review loop, and Rex's command palette
+informed the quick-access dmenu launcher.
 [Herdr](https://herdr.dev) · [T3 Code](https://github.com/pingdotgg/t3code) ·
 [Orca](https://orca.dev) · [workmux](https://github.com/raine/workmux) ·
 [zellij-agent-tools](https://github.com/thisisryanswift/zellij-agent-tools) ·
 [zellij-pane-tracker](https://github.com/theslyprofessor/zellij-pane-tracker) ·
-[TUIOS](https://github.com/Gaurav-Gosain/tuios)
+[TUIOS](https://github.com/Gaurav-Gosain/tuios) ·
+[diffs-rs](https://github.com/plannotator/diffs-rs) ·
+[leaf](https://github.com/DeepanshuMishraa/leaf)
 
 ## Where things live
 
@@ -38,7 +42,9 @@ and config provenance.
 | Proposed Docker sandboxes | `internal/harness/sandbox`, §13 |
 | Proposed harness companion plugins | `plugins/<agent>-spaces`, §14 |
 | Proposed `~/dev/router` live telemetry bridge | `internal/harness/routerctl`, `internal/hooks/core`, §15 |
-| Feature plans | §1 through §15 |
+| Proposed custom Go diff engine & popup | `internal/diff`, `internal/tui`, `internal/hooks/core`, §16 |
+| Proposed Rex-style command palette (dmenu) | `internal/tui`, `internal/cli`, §17 |
+| Feature plans | §1 through §17 |
 
 ## Tracker
 
@@ -104,6 +110,8 @@ and config provenance.
 | PLUG-4 | telemetry | Claude Code distributable companion plugin (`plugin.json`, hooks, and `statusLine`/OTel bridge) | Proposed | §14.4 |
 | PLUG-5 | telemetry | Codex companion bridge and `tmux-spaces doctor` companion plugin diagnostics | Proposed | §14.5 |
 | RTR-1 | telemetry | Live turn, prompt, tool execution, and routing extraction from `~/dev/router` (`routerd`) | Proposed | §15 |
+| DIFF-1 | review | Custom Go diff engine & popup filterable by last turn, repo, harness, and model | Proposed | §16 |
+| CMD-1 | navigation | Rex-style fuzzy command palette (dmenu) for quick access to spaces actions and popups | Proposed | §17 |
 
 ## 0. Shipped baseline
 
@@ -1855,3 +1863,72 @@ Testing bar:
   screen` precedence and non-blocking degradation when `routerd` is stopped or unreachable.
 - Verify `tool_use` → `tool_result` pairing accurately surfaces in-flight tool execution
   without clearing an active hook or screen `blocked` (`permission`/`question`) state.
+
+
+## 16. Custom diff engine & popup (DIFF-1)
+
+**Proposed.**
+
+Add a dedicated diff viewer popup (`tmux-spaces diff`) powered by a custom pure-Go
+diffing engine built specifically for `tmux-spaces`, inspired by
+[diffs-rs](https://github.com/plannotator/diffs-rs) for the diff rendering/navigation
+architecture, [leaf](https://github.com/DeepanshuMishraa/leaf) for the coding-agent
+review loop, and [T3 Code](https://github.com/pingdotgg/t3code) for turn-scoped
+checkpoint diffs and source-control review workflows.
+
+### 16.1 Architecture & pure-Go diff engine
+
+- **Native `git` CLI backend:** Keep `tmux-spaces` a single pure-Go binary with no CGo,
+  `libgit2`, or `go-git` dependency. Generate diffs and read blobs through `git`
+  (`git diff`, `git show`, `git write-tree`) so partial clones, LFS, `fsmonitor`, linked
+  worktrees, `includeIf`, rename detection, and `.gitattributes` work identically to the
+  user's environment.
+- **Interactive viewer (inspired by `diffs-rs`):** Collapsible changed-file directory tree
+  sidebar with `+/-` counters, split and unified layout toggle, line numbers, soft-wrap
+  with ANSI-aware row alignment (`charmbracelet/x/ansi`), lazy whole-file syntax
+  highlighting cached by blob SHA (`chroma/v2`), inline word-level change emphasis,
+  expandable unchanged context gaps loaded on demand, literal search (`/`), and mouse
+  support—all sharing `internal/tui/theme.go`.
+- **Agent review feedback loop (inspired by `leaf`):** Support inline line and range
+  comments that batch into a structured review payload and send back to the active coding
+  agent pane as its next message (building on §2.3 / `TSK-3`).
+
+### 16.2 Turn, repo, harness, and model filtering
+
+- **Filter bar in the popup:** Switch live between **Whole repo** (unstaged, staged, or
+  branch vs. base ref), **Last turn**, **By coding harness** (Claude Code, Codex,
+  OpenCode, Antigravity, Pi, etc.), **By model**, and **By pane/space** without leaving
+  the popup.
+- **Turn-boundary tree snapshots:** Capture lightweight unreferenced git tree snapshots on
+  turn start and turn end in `internal/hooks/core` using a temporary `GIT_INDEX_FILE` +
+  `git write-tree` (never mutating the working tree or real index), tagged in SQLite with
+  `(repo, session, pane, turn_id, harness, model, start_tree, end_tree, timestamp)`. Any
+  filter resolves cleanly to a `git diff <treeA> <treeB>` fed into the Go diff engine.
+[diffs-rs](https://github.com/plannotator/diffs-rs) ·
+[leaf](https://github.com/DeepanshuMishraa/leaf) ·
+[T3 Code source control](https://github.com/pingdotgg/t3code/blob/main/docs/user/source-control.md) ·
+[T3 Code checkpointing](https://github.com/pingdotgg/t3code/blob/main/docs/orchestration-v2/feature-lifecycles.md#checkpointing) ·
+[Task diff review (§2.3)](#23-diff-review-and-feedback-tsk-3)
+
+
+## 17. Rex-style command palette / dmenu (CMD-1)
+
+**Proposed.**
+
+Add a fast, superlogical Rex-style command palette (`tmux-spaces palette`)—a single-key
+fuzzy dmenu overlay modeled after Rex's `Cmd+Shift+P` launcher—for immediate access to
+every `tmux-spaces` view and contextual action without memorizing separate prefix
+bindings.
+
+- **Clean dmenu layout:** Single top fuzzy search input with right-aligned shortcut badge,
+  followed by a ranked list of actions showing the command title on the left and a muted
+  description or keybinding hint on the right (e.g., `Spaces: Review Last Turn Diff`,
+  `Spaces: Review This Branch`, `Spaces: Open Attention Inbox`, `Spaces: Choose Agent…`,
+  `Spaces: Switch / Create Worktree`, `Spaces: Conversations`, `Spaces: Usage & Limits`,
+  `Spaces: Shared MCP & Skills`, `Spaces: Tabs Inspector`).
+- **Context-aware ranking & quick actions:** Prioritize actions relevant to the current
+  space, pane, git branch, and active harness (such as jumping to a blocked agent,
+  opening the last turn's diff, launching a profiled agent, or running a worktree action),
+  with recency/frecency sorting and instant `Enter` execution inside the popup.
+[leaf Rex command palette](https://github.com/DeepanshuMishraa/leaf#rex) ·
+[Unified search (§1.12)](#112-search-across-panes-conversations-and-worktrees-nav-1)
