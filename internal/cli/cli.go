@@ -99,6 +99,12 @@ type Env struct {
 	// HookHealth reports hook listener health for doctor.
 	// An empty string means unknown.
 	HookHealth func() (string, error)
+	// PluginsHealth reports companion plugin health for doctor.
+	// It is informational only and never gates the doctor exit code.
+	PluginsHealth func() (string, error)
+	// PluginLive reports live plugin-telemetry counts per canonical agent
+	// ID for `plugins status`. When nil, the live hook store is inspected.
+	PluginLive func() map[string]PluginLiveState
 	// RunResurrect handles `tmux-spaces resurrect ...` (wired by cmd/tmux-spaces).
 	RunResurrect func(Env, []string) int
 	// RunWorktrees handles `tmux-spaces worktrees|wt ...` (wired by cmd/tmux-spaces).
@@ -385,6 +391,8 @@ func Run(args []string, env Env) int {
 		return cmdOSCWatch(rest, env)
 	case "doctor":
 		return cmdDoctor(rest, env)
+	case "plugins", "plugin":
+		return cmdPlugins(rest, env)
 	case "shell-init":
 		return cmdShellInit(rest, env)
 	case "popup":
@@ -437,6 +445,7 @@ Spaces & TUI:
   __shim [--hold] [--profile P] APP [<bin> [args...] | -- [args...]]
                                    pane-side agent wrapper
   doctor [--json]                  check tmux/server/hooks health
+  plugins ...                      manage companion plugins (list/status/install/uninstall)
   shell-init <zsh|bash|fish>       print shell exit-status hook script
   popup [--new]                    open the Navigator TUI
   tabs|tab [--new] [--session S]   inspect & switch tabs in current workspace
@@ -490,6 +499,8 @@ func cmdHelp(args []string, env Env) int {
 		env.outf("usage: tmux-spaces __shim [--hold] <app> <bin> [args...]\n")
 	case "doctor":
 		env.outf("usage: tmux-spaces doctor [--json]\n")
+	case "plugins", "plugin":
+		env.outf("usage: tmux-spaces plugins [list|status|install|uninstall] ...\n")
 	case "shell-init":
 		env.outf("usage: tmux-spaces shell-init <zsh|bash|fish>\n")
 	case "popup":

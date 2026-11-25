@@ -75,7 +75,23 @@ func (h *hookHandler) authorized(r *http.Request) bool {
 func (h *hookHandler) handleHook(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
 	var pathAgent *string
-	if p != "/v1/hook" {
+	isPlugin := false
+	switch {
+	case p == "/v1/plugin" || p == "/v1/telemetry":
+		empty := ""
+		pathAgent = &empty
+		isPlugin = true
+	case strings.HasPrefix(p, "/v1/plugin/"):
+		rest := p[len("/v1/plugin/"):]
+		pathAgent = &rest
+		isPlugin = true
+	case strings.HasPrefix(p, "/v1/telemetry/"):
+		rest := p[len("/v1/telemetry/"):]
+		pathAgent = &rest
+		isPlugin = true
+	case p == "/v1/hook":
+		// hook default below
+	default:
 		if !strings.HasPrefix(p, "/v1/hook/") {
 			writeJSON(w, http.StatusNotFound, map[string]any{"ok": false})
 			return
@@ -120,7 +136,11 @@ func (h *hookHandler) handleHook(w http.ResponseWriter, r *http.Request) {
 				logMsg(fmt.Sprintf("hook handler error: %v", rec))
 			}
 		}()
-		accepted = acceptEnvelope(envelope, pathAgent, r)
+		if isPlugin {
+			accepted = acceptPluginEnvelope(envelope, pathAgent, r)
+		} else {
+			accepted = acceptEnvelope(envelope, pathAgent, r)
+		}
 	}()
 	if accepted {
 		w.Header().Set("Content-Length", "0")
@@ -194,6 +214,147 @@ func acceptEnvelope(envelope map[string]any, pathAgent *string, r *http.Request)
 		return false
 	}
 	return true
+}
+
+// acceptPluginEnvelope merges one v2 companion plugin envelope into the store.
+// It first tries CompanionNormalizer, falls back to NormalizePluginEnvelope,
+// and always stamps plugin source metadata.
+func acceptPluginEnvelope(envelope map[string]any, pathAgent *string, r *http.Request) bool {
+	session, _ := envelope["session"].(string)
+	if session == "" {
+		session = r.Header.Get("X-ZJ-Session")
+	}
+	if session == "" {
+		session = r.URL.Query().Get("session")
+	}
+	var pane any
+	if p, ok := envelope["pane"]; ok && p != nil {
+		pane = p
+	} else if h := r.Header.Get("X-ZJ-Pane"); h != "" {
+		pane = h
+	} else if q := r.URL.Query().Get("pane"); q != "" {
+		pane = q
+	}
+	if session == "" || pane == nil {
+		return false
+	}
+	var agent string
+	if pathAgent != nil && *pathAgent != "" {
+		agent = *pathAgent
+	} else if a, ok := envelope["agent"].(string); ok && a != "" {
+		agent = a
+	} else {
+		agent = "unknown"
+	}
+	if normalized, ok := envelope["normalized"].(map[string]any); ok {
+		event := make(map[string]any, len(normalized))
+		for k, v := range normalized {
+			event[k] = v
+		}
+		stampPluginDefaults(event, envelope)
+		if err := MergeIntoStore(session, pane, event); err != nil {
+			logMsg(fmt.Sprintf("hook handler error: %v", err))
+			return false
+		}
+		return true
+	}
+	var event map[string]any
+	if CompanionNormalizer != nil {
+		func() {
+			defer func() {
+				_ = recover()
+			}()
+			event = CompanionNormalizer(agent, envelope)
+		}()
+	}
+	if event == nil {
+		event = NormalizePluginEnvelope(agent, envelope)
+	}
+	if event == nil {
+		return true // acknowledged but ignored
+	}
+	stampPluginDefaults(event, envelope)
+	if err := MergeIntoStore(session, pane, event); err != nil {
+		logMsg(fmt.Sprintf("hook handler error: %v", err))
+		return false
+	}
+	return true
+}
+
+func stampPluginDefaults(event, envelope map[string]any) {
+	if event == nil {
+		return
+	}
+	event["source"] = "plugin"
+	if _, ok := event["plugin_ts_ms"]; !ok || toInt64(event["plugin_ts_ms"]) <= 0 {
+		if ts := toInt64(envelope["ts_ms"]); ts > 0 {
+			event["plugin_ts_ms"] = ts
+		} else if ts := toInt64(event["ts_ms"]); ts > 0 {
+			event["plugin_ts_ms"] = ts
+		} else {
+			event["plugin_ts_ms"] = nowMs()
+		}
+	}
+	if _, ok := event["plugin_name"]; !ok {
+		if pm, ok := envelope["plugin"].(map[string]any); ok {
+			if n, _ := pm["name"].(string); n != "" {
+				event["plugin_name"] = n
+			}
+		}
+		if _, ok := event["plugin_name"]; !ok {
+			if n, _ := envelope["plugin_name"].(string); n != "" {
+				event["plugin_name"] = n
+			} else {
+				event["plugin_name"] = ""
+			}
+		}
+	}
+	if _, ok := event["plugin_version"]; !ok {
+		if pm, ok := envelope["plugin"].(map[string]any); ok {
+			if v, _ := pm["version"].(string); v != "" {
+				event["plugin_version"] = v
+			}
+		}
+		if _, ok := event["plugin_version"]; !ok {
+			if v, _ := envelope["plugin_version"].(string); v != "" {
+				event["plugin_version"] = v
+			} else {
+				event["plugin_version"] = ""
+			}
+		}
+	}
+	if _, ok := event["plugin_capabilities"]; !ok {
+		if pm, ok := envelope["plugin"].(map[string]any); ok {
+			if caps, ok := pm["capabilities"].([]any); ok {
+				event["plugin_capabilities"] = caps
+			}
+		}
+		if _, ok := event["plugin_capabilities"]; !ok {
+			if caps, ok := envelope["plugin_capabilities"].([]any); ok {
+				event["plugin_capabilities"] = caps
+			} else {
+				event["plugin_capabilities"] = []any{}
+			}
+		}
+	}
+	if _, ok := event["pid"]; !ok {
+		if pid := toInt64(envelope["pid"]); pid > 0 {
+			event["pid"] = pid
+		} else if payload, ok := envelope["payload"].(map[string]any); ok {
+			if pid := toInt64(payload["pid"]); pid > 0 {
+				event["pid"] = pid
+			}
+		}
+	}
+	if _, ok := event["harness_version"]; !ok {
+		if hv, _ := envelope["harness_version"].(string); hv != "" {
+			event["harness_version"] = hv
+		} else if payload, ok := envelope["payload"].(map[string]any); ok {
+			if hv, _ := payload["harness_version"].(string); hv != "" {
+				event["harness_version"] = hv
+			}
+		}
+	}
 }
 
 // randomHex returns n random bytes as hex, mirroring secrets.token_hex(n).

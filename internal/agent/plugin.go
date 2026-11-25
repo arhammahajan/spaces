@@ -53,6 +53,10 @@ type Plugin interface {
 	// DaemonWatcher returns an optional agent-native daemon/SSE event watcher.
 	// Returning nil indicates this agent does not support daemon event streaming.
 	DaemonWatcher() DaemonWatcher
+
+	// CompanionPlugin returns an optional rich harness companion plugin
+	// capability. Returning nil indicates no companion plugin support.
+	CompanionPlugin() CompanionPlugin
 }
 
 // Spec declares the static metadata and naming rules for an agent plugin.

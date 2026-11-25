@@ -29,6 +29,7 @@ type BasePlugin struct {
 	CustomLauncher          Launcher
 	CustomConfigProvider    ConfigProvider
 	CustomDaemonWatcher     DaemonWatcher
+	CustomCompanionPlugin   CompanionPlugin
 }
 
 func (b *BasePlugin) Spec() Spec {
@@ -104,6 +105,10 @@ func (b *BasePlugin) ConfigProvider() ConfigProvider {
 
 func (b *BasePlugin) DaemonWatcher() DaemonWatcher {
 	return b.CustomDaemonWatcher
+}
+
+func (b *BasePlugin) CompanionPlugin() CompanionPlugin {
+	return b.CustomCompanionPlugin
 }
 
 // ManifestScreenReader evaluates pane viewports using a bundled manifest in

@@ -321,6 +321,11 @@ func (m *DaemonWatchManager) Reconcile(ctx context.Context) {
 				if ev.Profile == "" {
 					ev.Profile = target.Profile
 				}
+				// Tiered precedence: skip redundant daemon_sse merges while a
+				// fresh plugin record owns the pane (watcher stays alive for instant fallback).
+				if HasFreshPlugin(target.Session, paneKey, nowMs()) {
+					return
+				}
 				norm := DaemonEventToNormalized(ev)
 				if norm == nil {
 					return

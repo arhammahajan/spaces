@@ -20,7 +20,7 @@ func NewClaude() agent.Plugin {
 			OSCAuthority:            true,
 			RecognizesVersionBanner: true,
 			MatchesBareVersion:      true,
-			TitlePrefixes: []string{"Claude Code - ", "Claude Code: ", "Claude - ", "Claude: "},
+			TitlePrefixes:           []string{"Claude Code - ", "Claude Code: ", "Claude - ", "Claude: "},
 			WorktreeTitlePrefixes: []string{
 				"claude code - ", "claude code: ", "claude code | ",
 				"claude - ", "claude: ", "claude | ",
@@ -35,5 +35,6 @@ func NewClaude() agent.Plugin {
 		CustomTitleExtractor: agent.TitleExtractorFunc(func(viewport string) string {
 			return screen.ExtractPromptMarkerLine(viewport, "❯")
 		}),
+		CustomCompanionPlugin: NewClaudeCompanion(),
 	}
 }

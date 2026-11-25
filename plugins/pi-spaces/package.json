@@ -1,0 +1,13 @@
+{
+  "name": "pi-spaces",
+  "version": "1.0.0",
+  "description": "RICH Pi Coding Agent companion extension for tmux-spaces: reads everything Pi's ExtensionAPI exposes and pushes structured v2 envelopes to spacecore over UDS HTTP.",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

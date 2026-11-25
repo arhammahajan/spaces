@@ -1626,6 +1626,11 @@ func (m Model) renderTabCardMeta(tab TabItem, selected bool, width int) string {
 		}
 		parts = append(parts, st(ColorBlue, true).Render(strings.Join(bgParts, " ")))
 	}
+	if p != nil && p.Hook != nil {
+		if text, color := hookInlinePillText(p.Hook); text != "" {
+			parts = append(parts, st(color, color == ColorRed).Render(text))
+		}
+	}
 
 	if tab.Git != nil {
 		var gitParts []string

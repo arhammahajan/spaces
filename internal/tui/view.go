@@ -1036,9 +1036,9 @@ func (m Model) renderUnifiedPanePrimaryRow(sp model.Space, p model.Pane, selecte
 	}
 
 	// Optional right-aligned badges in display order (left-to-right):
-	// 0: branch, 1: diff, 2: pr/ci, 3: model, 4: bg disclosure badge.
+	// 0: branch, 1: diff, 2: pr/ci, 3: model, 4: bg disclosure badge, 5: ctx/cost/429 pill.
 	// Active 2-line panes defer git & model to Line 2 so Line 1 remains uncluttered.
-	var slots [5]string
+	var slots [6]string
 	if !hasActionLine {
 		if paneShowsGit(sp, p, showSpaceCol) {
 			slots[0] = renderGitBranchBadge(p.Git, 16, st)
@@ -1051,12 +1051,15 @@ func (m Model) renderUnifiedPanePrimaryRow(sp model.Space, p model.Pane, selecte
 	}
 	if p.Hook != nil && innerW >= 54 {
 		slots[4] = m.formatBackgroundBadge(sp, p, st)
+		if pill := formatHookInlinePill(p.Hook, st); pill != "" && innerW >= 72 {
+			slots[5] = pill
+		}
 	}
 
-	// Priority: background toggle > PR/CI > diff > branch > model.
-	var included [5]bool
+	// Priority: background toggle > PR/CI > diff > branch > ctx pill > model.
+	var included [6]bool
 	usedRight := 0
-	for _, idx := range []int{4, 2, 1, 0, 3} {
+	for _, idx := range []int{4, 2, 1, 0, 5, 3} {
 		if slots[idx] == "" {
 			continue
 		}
@@ -2098,6 +2101,11 @@ func (m Model) hookDialog(width, height int) string {
 		lines = append(lines, labelSt.Render("cwd      ")+valSt.Render(truncate(d.CWD, maxContentW-9)))
 	}
 	lines = append(lines, "")
+	nowMs := m.opts.NowOrDefault().UnixMilli()
+	if pluginHead := hookPluginHeaderLines(d, nowMs, maxContentW); len(pluginHead) > 0 {
+		lines = append(lines, pluginHead...)
+		lines = append(lines, "")
+	}
 
 	addBody := func(raw string) {
 		for _, ln := range strings.Split(raw, "\n") {
@@ -2123,6 +2131,10 @@ func (m Model) hookDialog(width, height int) string {
 	if strings.TrimSpace(d.Reply) != "" {
 		lines = append(lines, sectionSt.Render("reply"))
 		addBody(d.Reply)
+		lines = append(lines, "")
+	}
+	if pluginBody := hookPluginBodyLines(d, m.opts.NowOrDefault().UnixMilli(), maxContentW); len(pluginBody) > 0 {
+		lines = append(lines, pluginBody...)
 		lines = append(lines, "")
 	}
 	for _, bgLine := range renderHookDetailBackground(d, m.opts.NowOrDefault().UnixMilli()) {

@@ -12,10 +12,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 
+	"github.com/arhammahajan/spaces/internal/agent"
 	"github.com/arhammahajan/spaces/internal/harness/agents"
 	"github.com/arhammahajan/spaces/internal/harness/profiles"
 	"github.com/arhammahajan/spaces/internal/harness/routerctl"
@@ -176,6 +178,49 @@ func pidAlive(kill func(int, syscall.Signal) error, pid int) bool {
 		return true
 	}
 	return !errors.Is(err, syscall.ESRCH)
+}
+
+// checkPlugins inventories installed companion plugins against
+// opts.Paths.Home. Companion plugins are optional: rich v2 telemetry is a
+// fast path and screen scraping is always available as fallback, so this
+// check is informational and always returns StateOK — never warn or fail —
+// whether zero, some, or all companion plugins are installed.
+func checkPlugins(opts CheckOptions) (string, string) {
+	plugins := agent.DefaultRegistry().CompanionPlugins()
+	if len(plugins) == 0 {
+		return StateOK, "no companion plugins registered (fallback mode)"
+	}
+	home := opts.Paths.Home
+	installed := 0
+	var names []string
+	for _, p := range plugins {
+		cp := p.CompanionPlugin()
+		if cp == nil {
+			continue
+		}
+		st := cp.DetectCompanionStatus(home)
+		if st.Installed {
+			installed++
+			id := strings.TrimSpace(cp.CompanionSpec().AgentID)
+			if id == "" {
+				id = p.Spec().ID
+			}
+			ver := strings.TrimSpace(st.Version)
+			if ver == "" {
+				ver = strings.TrimSpace(cp.CompanionSpec().Version)
+			}
+			if ver != "" {
+				names = append(names, id+" v"+ver)
+			} else {
+				names = append(names, id)
+			}
+		}
+	}
+	sort.Strings(names)
+	if installed == 0 {
+		return StateOK, fmt.Sprintf("0/%d companion plugins installed (fallback mode)", len(plugins))
+	}
+	return StateOK, fmt.Sprintf("%d/%d companion plugins installed: %s", installed, len(plugins), strings.Join(names, ", "))
 }
 
 // entryNames are the launcher entry points this check verifies.

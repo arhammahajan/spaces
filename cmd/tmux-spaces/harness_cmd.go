@@ -116,6 +116,7 @@ func isSpacesSubcommand(cmd string) bool {
 		"wait", "next", "agent", "__shim", "__osc-watch", "doctor", "shell-init",
 		"popup", "agents", "inbox", "conversations", "chats", "shared", "skills",
 		"mcp", "tabs", "tab", "resurrect", "worktrees", "worktree", "wt", "help",
+		"plugins", "plugin",
 		"profile", "models", "usage", "launch", "harness-status", "harness-doctor",
 		"-h", "--help":
 		return true

@@ -138,6 +138,9 @@ func buildEnv(client *tmux.Client) cli.Env {
 		}
 		return "ok", nil
 	}
+	env.PluginsHealth = func() (string, error) {
+		return cli.PluginsHealthSummary()
+	}
 	env.RunResurrect = func(e cli.Env, args []string) int {
 		return runResurrectCLI(client, backend.store, backend.selfPath, e, args)
 	}
@@ -626,7 +629,7 @@ func (b *tuiBackend) loadResolved(ctx context.Context) (tmux.ServerSnapshot, []m
 	// can evaluate panes whose process command is generic (e.g. node/2.1.76).
 	model.SeedAppsFromHooks(spaces, hookSnap)
 
-	readings := b.screenReadings(ctx, spaces, now)
+	readings := b.screenReadings(ctx, spaces, hookSnap, now)
 	b.arbitrator.Apply(spaces, hookSnap, readings, nowMs)
 	b.populateSessionStoreTitles(ctx, spaces, now)
 	b.enrichOutcomeTitles(ctx)
@@ -982,7 +985,7 @@ func modelStatusString(s model.Status) string {
 	}
 }
 
-func (b *tuiBackend) screenReadings(ctx context.Context, spaces []model.Space, now time.Time) map[string]model.ScreenReading {
+func (b *tuiBackend) screenReadings(ctx context.Context, spaces []model.Space, hookSnap *model.HookSnapshot, now time.Time) map[string]model.ScreenReading {
 	b.mu.Lock()
 	if !b.lastScreenAt.IsZero() && now.Sub(b.lastScreenAt) < screenCaptureInterval {
 		cached := make(map[string]model.ScreenReading, len(b.cachedScreens))
@@ -994,6 +997,7 @@ func (b *tuiBackend) screenReadings(ctx context.Context, spaces []model.Space, n
 	}
 	b.mu.Unlock()
 
+	nowMs := now.UnixMilli()
 	var targets []model.Pane
 	for _, sp := range spaces {
 		for _, pane := range sp.Panes {
@@ -1002,6 +1006,20 @@ func (b *tuiBackend) screenReadings(ctx context.Context, spaces []model.Space, n
 			}
 			if pane.IsDead || !agent.DefaultRegistry().HasScreenManifest(pane.App) {
 				continue
+			}
+			// Skip expensive tmux capture-pane scraping when the pane
+			// carries fresh companion plugin telemetry: the plugin is
+			// already the authoritative state source. Stale or absent
+			// telemetry keeps the exact screen-reader fallback untouched.
+			if hookSnap != nil && hookSnap.OK && len(hookSnap.Panes) > 0 {
+				if sessPanes, ok := hookSnap.Panes[sp.Name]; ok {
+					if h, ok := sessPanes[strconv.Itoa(pane.NumericID)]; ok {
+						hh := h
+						if hh.IsFreshPlugin(nowMs) {
+							continue
+						}
+					}
+				}
 			}
 			targets = append(targets, pane)
 		}

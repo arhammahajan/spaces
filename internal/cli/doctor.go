@@ -64,6 +64,22 @@ func cmdDoctor(args []string, env Env) int {
 		checks = append(checks, doctorCheck{"hooks", true, detail})
 	}
 
+	// Companion plugins are informational only: fallback screen scraping
+	// always works, so this row never gates the exit code.
+	if env.PluginsHealth == nil {
+		if detail, _ := pluginsHealthSummary(pluginHomeDir(env, ""), pluginLiveOf(env)); detail != "" {
+			checks = append(checks, doctorCheck{"plugins", true, detail})
+		} else {
+			checks = append(checks, doctorCheck{"plugins", true, "no companion plugins registered (fallback mode)"})
+		}
+	} else if detail, herr := env.PluginsHealth(); herr != nil {
+		checks = append(checks, doctorCheck{"plugins", true, "fallback mode (" + herr.Error() + ")"})
+	} else if detail == "" {
+		checks = append(checks, doctorCheck{"plugins", true, "fallback mode"})
+	} else {
+		checks = append(checks, doctorCheck{"plugins", true, detail})
+	}
+
 	ok := true
 	for _, c := range checks {
 		// The session-context row is informational; tmux + server gate the exit code.

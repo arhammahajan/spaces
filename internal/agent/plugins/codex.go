@@ -26,6 +26,7 @@ func NewCodex() agent.Plugin {
 		},
 		CustomTitleExtractor:  agent.TitleExtractorFunc(extractCodexTitle),
 		CustomSessionResolver: agent.BaseSessionResolver{PositionalResume: true, UniqueExplicitSessions: true},
+		CustomCompanionPlugin: NewCodexCompanion(),
 	}
 }
 

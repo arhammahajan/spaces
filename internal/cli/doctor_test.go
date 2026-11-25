@@ -24,6 +24,7 @@ func doctorEnv(fc *FakeClient) Env {
 		}
 	}
 	env.HookHealth = func() (string, error) { return "3 panes tracked", nil }
+	env.PluginsHealth = func() (string, error) { return "1/1 companion plugins installed, 1 active", nil }
 	return env
 }
 
@@ -34,7 +35,7 @@ func TestDoctorHealthy(t *testing.T) {
 		t.Fatalf("code = %d: %s", code, stderrOf(t, env))
 	}
 	got := stdoutOf(t, env)
-	for _, want := range []string{"tmux:", "server:", "hooks:", "3 panes tracked"} {
+	for _, want := range []string{"tmux:", "server:", "hooks:", "3 panes tracked", "plugins:", "companion"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
@@ -58,7 +59,7 @@ func TestDoctorJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(strings.TrimSpace(stdoutOf(t, env))), &report); err != nil {
 		t.Fatal(err)
 	}
-	if !report.OK || len(report.Checks) != 4 {
+	if !report.OK || len(report.Checks) != 5 {
 		t.Errorf("report = %+v", report)
 	}
 }
@@ -92,6 +93,24 @@ func TestDoctorUnhealthy(t *testing.T) {
 	env4.HookHealth = nil
 	if code := Run([]string{"doctor"}, env4); code != ExitOK {
 		t.Errorf("nil hook seam = %d", code)
+	}
+	// Plugin errors are informational and never gate the exit code.
+	env5 := doctorEnv(&FakeClient{Up: true})
+	env5.PluginsHealth = func() (string, error) { return "", errTestBoom }
+	if code := Run([]string{"doctor"}, env5); code != ExitOK {
+		t.Errorf("plugin error should not gate = %d", code)
+	}
+	if got := stdoutOf(t, env5); !strings.Contains(got, "plugins:") {
+		t.Errorf("plugins row = %q", got)
+	}
+	// Nil plugin seam falls back to the registry default.
+	env6 := doctorEnv(&FakeClient{Up: true})
+	env6.PluginsHealth = nil
+	if code := Run([]string{"doctor"}, env6); code != ExitOK {
+		t.Errorf("nil plugin seam = %d", code)
+	}
+	if got := stdoutOf(t, env6); !strings.Contains(got, "plugins:") {
+		t.Errorf("plugins default row = %q", got)
 	}
 	if code := Run([]string{"doctor", "extra"}, testEnv(&FakeClient{})); code != ExitUsage {
 		t.Errorf("extra args = %d", code)

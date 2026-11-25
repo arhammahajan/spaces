@@ -178,14 +178,24 @@ type HookUsage struct {
 	CacheReadTokens  int64   `json:"cache_read_tokens,omitempty"`
 	CacheWriteTokens int64   `json:"cache_write_tokens,omitempty"`
 	CostUSD          float64 `json:"cost_usd,omitempty"`
+	TotalTokens      int64   `json:"total_tokens,omitempty"`
 }
 
-// TotalTokens returns the sum of input, output, and reasoning tokens.
-func (u *HookUsage) TotalTokens() int64 {
+// TotalTokensOrDerived returns explicit TotalTokens or the derived sum.
+func (u *HookUsage) TotalTokensOrDerived() int64 {
 	if u == nil {
 		return 0
 	}
+	if u.TotalTokens > 0 {
+		return u.TotalTokens
+	}
 	return u.InputTokens + u.OutputTokens + u.ReasoningTokens
+}
+
+// TotalTokensCount returns explicit TotalTokens or the derived sum
+// (kept separate from the TotalTokens field for Go method/field rules).
+func (u *HookUsage) TotalTokensCount() int64 {
+	return u.TotalTokensOrDerived()
 }
 
 // HasData reports whether any token count or cost value is populated.
@@ -194,7 +204,61 @@ func (u *HookUsage) HasData() bool {
 		return false
 	}
 	return u.InputTokens > 0 || u.OutputTokens > 0 || u.ReasoningTokens > 0 ||
-		u.CacheReadTokens > 0 || u.CacheWriteTokens > 0 || u.CostUSD > 0
+		u.CacheReadTokens > 0 || u.CacheWriteTokens > 0 || u.CostUSD > 0 || u.TotalTokens > 0
+}
+
+// HookToolExecution describes one tool call tracked by a rich companion plugin.
+type HookToolExecution struct {
+	CallID     string `json:"call_id,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Input      string `json:"input,omitempty"`
+	Status     string `json:"status,omitempty"`
+	StartedMs  int64  `json:"started_ms,omitempty"`
+	DurationMs int64  `json:"duration_ms,omitempty"`
+	Error      string `json:"error,omitempty"`
+}
+
+// HookFileTouch describes one file touched by the agent.
+type HookFileTouch struct {
+	Path      string `json:"path,omitempty"`
+	Action    string `json:"action,omitempty"`
+	Additions int    `json:"additions,omitempty"`
+	Deletions int    `json:"deletions,omitempty"`
+	TsMs      int64  `json:"ts_ms,omitempty"`
+}
+
+// HookTodoItem describes one task-list item.
+type HookTodoItem struct {
+	ID       string `json:"id,omitempty"`
+	Content  string `json:"content,omitempty"`
+	Status   string `json:"status,omitempty"`
+	Priority string `json:"priority,omitempty"`
+}
+
+// HookMCPServerStatus describes one MCP server status entry.
+type HookMCPServerStatus struct {
+	Name   string `json:"name,omitempty"`
+	Status string `json:"status,omitempty"`
+	Tools  int    `json:"tools,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// HookLSPDiagnostics aggregates language-server diagnostics.
+type HookLSPDiagnostics struct {
+	Errors   int `json:"errors,omitempty"`
+	Warnings int `json:"warnings,omitempty"`
+	Files    int `json:"files,omitempty"`
+}
+
+// HookPendingInteraction describes a blocked permission/question awaiting input.
+type HookPendingInteraction struct {
+	ID          string   `json:"id,omitempty"`
+	Kind        string   `json:"kind,omitempty"`
+	Tool        string   `json:"tool,omitempty"`
+	Title       string   `json:"title,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Options     []string `json:"options,omitempty"`
+	TsMs        int64    `json:"ts_ms,omitempty"`
 }
 
 // HookSummary is the per-pane summary returned by `spaces __space-hooks`.
@@ -222,6 +286,115 @@ type HookSummary struct {
 	Children        []HookChild `json:"children,omitempty"`
 	BackgroundTasks []HookChild `json:"background_tasks,omitempty"`
 	HasDetail       bool        `json:"has_detail"`
+	// Rich v2 companion telemetry.
+	PluginName          string                  `json:"plugin_name,omitempty"`
+	PluginVersion       string                  `json:"plugin_version,omitempty"`
+	PluginCapabilities  []string                `json:"plugin_capabilities,omitempty"`
+	PluginTsMs          int64                   `json:"plugin_ts_ms,omitempty"`
+	PID                 int                     `json:"pid,omitempty"`
+	HarnessVersion      string                  `json:"harness_version,omitempty"`
+	Provider            string                  `json:"provider,omitempty"`
+	Effort              string                  `json:"effort,omitempty"`
+	Mode                string                  `json:"mode,omitempty"`
+	SandboxMode         string                  `json:"sandbox_mode,omitempty"`
+	GitBranch           string                  `json:"git_branch,omitempty"`
+	ContextTokens       int64                   `json:"context_tokens,omitempty"`
+	ContextWindow       int64                   `json:"context_window,omitempty"`
+	ContextPercent      float64                 `json:"context_percent,omitempty"`
+	TurnCount           int                     `json:"turn_count,omitempty"`
+	CompactionCount     int                     `json:"compaction_count,omitempty"`
+	LastCompactionMs    int64                   `json:"last_compaction_ms,omitempty"`
+	LastCompactionReason string                 `json:"last_compaction_reason,omitempty"`
+	ToolCallCount       int                     `json:"tool_call_count,omitempty"`
+	ToolErrorCount      int                     `json:"tool_error_count,omitempty"`
+	RetryCount          int                     `json:"retry_count,omitempty"`
+	RateLimited         bool                    `json:"rate_limited,omitempty"`
+	RateLimitResetMs    int64                   `json:"rate_limit_reset_ms,omitempty"`
+	RateLimitMessage    string                  `json:"rate_limit_message,omitempty"`
+	ActiveTools         []HookToolExecution     `json:"active_tools,omitempty"`
+	RecentTools         []HookToolExecution     `json:"recent_tools,omitempty"`
+	FilesTouched        []HookFileTouch         `json:"files_touched,omitempty"`
+	Todos               []HookTodoItem          `json:"todos,omitempty"`
+	MCPServers          []HookMCPServerStatus   `json:"mcp_servers,omitempty"`
+	LSPDiagnostics      *HookLSPDiagnostics     `json:"lsp_diagnostics,omitempty"`
+	PendingPermission   *HookPendingInteraction `json:"pending_permission,omitempty"`
+	LastError           string                  `json:"last_error,omitempty"`
+}
+
+// IsFreshPlugin reports whether this summary carries fresh plugin telemetry
+// (nowMs - plugin_ts_ms within the working TTL for live states, or within
+// the standard TTL for terminal states), so callers can skip expensive
+// capture-pane scraping.
+func (h *HookSummary) IsFreshPlugin(nowMs int64) bool {
+	if h == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(h.Source), "plugin") {
+		return false
+	}
+	ts := h.PluginTsMs
+	if ts <= 0 {
+		ts = h.TsMs
+	}
+	if ts <= 0 {
+		return false
+	}
+	age := nowMs - ts
+	if age < 0 {
+		age = -age
+	}
+	const workingStaleMs = int64(120_000)
+	const doneTTLMs = int64(30 * 60_000)
+	const failedTTLMs = int64(30 * 60_000)
+	const blockTTLMs = int64(30 * 60_000)
+	const authTTLMs = int64(60 * 60_000)
+	switch h.State {
+	case "working", "idle", "":
+		return age <= workingStaleMs
+	case "blocked", "waiting":
+		if h.IsAuthBlock() {
+			since := h.StateSinceMs
+			if since <= 0 {
+				since = ts
+			}
+			d := nowMs - since
+			if d < 0 {
+				d = -d
+			}
+			return d <= authTTLMs
+		}
+		since := h.StateSinceMs
+		if since <= 0 {
+			since = ts
+		}
+		d := nowMs - since
+		if d < 0 {
+			d = -d
+		}
+		return d <= blockTTLMs
+	case "done":
+		since := h.StateSinceMs
+		if since <= 0 {
+			since = ts
+		}
+		d := nowMs - since
+		if d < 0 {
+			d = -d
+		}
+		return d <= doneTTLMs
+	case "failed":
+		since := h.StateSinceMs
+		if since <= 0 {
+			since = ts
+		}
+		d := nowMs - since
+		if d < 0 {
+			d = -d
+		}
+		return d <= failedTTLMs
+	default:
+		return age <= workingStaleMs
+	}
 }
 
 // IsAuthBlock reports whether this hook represents an auth-required block.
@@ -394,12 +567,13 @@ func (c HookChild) ElapsedMs(nowMs int64) int64 {
 // HookDetail is the full record returned by `spaces __space-hooks --detail`.
 type HookDetail struct {
 	HookSummary
-	Prompt          string      `json:"prompt,omitempty"`
-	Tool            *HookTool   `json:"tool,omitempty"`
-	Reply           string      `json:"reply,omitempty"`
-	Children        []HookChild `json:"children,omitempty"`
-	BackgroundTasks []HookChild `json:"background_tasks,omitempty"`
-	Background      int         `json:"background"`
+	Prompt          string                 `json:"prompt,omitempty"`
+	Tool            *HookTool              `json:"tool,omitempty"`
+	Reply           string                 `json:"reply,omitempty"`
+	Children        []HookChild            `json:"children,omitempty"`
+	BackgroundTasks []HookChild            `json:"background_tasks,omitempty"`
+	Background      int                    `json:"background"`
+	Extras          map[string]any         `json:"extras,omitempty"`
 }
 
 // AllBackgroundWork returns deduplicated subagents and background tasks for

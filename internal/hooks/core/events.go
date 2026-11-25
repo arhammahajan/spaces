@@ -418,7 +418,8 @@ func normalizeUsage(raw any) map[string]any {
 	if raw == nil {
 		return nil
 	}
-	var inTok, outTok, reasonTok, cacheRead, cacheWrite int64
+	var inTok, outTok, reasonTok, cacheRead, cacheWrite, totalTok int64
+	var hasTotal bool
 	var costUSD float64
 	switch u := raw.(type) {
 	case *Usage:
@@ -431,6 +432,8 @@ func normalizeUsage(raw any) map[string]any {
 		cacheRead = u.CacheReadTokens
 		cacheWrite = u.CacheWriteTokens
 		costUSD = u.CostUSD
+		totalTok = u.TotalTokens
+		hasTotal = totalTok > 0
 	case Usage:
 		inTok = u.InputTokens
 		outTok = u.OutputTokens
@@ -438,12 +441,16 @@ func normalizeUsage(raw any) map[string]any {
 		cacheRead = u.CacheReadTokens
 		cacheWrite = u.CacheWriteTokens
 		costUSD = u.CostUSD
+		totalTok = u.TotalTokens
+		hasTotal = totalTok > 0
 	case map[string]any:
 		inTok = toInt64(first(u, "input_tokens", "inputTokens"))
 		outTok = toInt64(first(u, "output_tokens", "outputTokens"))
 		reasonTok = toInt64(first(u, "reasoning_tokens", "reasoningTokens"))
 		cacheRead = toInt64(first(u, "cache_read_tokens", "cacheReadTokens"))
 		cacheWrite = toInt64(first(u, "cache_write_tokens", "cacheWriteTokens"))
+		totalTok = toInt64(first(u, "total_tokens", "totalTokens"))
+		hasTotal = totalTok > 0
 		if f, ok := toFloat64(first(u, "cost_usd", "costUsd", "costUSD")); ok {
 			costUSD = f
 		}
@@ -468,6 +475,9 @@ func normalizeUsage(raw any) map[string]any {
 	}
 	if costUSD > 0 {
 		out["cost_usd"] = costUSD
+	}
+	if hasTotal && totalTok > 0 {
+		out["total_tokens"] = totalTok
 	}
 	if len(out) == 0 {
 		return nil
@@ -535,6 +545,21 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 	}
 
 	event = promoteAntigravitySubagentFromRecord(existing, event, now)
+
+	// Tiered source precedence: while the existing pane holds a fresh plugin
+	// record, lower-authority events (hook/daemon_sse rank 2, osc7501 rank 1,
+	// screen rank 0) must not overwrite plugin-owned fields.
+	if existing != nil && isPluginFreshRecord(existing, now) {
+		if SourceRank(stringKey(event["source"])) < SourceRank("plugin") {
+			return record, false
+		}
+	}
+
+	// Subagent isolation for plugin events: route strictly to children.
+	if isPluginSubagentEvent(event) {
+		applied := mergePluginSubagentIntoRecord(record, event, now)
+		return record, applied
+	}
 
 	if last, ok := record["last_event"].(map[string]any); ok {
 		lastEvent, _ := last["event"].(string)
@@ -810,6 +835,7 @@ func mergeEventApplied(existing, event map[string]any, now int64) (map[string]an
 			record["usage"] = u
 		}
 	}
+	mergePluginRichFields(record, event)
 	// Keep integer background count synced with active tracked background tasks.
 	if bgList, ok := record["background_tasks"].([]any); ok && len(bgList) > 0 {
 		activeBg := 0
