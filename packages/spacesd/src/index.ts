@@ -68,6 +68,7 @@ export {
   type DaemonEndpointMetadata,
   type SpacesDaemonOptions,
 } from "./server/daemon";
+export * from "./detection/index";
 
 import { SpacesDaemon } from "./server/daemon";
 
