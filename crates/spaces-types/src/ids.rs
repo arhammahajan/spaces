@@ -44,7 +44,9 @@ pub struct BootId(pub String);
 pub struct PtyId(pub String);
 
 /// Monotonically increasing fencing epoch for thread write ownership.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS,
+)]
 #[serde(transparent)]
 #[ts(export, type = "number")]
 pub struct Epoch(pub u64);
@@ -57,7 +59,9 @@ impl Epoch {
 }
 
 /// Monotonically increasing per-boot event sequence number.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS,
+)]
 #[serde(transparent)]
 #[ts(export, type = "number")]
 pub struct Seq(pub u64);
@@ -70,7 +74,9 @@ impl Seq {
 }
 
 /// Unix epoch timestamp in milliseconds (JSON-safe 53-bit integer in TypeScript).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, TS,
+)]
 #[serde(transparent)]
 #[ts(export, type = "number")]
 pub struct TimestampMs(pub i64);

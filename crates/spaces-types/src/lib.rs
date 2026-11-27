@@ -1,4 +1,9 @@
+pub mod backend;
+pub mod conversations;
 pub mod ids;
+pub mod model;
+pub mod shared;
+pub mod telemetry;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const OSC_STATUS_CODE: u16 = 7501;
