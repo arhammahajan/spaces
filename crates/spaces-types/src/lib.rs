@@ -1,4 +1,9 @@
 pub mod ids;
+pub mod lease;
+pub mod mailbox;
+pub mod osc;
+pub mod rpc_core;
+pub mod thread;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const OSC_STATUS_CODE: u16 = 7501;
