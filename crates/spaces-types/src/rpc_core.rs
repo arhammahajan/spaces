@@ -1190,6 +1190,7 @@ mod tests {
                 cwd: Some("/repo".into()),
                 resume_target: None,
                 thread_id: Some(ThreadId::from("thr_1")),
+                signature: None,
                 raw: None,
             }),
             ts_ms: TimestampMs(1_700_000_001_000),

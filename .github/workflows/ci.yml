@@ -38,11 +38,11 @@ jobs:
       - name: Install Bun workspace dependencies
         run: bun install --frozen-lockfile
 
-      - name: Typecheck @spaces/types
+      - name: Typecheck TypeScript workspaces
         run: bun run typecheck
 
-      - name: Run @spaces/types tests
-        run: bun run test:types
+      - name: Run TypeScript workspace tests
+        run: bun run test
 
   go-legacy:
     name: Legacy Go Tests

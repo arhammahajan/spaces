@@ -4,4 +4,8 @@ import type { ThreadId } from "./ThreadId";
 /**
  * Parsed OSC 7577 session-resume hint emitted by agents/wrappers.
  */
-export type OscResumeHint = { agent: string, session_id: string, profile?: string, cwd?: string, resume_target?: string, thread_id?: ThreadId, raw?: string, };
+export type OscResumeHint = { agent: string, session_id: string, profile?: string, cwd?: string, resume_target?: string, thread_id?: ThreadId, 
+/**
+ * Per-pane HMAC-SHA256 hex digest authenticating this OSC 7577 resume hint.
+ */
+signature?: string, raw?: string, };

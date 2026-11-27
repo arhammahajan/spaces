@@ -58,6 +58,10 @@ pub struct OscResumeHint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub thread_id: Option<ThreadId>,
+    /// Per-pane HMAC-SHA256 hex digest authenticating this OSC 7577 resume hint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub signature: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub raw: Option<String>,
@@ -137,6 +141,7 @@ mod tests {
             cwd: Some("/home/user/repo".into()),
             resume_target: Some("codex resume sess_abc123".into()),
             thread_id: Some(ThreadId::from("thr_01")),
+            signature: Some("deadbeef".into()),
             raw: Some("agent=codex:session_id=sess_abc123".into()),
         };
         let json = assert_ndjson_roundtrip(&hint);
