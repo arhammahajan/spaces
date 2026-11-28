@@ -22,6 +22,7 @@ import {
   type BootId,
   type DaemonPingResult,
   type DaemonStatusResult,
+  type EventPayload,
   type EventPushNotification,
   type EventSubscribeParams,
   type EventSubscribeResult,
@@ -42,9 +43,21 @@ import {
   type MailboxSendParams,
   type MailboxSendResult,
   type OscResumeHint,
+  type PtyAttachParams,
+  type PtyAttachResult,
+  type PtyDetachParams,
+  type PtyExitNotification,
+  type PtyId,
+  type PtyInputParams,
+  type PtyKillParams,
   type PtyOscNotification,
+  type PtyOutputNotification,
+  type PtyResizeParams,
+  type PtySpawnParams,
+  type PtySpawnResult,
   type RpcAuthParams,
   type RpcAuthResult,
+  type RpcClientKind,
   type RpcError,
   type RpcErrorCode,
   type RpcId,
@@ -54,6 +67,7 @@ import {
   type Thread,
   type ThreadCloseParams,
   type ThreadGetParams,
+  type ThreadId,
   type ThreadListParams,
   type ThreadListResult,
   type ThreadSpawnParams,
@@ -119,6 +133,8 @@ export interface SpacesDaemonOptions {
   backend?: BackendService;
   /** Injectable clock for deterministic tests. */
   now?: () => number;
+  /** Timeout (ms) for server-initiated RPC calls to `__pty-host` (defaults to 10_000). */
+  hostRpcTimeoutMs?: number;
 }
 
 class RpcFailure extends Error {
@@ -136,9 +152,25 @@ class RpcFailure extends Error {
 interface ConnectionState {
   id: string;
   authenticated: boolean;
+  clientKind?: RpcClientKind;
   clientId?: string;
   buffer: string;
   subscriptions: Set<string>;
+  attachedPtys: Set<PtyId>;
+}
+
+interface ActivePtyEntry {
+  ptyId: PtyId;
+  threadId: ThreadId;
+  pid: number;
+  pgid: number;
+  attachments: Set<Socket<ConnectionState>>;
+}
+
+interface PendingHostCall {
+  resolve: (result: unknown) => void;
+  reject: (err: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -210,11 +242,17 @@ export class SpacesDaemon {
   private readonly eventBus: EventBus;
   private readonly leaseMachine: LeaseMachine;
   private readonly connections = new Map<Socket<ConnectionState>, ConnectionState>();
+  private readonly activePtys = new Map<PtyId, ActivePtyEntry>();
+  private readonly pendingHostCalls = new Map<string, PendingHostCall>();
+  private readonly hostRpcTimeoutMs: number;
+  private ptyHostSocket: Socket<ConnectionState> | null = null;
+  private nextHostRpcSeq = 1;
   private listener: UnixSocketListener<ConnectionState> | null = null;
   private stopped = false;
 
   constructor(options: SpacesDaemonOptions = {}) {
     this.now = options.now ?? (() => Date.now());
+    this.hostRpcTimeoutMs = options.hostRpcTimeoutMs ?? 10_000;
     this.spacesDir = options.spacesDir ?? defaultSpacesDir();
     this.dbPath = options.dbPath ?? path.join(this.spacesDir, "spaces.db");
     this.socketPath = options.socketPath ?? path.join(this.spacesDir, "daemon.sock");
@@ -353,7 +391,7 @@ export class SpacesDaemon {
     const nowMs = this.now();
     const record = this.store.upsertVerifiedResumeHint({
       pane_id: paneId,
-      thread_id: hint.thread_id ?? tokenRecord.thread_id,
+      thread_id: hint.thread_id ?? tokenRecord.thread_id ?? this.activePtys.get(paneId)?.threadId,
       agent: hint.agent,
       session_id: hint.session_id,
       profile: hint.profile,
@@ -371,6 +409,7 @@ export class SpacesDaemon {
       payload: {
         type: "osc_resume_hint_received",
         pane_id: paneId,
+        pty_id: paneId,
         hint,
       },
     });
@@ -401,6 +440,7 @@ export class SpacesDaemon {
             authenticated: false,
             buffer: "",
             subscriptions: new Set(),
+            attachedPtys: new Set(),
           };
           socket.data = state;
           daemon.connections.set(socket, state);
@@ -438,11 +478,16 @@ export class SpacesDaemon {
     }
     this.stopped = true;
 
+    this.ptyHostSocket = null;
+    this.rejectPendingHostCalls("spacesd stopping");
+    this.activePtys.clear();
+
     for (const [socket, state] of this.connections.entries()) {
       for (const subId of state.subscriptions) {
         this.eventBus.unsubscribe(subId);
       }
       state.subscriptions.clear();
+      state.attachedPtys.clear();
       try {
         socket.end();
       } catch {
@@ -503,6 +548,25 @@ export class SpacesDaemon {
     if (!state) {
       return;
     }
+    if (this.ptyHostSocket === socket) {
+      this.ptyHostSocket = null;
+      this.rejectPendingHostCalls("pty_host disconnected");
+    }
+    for (const ptyId of state.attachedPtys) {
+      const entry = this.activePtys.get(ptyId);
+      if (!entry) {
+        continue;
+      }
+      entry.attachments.delete(socket);
+      if (entry.attachments.size === 0 && this.ptyHostSocket) {
+        void this.callPtyHost(RPC_METHODS.PTY_DETACH, {
+          pty_id: ptyId,
+        } satisfies PtyDetachParams).catch(() => {
+          // Best-effort detach when the last attached client disconnects.
+        });
+      }
+    }
+    state.attachedPtys.clear();
     for (const subId of state.subscriptions) {
       this.eventBus.unsubscribe(subId);
     }
@@ -550,6 +614,12 @@ export class SpacesDaemon {
 
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
       this.sendError(socket, 0, RPC_INVALID_REQUEST, "JSON-RPC frame must be an object");
+      return;
+    }
+
+    const raw = parsed as Record<string, unknown>;
+    if (raw.jsonrpc === "2.0" && !("method" in raw) && "id" in raw && raw.id !== undefined) {
+      this.handleResponseFrame(socket, raw as Partial<RpcResponse>);
       return;
     }
 
@@ -617,7 +687,17 @@ export class SpacesDaemon {
       }
       const clientId = p.client_id ?? state.id;
       state.authenticated = true;
+      state.clientKind = p.client_kind;
       state.clientId = clientId;
+      if (p.client_kind === "pty_host") {
+        if (this.ptyHostSocket && this.ptyHostSocket !== socket) {
+          this.rejectPendingHostCalls("pty_host connection replaced");
+        }
+        this.ptyHostSocket = socket;
+      } else if (this.ptyHostSocket === socket) {
+        this.ptyHostSocket = null;
+        this.rejectPendingHostCalls("pty_host connection changed kind");
+      }
       const bounds = this.store.getEventBounds(this.bootId);
       const res: RpcAuthResult = {
         ok: true,
@@ -648,7 +728,7 @@ export class SpacesDaemon {
           uptime_ms: Math.max(0, nowMs - this.startedAtMs),
           current_seq: bounds.latestSeq ?? 0,
           active_threads: activeThreads,
-          active_ptys: 0,
+          active_ptys: this.activePtys.size,
           connected_clients: this.connections.size,
         };
         return res;
@@ -731,6 +811,13 @@ export class SpacesDaemon {
               threadId: p.thread_id,
               expectedEpoch: p.epoch,
               reason: "cancel",
+            });
+          }
+          if (thread.pty_id && this.activePtys.has(thread.pty_id) && this.ptyHostSocket) {
+            void this.callPtyHost(RPC_METHODS.PTY_KILL, {
+              pty_id: thread.pty_id,
+            } satisfies PtyKillParams).catch(() => {
+              // Best-effort kill on thread close.
             });
           }
           const updated = this.store.updateThread(p.thread_id, {
@@ -1043,20 +1130,256 @@ export class SpacesDaemon {
         return this.backend.autoRestoreSpaces();
       }
 
+      case RPC_METHODS.PTY_SPAWN: {
+        const p = requireObject<PtySpawnParams>(params, "pty.spawn params required");
+        const threadId = requireNonEmptyString(p.thread_id, "pty.spawn requires thread_id");
+        if (!Array.isArray(p.argv) || typeof p.cwd !== "string" || !p.size || typeof p.size !== "object") {
+          throw new RpcFailure(RPC_INVALID_PARAMS, "pty.spawn requires argv, cwd, and size");
+        }
+        return this.actors.enqueue(threadId, async () => {
+          this.requireThread(threadId);
+          this.requirePtyHost();
+
+          const ptyId: PtyId = `pty_${randomUUID()}`;
+          const secret = this.issuePaneHmacToken(ptyId, threadId);
+          const forwardedParams: PtySpawnParams = {
+            thread_id: threadId,
+            argv: p.argv,
+            cwd: p.cwd,
+            env: {
+              ...(p.env && typeof p.env === "object" ? p.env : {}),
+              SPACES_PTY_ID: ptyId,
+              SPACES_THREAD_ID: threadId,
+              SPACES_PTY_HMAC_TOKEN: secret,
+            },
+            size: p.size,
+          };
+
+          let res: PtySpawnResult;
+          try {
+            res = await this.callPtyHost<PtySpawnResult>(RPC_METHODS.PTY_SPAWN, forwardedParams);
+          } catch (err) {
+            this.store.revokePaneToken(ptyId, this.now());
+            throw err;
+          }
+
+          const resolvedPtyId = res.pty_id ?? ptyId;
+          this.activePtys.set(resolvedPtyId, {
+            ptyId: resolvedPtyId,
+            threadId,
+            pid: res.pid,
+            pgid: res.pgid,
+            attachments: new Set(),
+          });
+
+          const nowMs = this.now();
+          const updated = this.store.updateThread(threadId, {
+            pty_id: resolvedPtyId,
+            state: "active",
+            updated_at_ms: nowMs,
+          });
+          if (updated) {
+            this.eventBus.publish({
+              threadId: updated.id,
+              epoch: updated.epoch,
+              tsMs: nowMs,
+              payload: { type: "thread_updated", thread: updated },
+            });
+          }
+          return res;
+        });
+      }
+
+      case RPC_METHODS.PTY_ATTACH: {
+        const p = requireObject<PtyAttachParams>(params, "pty.attach params required");
+        const ptyId = requireNonEmptyString(p.pty_id, "pty.attach requires pty_id");
+        const entry = this.requirePtyEntry(ptyId);
+        this.requirePtyHost();
+
+        const alreadyAttached = entry.attachments.has(socket);
+        entry.attachments.add(socket);
+        state.attachedPtys.add(ptyId);
+
+        const forwarded: PtyAttachParams = {
+          pty_id: ptyId,
+          request_replay: Boolean(p.request_replay),
+          ...(p.after_offset !== undefined ? { after_offset: p.after_offset } : {}),
+        };
+
+        try {
+          return await this.callPtyHost<PtyAttachResult>(RPC_METHODS.PTY_ATTACH, forwarded);
+        } catch (err) {
+          if (!alreadyAttached) {
+            entry.attachments.delete(socket);
+            state.attachedPtys.delete(ptyId);
+          }
+          throw err;
+        }
+      }
+
+      case RPC_METHODS.PTY_DETACH: {
+        const p = requireObject<PtyDetachParams>(params, "pty.detach params required");
+        const ptyId = requireNonEmptyString(p.pty_id, "pty.detach requires pty_id");
+        state.attachedPtys.delete(ptyId);
+        const entry = this.activePtys.get(ptyId);
+        if (entry) {
+          entry.attachments.delete(socket);
+          if (entry.attachments.size === 0 && this.ptyHostSocket) {
+            await this.callPtyHost(RPC_METHODS.PTY_DETACH, {
+              pty_id: ptyId,
+            } satisfies PtyDetachParams);
+          }
+        }
+        return { ok: true };
+      }
+
+      case RPC_METHODS.PTY_INPUT: {
+        const p = requireObject<PtyInputParams>(params, "pty.input params required");
+        const ptyId = requireNonEmptyString(p.pty_id, "pty.input requires pty_id");
+        if (typeof p.data_b64 !== "string") {
+          throw new RpcFailure(RPC_INVALID_PARAMS, "pty.input requires data_b64");
+        }
+        const entry = this.requirePtyEntry(ptyId);
+        if (p.epoch !== undefined) {
+          if (typeof p.epoch !== "number") {
+            throw new RpcFailure(RPC_INVALID_PARAMS, "pty.input epoch must be a number");
+          }
+          this.leaseMachine.assertFenced(entry.threadId, p.epoch);
+        }
+        await this.callPtyHost(RPC_METHODS.PTY_INPUT, {
+          pty_id: ptyId,
+          ...(p.epoch !== undefined ? { epoch: p.epoch } : {}),
+          encoding: p.encoding ?? "base64",
+          data_b64: p.data_b64,
+        } satisfies PtyInputParams);
+        return { ok: true };
+      }
+
+      case RPC_METHODS.PTY_OUTPUT: {
+        const p = requireObject<PtyOutputNotification>(params, "pty.output params required");
+        const ptyId = requireNonEmptyString(p.pty_id, "pty.output requires pty_id");
+        let entry = this.activePtys.get(ptyId);
+        if (!entry) {
+          await Promise.resolve();
+          entry = this.activePtys.get(ptyId);
+        }
+        if (entry) {
+          for (const clientSocket of Array.from(entry.attachments)) {
+            if (this.connections.has(clientSocket)) {
+              this.sendNotification(clientSocket, RPC_METHODS.PTY_OUTPUT, p);
+            } else {
+              entry.attachments.delete(clientSocket);
+            }
+          }
+        }
+        return { ok: true };
+      }
+
+      case RPC_METHODS.PTY_RESIZE: {
+        const p = requireObject<PtyResizeParams>(params, "pty.resize params required");
+        const ptyId = requireNonEmptyString(p.pty_id, "pty.resize requires pty_id");
+        if (!p.size || typeof p.size !== "object") {
+          throw new RpcFailure(RPC_INVALID_PARAMS, "pty.resize requires size");
+        }
+        this.requirePtyEntry(ptyId);
+        await this.callPtyHost(RPC_METHODS.PTY_RESIZE, p);
+        return { ok: true };
+      }
+
+      case RPC_METHODS.PTY_KILL: {
+        const p = requireObject<PtyKillParams>(params, "pty.kill params required");
+        const ptyId = requireNonEmptyString(p.pty_id, "pty.kill requires pty_id");
+        this.requirePtyEntry(ptyId);
+        await this.callPtyHost(RPC_METHODS.PTY_KILL, p);
+        return { ok: true };
+      }
+
+      case RPC_METHODS.PTY_EXIT: {
+        const p = requireObject<PtyExitNotification>(params, "pty.exit params required");
+        const ptyId = requireNonEmptyString(p.pty_id, "pty.exit requires pty_id");
+        let entry = this.activePtys.get(ptyId);
+        if (!entry) {
+          await Promise.resolve();
+          entry = this.activePtys.get(ptyId);
+        }
+        if (!entry) {
+          return { ok: true };
+        }
+
+        const attachedSockets = Array.from(entry.attachments);
+        for (const clientSocket of attachedSockets) {
+          this.connections.get(clientSocket)?.attachedPtys.delete(ptyId);
+        }
+        entry.attachments.clear();
+        this.activePtys.delete(ptyId);
+
+        const tsMs = typeof p.ts_ms === "number" ? p.ts_ms : this.now();
+        await this.actors.enqueue(entry.threadId, () => {
+          const existingThread = this.store.getThread(entry.threadId);
+          let updated: Thread | null = null;
+          if (existingThread) {
+            updated = this.store.updateThread(entry.threadId, {
+              pty_id: null,
+              ...(existingThread.state !== "closed"
+                ? { state: p.exit_code === 0 ? "idle" : "failed" }
+                : {}),
+              updated_at_ms: tsMs,
+            });
+          }
+
+          const exitPayload: EventPayload = {
+            type: "pty_exited",
+            pty_id: ptyId,
+            ...(p.exit_code !== undefined ? { exit_code: p.exit_code } : {}),
+            ...(p.signal !== undefined ? { signal: p.signal } : {}),
+          };
+          this.eventBus.publish({
+            threadId: entry.threadId,
+            ...(updated
+              ? { epoch: updated.epoch }
+              : existingThread
+                ? { epoch: existingThread.epoch }
+                : {}),
+            tsMs,
+            payload: exitPayload,
+          });
+          if (updated) {
+            this.eventBus.publish({
+              threadId: updated.id,
+              epoch: updated.epoch,
+              tsMs,
+              payload: { type: "thread_updated", thread: updated },
+            });
+          }
+
+          for (const clientSocket of attachedSockets) {
+            if (this.connections.has(clientSocket)) {
+              this.sendNotification(clientSocket, RPC_METHODS.PTY_EXIT, p);
+            }
+          }
+        });
+
+        return { ok: true };
+      }
+
       case RPC_METHODS.PTY_OSC: {
         const p = requireObject<PtyOscNotification>(params, "pty.osc params required");
+        const ptyId = requireNonEmptyString(p.pty_id, "pty.osc requires pty_id");
         if (p.status) {
+          const threadId =
+            this.activePtys.get(ptyId)?.threadId ?? this.store.getPaneToken(ptyId)?.thread_id;
           this.eventBus.publish({
+            ...(threadId !== undefined ? { threadId } : {}),
             tsMs: p.ts_ms,
             payload: {
               type: "osc_status_received",
-              pty_id: p.pty_id,
+              pty_id: ptyId,
               status: p.status,
             },
           });
         }
         if (p.resume_hint) {
-          const verified = this.verifyAndStoreOscResumeHint(p.pty_id, p.resume_hint);
+          const verified = this.verifyAndStoreOscResumeHint(ptyId, p.resume_hint);
           if (!verified.ok) {
             throw new RpcFailure(RPC_UNAUTHORIZED, verified.reason);
           }
@@ -1076,6 +1399,100 @@ export class SpacesDaemon {
       throw new RpcFailure(RPC_NOT_FOUND, `Thread not found: ${threadId}`);
     }
     return thread;
+  }
+
+  private requirePtyEntry(ptyId: PtyId): ActivePtyEntry {
+    const entry = this.activePtys.get(ptyId);
+    if (!entry) {
+      throw new RpcFailure(RPC_NOT_FOUND, `PTY not found: ${ptyId}`);
+    }
+    return entry;
+  }
+
+  private requirePtyHost(): Socket<ConnectionState> {
+    if (!this.ptyHostSocket || !this.connections.has(this.ptyHostSocket)) {
+      throw new RpcFailure(RPC_INTERNAL_ERROR, "no __pty-host connected");
+    }
+    return this.ptyHostSocket;
+  }
+
+  private handleResponseFrame(
+    socket: Socket<ConnectionState>,
+    frame: Partial<RpcResponse>,
+  ): void {
+    if (frame.id === undefined || frame.id === null) {
+      return;
+    }
+    if (socket !== this.ptyHostSocket) {
+      return;
+    }
+    const idKey = String(frame.id);
+    const pending = this.pendingHostCalls.get(idKey);
+    if (!pending) {
+      return;
+    }
+    this.pendingHostCalls.delete(idKey);
+    clearTimeout(pending.timer);
+    if (frame.error) {
+      const code =
+        typeof frame.error.code === "number" ? (frame.error.code as RpcErrorCode) : RPC_INTERNAL_ERROR;
+      const message =
+        typeof frame.error.message === "string" ? frame.error.message : "pty_host RPC error";
+      pending.reject(new RpcFailure(code, message, frame.error.data));
+      return;
+    }
+    pending.resolve(frame.result);
+  }
+
+  private rejectPendingHostCalls(reason: string): void {
+    for (const [id, pending] of this.pendingHostCalls.entries()) {
+      this.pendingHostCalls.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new RpcFailure(RPC_INTERNAL_ERROR, reason));
+    }
+  }
+
+  private callPtyHost<T = unknown>(method: string, params: unknown): Promise<T> {
+    const hostSocket = this.requirePtyHost();
+    const id = `srv_${this.nextHostRpcSeq++}`;
+    const req: RpcRequest = {
+      jsonrpc: "2.0",
+      id,
+      method,
+      params,
+    };
+
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.pendingHostCalls.delete(id)) {
+          reject(
+            new RpcFailure(
+              RPC_INTERNAL_ERROR,
+              `__pty-host RPC timeout (${this.hostRpcTimeoutMs}ms) calling ${method}`,
+            ),
+          );
+        }
+      }, this.hostRpcTimeoutMs);
+
+      this.pendingHostCalls.set(id, {
+        resolve: resolve as (result: unknown) => void,
+        reject,
+        timer,
+      });
+
+      try {
+        hostSocket.write(`${JSON.stringify(req)}\n`);
+      } catch (err) {
+        this.pendingHostCalls.delete(id);
+        clearTimeout(timer);
+        reject(
+          new RpcFailure(
+            RPC_INTERNAL_ERROR,
+            `Failed to write to __pty-host: ${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+      }
+    });
   }
 
   private sendResult(socket: Socket<ConnectionState>, id: RpcId, result: unknown): void {
@@ -1111,6 +1528,13 @@ export class SpacesDaemon {
       // Socket closed concurrently.
     }
   }
+}
+
+function requireNonEmptyString(value: unknown, message: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new RpcFailure(RPC_INVALID_PARAMS, message);
+  }
+  return value;
 }
 
 function requireObject<T>(value: unknown, message: string): T {
