@@ -164,7 +164,19 @@ if [ "$OSC_WATCH" = "on" ] || [ "$OSC_WATCH" = "1" ] || [ "$OSC_WATCH" = "true" 
 fi
 
 # Persist running spaces immediately on detach (throttled 30s autosave also runs via status-bar).
-tmux set-hook -g "client-detached[90]" "run-shell -b \"$BIN resurrect autosave --force\"" 2>/dev/null || true
+# Prefer spacesd daemon verbs when ~/.spaces/daemon.sock is live, falling back to $BIN.
+SPACES_DIR_RESOLVED="${SPACES_DIR:-$HOME/.spaces}"
+SPACESD_CLI="$CURRENT_DIR/packages/spacesd/src/client/cli.ts"
+BUN_BIN="$(command -v bun 2>/dev/null || ([ -x "$HOME/.bun/bin/bun" ] && printf '%s' "$HOME/.bun/bin/bun") || true)"
+if [ -n "$BUN_BIN" ] && [ -f "$SPACESD_CLI" ]; then
+	AUTOSAVE_CMD="if [ -S \"$SPACES_DIR_RESOLVED/daemon.sock\" ]; then \"$BUN_BIN\" run \"$SPACESD_CLI\" resurrect autosave --force || \"$BIN\" resurrect autosave --force; else \"$BIN\" resurrect autosave --force; fi"
+	AUTORESTORE_CMD="if [ -S \"$SPACES_DIR_RESOLVED/daemon.sock\" ]; then \"$BUN_BIN\" run \"$SPACESD_CLI\" resurrect auto-restore || \"$BIN\" resurrect auto-restore; else \"$BIN\" resurrect auto-restore; fi"
+else
+	AUTOSAVE_CMD="\"$BIN\" resurrect autosave --force"
+	AUTORESTORE_CMD="\"$BIN\" resurrect auto-restore"
+fi
+
+tmux set-hook -g "client-detached[90]" "run-shell -b '$AUTOSAVE_CMD'" 2>/dev/null || true
 
 # Automatically restore spaces that were last open (not exited) once per fresh
 # tmux server startup (e.g., after a reboot). Disable with
@@ -174,6 +186,6 @@ if [ "$AUTO_RESTORE" = "on" ] || [ "$AUTO_RESTORE" = "1" ] || [ "$AUTO_RESTORE" 
 	RESTORED_STATE="$(tmux show-option -gqv "@spaces_restored" 2>/dev/null || true)"
 	if [ -z "$RESTORED_STATE" ]; then
 		tmux set-option -gq "@spaces_restored" "pending" 2>/dev/null || true
-		tmux run-shell -b "$BIN resurrect auto-restore" 2>/dev/null || true
+		tmux run-shell -b "$AUTORESTORE_CMD" 2>/dev/null || true
 	fi
 fi

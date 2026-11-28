@@ -69,6 +69,12 @@ export {
   type SpacesDaemonOptions,
 } from "./server/daemon";
 export * from "./detection/index";
+export * from "./drivers/types";
+export * from "./drivers/tmux";
+export * from "./resurrect/capture";
+export * from "./resurrect/restore";
+export * from "./backend/service";
+export * from "./client/rpc-client";
 
 import { SpacesDaemon } from "./server/daemon";
 

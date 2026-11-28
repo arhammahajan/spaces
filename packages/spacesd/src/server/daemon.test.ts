@@ -16,6 +16,8 @@ import {
   type TurnSendResult,
 } from "@spaces/types";
 import { signOscResumeHint } from "../core/hmac";
+import { SpacesRpcClient } from "../client/rpc-client";
+import { TmuxDriver, type TmuxRunResult, type TmuxRunner } from "../drivers/tmux";
 import { SpacesDaemon, type DaemonEndpointMetadata } from "./daemon";
 
 interface RpcClient {
@@ -349,5 +351,69 @@ describe("SpacesDaemon UDS NDJSON-RPC 2.0", () => {
     await daemon.stop();
     expect(existsSync(endpoint.socket)).toBe(false);
     expect(existsSync(path.join(daemon.spacesDir, "daemon.endpoint.json"))).toBe(false);
+  });
+
+  test("executes backend verbs (OpenSpace, FocusPane, NewWindow, KillWindow, CreateSpace, LaunchAgent) over UDS RPC", async () => {
+    const calls: string[][] = [];
+    const runner: TmuxRunner = {
+      async run(args: string[]): Promise<TmuxRunResult> {
+        calls.push([...args]);
+        if (args[0] === "list-clients") {
+          return { stdout: "/dev/pts/1\n", stderr: "", exitCode: 0 };
+        }
+        if (args[0] === "display-message" && args[2] === "#{session_name}") {
+          return { stdout: "main\n", stderr: "", exitCode: 0 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      },
+    };
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), "spacesd-backend-rpc-"));
+    tempDirs.push(dir);
+    const daemon = new SpacesDaemon({
+      spacesDir: dir,
+      driver: new TmuxDriver({ runner, env: {} }),
+    });
+    daemons.push(daemon);
+    daemon.start();
+
+    const rpc = new SpacesRpcClient({ spacesDir: dir });
+
+    expect(await rpc.execVerb({ verb: "open_space", name: "work" })).toEqual({
+      result: { kind: "ack" },
+    });
+    expect(
+      await rpc.execVerb({
+        verb: "focus_pane",
+        session: "work",
+        window_id: "@1",
+        pane_id: "%3",
+      }),
+    ).toEqual({ result: { kind: "ack" } });
+    expect(
+      await rpc.execVerb({ verb: "create_space", name: "feat", cwd: "/tmp" }),
+    ).toEqual({ result: { kind: "ack" } });
+    expect(
+      await rpc.execVerb({ verb: "new_window", session: "feat", cwd: "/tmp", name: "code" }),
+    ).toEqual({ result: { kind: "ack" } });
+    expect(await rpc.execVerb({ verb: "kill_window", window_id: "@5" })).toEqual({
+      result: { kind: "ack" },
+    });
+    expect(
+      await rpc.execVerb({
+        verb: "launch_agent",
+        session: "feat",
+        cwd: "/tmp",
+        agent: "claude",
+        profile: "work",
+      }),
+    ).toEqual({ result: { kind: "ack" } });
+
+    expect(calls.some((c) => c[0] === "switch-client" && c[2] === "work")).toBe(true);
+    expect(calls.some((c) => c[0] === "select-pane" && c[2] === "%3")).toBe(true);
+    expect(calls.some((c) => c[0] === "new-session" && c.includes("feat"))).toBe(true);
+    expect(calls.some((c) => c[0] === "kill-window" && c[2] === "@5")).toBe(true);
+    expect(calls.some((c) => c[0] === "new-window" && c.includes("--profile"))).toBe(true);
+    expect(daemon.getStore().getOpenState()?.spaces).toContain("feat");
   });
 });

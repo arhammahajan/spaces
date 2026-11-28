@@ -15,6 +15,10 @@ import {
   PROTOCOL_VERSION,
   RPC_METHODS,
   SPACES_CONFIG_DIR_NAME,
+  type BackendExecParams,
+  type BackendExecResult,
+  type BackendHarnessesListResult,
+  type BackendSpacesListResult,
   type BootId,
   type DaemonPingResult,
   type DaemonStatusResult,
@@ -59,6 +63,7 @@ import {
   type TurnSendParams,
   type TurnSendResult,
 } from "@spaces/types";
+import { BackendService } from "../backend/service";
 import { ThreadActorRegistry } from "../core/actor";
 import { EventBus, type EventStoreAdapter } from "../core/event-bus";
 import {
@@ -67,6 +72,8 @@ import {
   verifyOscResumeHint,
 } from "../core/hmac";
 import { LeaseError, LeaseMachine, type LeaseHooks, type LeaseStoreAdapter } from "../core/lease-fsm";
+import { TmuxDriver } from "../drivers/tmux";
+import type { MultiplexerDriver } from "../drivers/types";
 import { SpacesStore, type VerifiedResumeHintRecord } from "../store/db";
 
 export const SPACESD_VERSION = "0.1.0" as const;
@@ -106,6 +113,10 @@ export interface SpacesDaemonOptions {
   maxEvents?: number;
   /** Optional hooks for lease DRAIN / CANCEL / STOP_AND_FLUSH transitions. */
   leaseHooks?: LeaseHooks;
+  /** Optional swappable multiplexer driver (defaults to `TmuxDriver`). */
+  driver?: MultiplexerDriver;
+  /** Optional custom BackendService instance. */
+  backend?: BackendService;
   /** Injectable clock for deterministic tests. */
   now?: () => number;
 }
@@ -194,6 +205,7 @@ export class SpacesDaemon {
 
   private readonly now: () => number;
   private readonly store: SpacesStore;
+  private readonly backend: BackendService;
   private readonly actors: ThreadActorRegistry;
   private readonly eventBus: EventBus;
   private readonly leaseMachine: LeaseMachine;
@@ -223,6 +235,12 @@ export class SpacesDaemon {
     }
 
     this.store = new SpacesStore(this.dbPath, { now: this.now });
+    this.backend =
+      options.backend ??
+      new BackendService(options.driver ?? new TmuxDriver(), this.store, {
+        spacesDir: this.spacesDir,
+        now: this.now,
+      });
     this.actors = new ThreadActorRegistry();
 
     const eventAdapter: EventStoreAdapter = {
@@ -276,6 +294,10 @@ export class SpacesDaemon {
 
   getStore(): SpacesStore {
     return this.store;
+  }
+
+  getBackend(): BackendService {
+    return this.backend;
   }
 
   getActors(): ThreadActorRegistry {
@@ -986,6 +1008,39 @@ export class SpacesDaemon {
           has_more: tailed.hasMore,
         };
         return res;
+      }
+
+      case RPC_METHODS.BACKEND_EXEC: {
+        const p = requireObject<BackendExecParams>(params, "backend.exec params required");
+        if (!p.verb || typeof p.verb !== "object") {
+          throw new RpcFailure(RPC_INVALID_PARAMS, "backend.exec requires verb");
+        }
+        const result = await this.backend.execVerb(p.verb);
+        const res: BackendExecResult = { result };
+        return res;
+      }
+
+      case RPC_METHODS.BACKEND_SPACES_LIST: {
+        const spaces = await this.backend.loadSpaces();
+        const res: BackendSpacesListResult = { spaces };
+        return res;
+      }
+
+      case RPC_METHODS.BACKEND_HARNESSES_LIST: {
+        const harnesses = this.backend.loadHarnesses();
+        const res: BackendHarnessesListResult = { harnesses };
+        return res;
+      }
+
+      case "resurrect.autosave": {
+        const force = Boolean(
+          params && typeof params === "object" && (params as { force?: boolean }).force,
+        );
+        return this.backend.autosaveSpaces(force);
+      }
+
+      case "resurrect.auto_restore": {
+        return this.backend.autoRestoreSpaces();
       }
 
       case RPC_METHODS.PTY_OSC: {
