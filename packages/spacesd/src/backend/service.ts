@@ -28,6 +28,7 @@ import {
   captureOpenState,
   captureSpaces,
   type CaptureOptions,
+  type HarnessResumePolicy,
 } from "../resurrect/capture";
 import {
   agentBinaryName,
@@ -49,6 +50,8 @@ export interface BackendServiceOptions {
   registry?: DetectionRegistry;
   /** Optional vendor store lookup for Tier 6 restore resolution. */
   vendorLookup?: VendorSessionLookup;
+  /** Optional agent-specific resume policy supplied by HarnessPlugins. */
+  resumePolicy?: HarnessResumePolicy;
   /** Optional capture overrides (for deterministic tests). */
   captureOptions?: CaptureOptions;
   /** Injectable clock for deterministic tests. */
@@ -103,6 +106,7 @@ export class BackendService {
   private readonly registry: DetectionRegistry;
   private readonly arbitrator: Arbitrator;
   private readonly vendorLookup?: VendorSessionLookup;
+  private readonly resumePolicy?: HarnessResumePolicy;
   private readonly captureOptions?: CaptureOptions;
   private readonly now: () => number;
   private lastAutosaveMs = 0;
@@ -120,6 +124,7 @@ export class BackendService {
     this.registry = options.registry ?? defaultDetectionRegistry();
     this.arbitrator = new Arbitrator({ registry: this.registry });
     this.vendorLookup = options.vendorLookup;
+    this.resumePolicy = options.resumePolicy;
     this.captureOptions = options.captureOptions;
     this.now = options.now ?? (() => Date.now());
   }
@@ -203,7 +208,7 @@ export class BackendService {
         const cmd =
           profile !== ""
             ? [this.selfPath, "__shim", "--profile", profile, verb.agent]
-            : [this.selfPath, "__shim", verb.agent, agentBinaryName(verb.agent)];
+            : [this.selfPath, "__shim", verb.agent, agentBinaryName(verb.agent, this.resumePolicy)];
 
         await this.driver.newWindow(session, verb.cwd, label, cmd);
         return { kind: "ack" };
@@ -218,6 +223,7 @@ export class BackendService {
           selfPath: this.selfPath,
           switch: true,
           resolveSession: this.vendorLookup,
+          resumePolicy: this.resumePolicy,
         });
         try {
           this.store.addOpenSpace(verb.name, true);
@@ -324,6 +330,7 @@ export class BackendService {
     const hookSnap = this.buildHookSnapshot(nowMs);
     const spaceSnaps = captureSpaces(snap, hookSnap, this.store, {
       ...this.captureOptions,
+      resumePolicy: this.captureOptions?.resumePolicy ?? this.resumePolicy,
       nowMs,
     });
     const openState = captureOpenState(snap, nowMs);
@@ -346,6 +353,7 @@ export class BackendService {
     return autoRestore(this.driver, this.store, {
       selfPath: this.selfPath,
       resolveSession: this.vendorLookup,
+      resumePolicy: this.resumePolicy,
     });
   }
 

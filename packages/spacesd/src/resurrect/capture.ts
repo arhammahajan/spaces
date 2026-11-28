@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, readlinkSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import type { HookSnapshot, HookSummary } from "@spaces/types";
 import { validateResumeCommand } from "../core/hmac";
@@ -25,9 +25,36 @@ export const SNAPSHOT_VERSION = 1;
 export const RESUME_ACCESS_COMMAND = "__resume-access";
 
 const SESSION_ID_FLAGS = ["--conversation", "--resume", "--session", "--id"] as const;
-const POSITIONAL_RESUME_AGENTS = new Set(["codex", "muse"]);
 const HARNESS_BINARIES = new Set(["harness", "spaces", "tmux-spaces"]);
 const MAX_PROC_WALK_DEPTH = 6;
+
+/**
+ * Tier 6 vendor conversation store lookup seam for resolving an unclaimed
+ * session ID during restore.
+ */
+export type VendorSessionLookup = (
+  agent: string,
+  cwd: string,
+  profile: string,
+  title: string,
+  exclude: ReadonlySet<string>,
+) => { sessionId: string; storeAvailable: boolean };
+
+/**
+ * Agent-agnostic plugin policy seam injected into `resurrect` capture and restore.
+ *
+ * Agent-specific launch flags, positional resume syntax, duplicate-session
+ * policies, live `/proc` discovery, and vendor store lookups live in each
+ * agent's `HarnessPlugin` (not in shared `resurrect/`).
+ */
+export interface HarnessResumePolicy {
+  binaryName?(agent: string): string;
+  resumeArgs?(agent: string, sessionId: string): string[];
+  positionalResume?(agent: string): boolean;
+  uniqueExplicitSessions?(agent: string): boolean;
+  discoverLiveSessionId?(agent: string, pid: number): string;
+  resolveVendorSession?: VendorSessionLookup;
+}
 
 export interface HarnessLaunchParseResult {
   ok: boolean;
@@ -40,6 +67,7 @@ export interface CaptureOptions {
   readChildCmdline?: (pid: number) => string[];
   discoverLiveSessionId?: (agent: string, pid: number) => string;
   discoverMainRepoRoot?: (worktreePath: string) => string;
+  resumePolicy?: HarnessResumePolicy;
 }
 
 /**
@@ -53,15 +81,18 @@ export function canonicalAgent(name: string): string {
 /**
  * Scans `argv` for standard session ID flags (`--conversation`, `--resume`,
  * `--session`, `--id` in `--flag val` or `--flag=val` forms, skipping `"latest"`
- * and `"-*"`) and positional `resume <id>` (skipping `"--last"` and `"-*"`)
- * for `codex` and `muse`.
+ * and `"-*"`) and optional positional `resume <id>` (skipping `"--last"` and `"-*"`)
+ * when enabled by the agent's `HarnessResumePolicy`.
  */
-export function extractSessionIdFromArgs(agent: string, argv: string[]): string {
+export function extractSessionIdFromArgs(
+  agent: string,
+  argv: string[],
+  positionalResume = false,
+): string {
   if (!Array.isArray(argv) || argv.length === 0) {
     return "";
   }
-  const canon = canonicalAgent(agent) || agent.trim().toLowerCase();
-  const positionalResume = POSITIONAL_RESUME_AGENTS.has(canon);
+  void agent;
 
   for (let i = 0; i < argv.length; i += 1) {
     const tok = argv[i]!;
@@ -262,116 +293,6 @@ export function readChildCmdline(pid: number, procRoot = "/proc"): string[] {
   return best;
 }
 
-function antigravitySessionFromFds(
-  pid: number,
-  procRoot: string,
-): { id: string; isConversation: boolean } {
-  const fdDir = path.join(procRoot, String(pid), "fd");
-  let entries: string[];
-  try {
-    entries = readdirSync(fdDir).sort();
-  } catch {
-    return { id: "", isConversation: false };
-  }
-
-  let lockId = "";
-  for (const name of entries) {
-    let target: string;
-    try {
-      target = readlinkSync(path.join(fdDir, name));
-    } catch {
-      continue;
-    }
-    if (!target) {
-      continue;
-    }
-
-    const convMarker = "/antigravity-cli/conversations/";
-    const convIdx = target.indexOf(convMarker);
-    if (convIdx >= 0) {
-      const rest = target.slice(convIdx + convMarker.length);
-      for (const suffix of [".db-wal", ".db-shm", ".db"]) {
-        if (rest.endsWith(suffix)) {
-          const id = rest.slice(0, rest.length - suffix.length);
-          if (id !== "" && !id.includes("/")) {
-            return { id, isConversation: true };
-          }
-        }
-      }
-    }
-
-    if (lockId === "") {
-      const lockMarker = "/antigravity-cli/presence/";
-      const lockIdx = target.indexOf(lockMarker);
-      if (lockIdx >= 0) {
-        const rest = target.slice(lockIdx + lockMarker.length);
-        if (rest.endsWith(".lock")) {
-          const id = rest.slice(0, rest.length - ".lock".length);
-          if (id !== "" && !id.includes("/")) {
-            lockId = id;
-          }
-        }
-      }
-    }
-  }
-
-  if (lockId !== "") {
-    return { id: lockId, isConversation: false };
-  }
-  return { id: "", isConversation: false };
-}
-
-function discoverAntigravitySessionFromProc(pid: number, procRoot: string): string {
-  if (!Number.isInteger(pid) || pid <= 1) {
-    return "";
-  }
-  const visited = new Set<number>([pid]);
-  let frontier: number[] = [pid];
-  let lockFallback = "";
-
-  for (let depth = 0; depth < MAX_PROC_WALK_DEPTH && frontier.length > 0; depth += 1) {
-    const next: number[] = [];
-    for (const cur of frontier) {
-      const found = antigravitySessionFromFds(cur, procRoot);
-      if (found.id !== "") {
-        if (found.isConversation) {
-          return found.id;
-        }
-        if (lockFallback === "") {
-          lockFallback = found.id;
-        }
-      }
-      for (const child of readTaskChildren(cur, procRoot)) {
-        if (child > 1 && !visited.has(child)) {
-          visited.add(child);
-          next.push(child);
-        }
-      }
-    }
-    frontier = next;
-  }
-
-  return lockFallback;
-}
-
-/**
- * Inspects a live process tree to discover an active conversation/session ID
- * (currently Antigravity `/proc/<pid>/fd/*` conversation DBs & presence locks).
- */
-export function discoverLiveSessionId(
-  agent: string,
-  pid: number,
-  procRoot = "/proc",
-): string {
-  if (!agent || !Number.isInteger(pid) || pid <= 0) {
-    return "";
-  }
-  if (canonicalAgent(agent) !== "antigravity") {
-    return "";
-  }
-  return discoverAntigravitySessionFromProc(pid, procRoot).trim();
-}
-
 function shimTargetAgent(argv: string[]): string {
   if (argv.length < 3) {
     return "";
@@ -447,7 +368,10 @@ function capturePane(
   opts: CaptureOptions,
 ): ResurrectPaneSnapshot {
   const readCmd = opts.readChildCmdline ?? readChildCmdline;
-  const discoverLive = opts.discoverLiveSessionId ?? discoverLiveSessionId;
+  const discoverLive =
+    opts.discoverLiveSessionId ??
+    opts.resumePolicy?.discoverLiveSessionId ??
+    (() => "");
 
   const procCmdline = pane.pid > 0 ? readCmd(pane.pid) : [];
   const cmdBase = commandName(pane.currentCommand);
@@ -513,7 +437,8 @@ function capturePane(
   } else if (hookSid !== "") {
     sessionId = hookSid;
   } else if (agent !== "") {
-    const flagSid = extractSessionIdFromArgs(agent, fullCommand);
+    const positional = opts.resumePolicy?.positionalResume?.(agent) ?? false;
+    const flagSid = extractSessionIdFromArgs(agent, fullCommand, positional);
     if (flagSid !== "") {
       sessionId = flagSid;
     } else {

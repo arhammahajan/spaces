@@ -16,7 +16,11 @@ import {
   harnessProfileCommand,
   harnessProfileFromArgv,
   harnessResumeCommand,
+  type HarnessResumePolicy,
+  type VendorSessionLookup,
 } from "./capture";
+
+export type { HarnessResumePolicy, VendorSessionLookup };
 
 /** Global multiplexer option guarding auto-restore against concurrent autosaves and re-runs. */
 export const SPACES_RESTORED_OPTION = "@spaces_restored";
@@ -35,33 +39,6 @@ const BOOTSTRAP_SHELLS = new Set([
   "login",
 ]);
 
-const RESUME_SPEC_BY_AGENT: Record<string, { flag?: string; subcommand?: string }> = {
-  antigravity: { flag: "--conversation" },
-  claude: { flag: "--resume" },
-  codex: { subcommand: "resume" },
-  "cursor-agent": { flag: "--resume" },
-  deepseek: { flag: "--session" },
-  kilo: { flag: "--session" },
-  kimi: { flag: "--session" },
-  "kimi-cli": { flag: "--session" },
-  muse: { subcommand: "resume" },
-  opencode: { flag: "--session" },
-};
-
-const UNIQUE_EXPLICIT_SESSION_AGENTS = new Set(["codex"]);
-
-/**
- * Tier 6 vendor conversation store lookup seam for resolving an unclaimed
- * session ID during restore.
- */
-export type VendorSessionLookup = (
-  agent: string,
-  cwd: string,
-  profile: string,
-  title: string,
-  exclude: ReadonlySet<string>,
-) => { sessionId: string; storeAvailable: boolean };
-
 export interface SessionResolution {
   sessionIds: Record<string, string>;
   skipResume: Record<string, boolean>;
@@ -73,12 +50,14 @@ export interface BuildPaneCommandOptions {
   skipResume?: boolean;
   duplicatePane?: boolean;
   verifiedResumeCmd?: string[];
+  resumePolicy?: HarnessResumePolicy;
 }
 
 export interface RestoreOptions {
   selfPath?: string;
   switch?: boolean;
   resolveSession?: VendorSessionLookup;
+  resumePolicy?: HarnessResumePolicy;
   isDir?: (path: string) => boolean;
 }
 
@@ -106,10 +85,14 @@ interface SessionPaneRef {
 }
 
 /**
- * Returns the executable binary name for direct agent launches
- * (e.g. `"cursor"` -> `"cursor-agent"`, `"claude-code"` -> `"claude"`).
+ * Returns the executable binary name for direct agent launches, consulting
+ * `policy?.binaryName` first and falling back to the detection registry spec.
  */
-export function agentBinaryName(agent: string): string {
+export function agentBinaryName(agent: string, policy?: HarnessResumePolicy): string {
+  const fromPolicy = policy?.binaryName?.(agent)?.trim();
+  if (fromPolicy) {
+    return fromPolicy;
+  }
   const spec = defaultDetectionRegistry().resolveRuntime(agent);
   if (spec) {
     return spec.binary || spec.id;
@@ -118,26 +101,19 @@ export function agentBinaryName(agent: string): string {
 }
 
 /**
- * Returns the native CLI resume arguments for `agent` and `sessionId`,
- * or `[]` if `sessionId` is blank or the agent does not support native resume.
+ * Returns the native CLI resume arguments for `agent` and `sessionId` via the
+ * injected `HarnessResumePolicy`, or `[]` when no plugin policy is registered.
  */
-export function agentResumeArgs(agent: string, sessionId: string): string[] {
+export function agentResumeArgs(
+  agent: string,
+  sessionId: string,
+  policy?: HarnessResumePolicy,
+): string[] {
   const sid = sessionId.trim();
-  if (sid === "") {
+  if (sid === "" || !policy?.resumeArgs) {
     return [];
   }
-  const canon = canonicalAgent(agent) || agent.trim().toLowerCase();
-  const resumeSpec = RESUME_SPEC_BY_AGENT[canon];
-  if (!resumeSpec) {
-    return [];
-  }
-  if (resumeSpec.subcommand) {
-    return [resumeSpec.subcommand, sid];
-  }
-  if (resumeSpec.flag) {
-    return [resumeSpec.flag, sid];
-  }
-  return [];
+  return policy.resumeArgs(agent, sid);
 }
 
 /**
@@ -148,6 +124,7 @@ export function agentResumeArgs(agent: string, sessionId: string): string[] {
 export function resolveAgentSessions(
   snap: ResurrectSpaceSnapshot,
   lookup?: VendorSessionLookup,
+  policy?: HarnessResumePolicy,
 ): SessionResolution {
   const resolution: SessionResolution = {
     sessionIds: {},
@@ -155,6 +132,7 @@ export function resolveAgentSessions(
     duplicatePanes: {},
   };
 
+  const effectiveLookup = lookup ?? policy?.resolveVendorSession;
   const byAgent = new Map<string, SessionPaneRef[]>();
   const agentOrder: string[] = [];
 
@@ -195,14 +173,15 @@ export function resolveAgentSessions(
       continue;
     }
 
-    const uniqueExplicit = UNIQUE_EXPLICIT_SESSION_AGENTS.has(spec.id);
+    const uniqueExplicit = policy?.uniqueExplicitSessions?.(spec.id) ?? false;
+    const positionalResume = policy?.positionalResume?.(agentId) ?? false;
     const claimed = new Set<string>();
     const pending: SessionPaneRef[] = [];
 
     for (const p of panes) {
       let sid = p.sessionId.trim();
       if (sid === "") {
-        sid = extractSessionIdFromArgs(agentId, p.fullCommand);
+        sid = extractSessionIdFromArgs(agentId, p.fullCommand, positionalResume);
       }
       if (sid !== "") {
         if (uniqueExplicit && claimed.has(sid)) {
@@ -214,12 +193,12 @@ export function resolveAgentSessions(
       pending.push(p);
     }
 
-    if (pending.length === 0 || !lookup) {
+    if (pending.length === 0 || !effectiveLookup) {
       continue;
     }
 
     for (const p of pending) {
-      const res = lookup(agentId, p.cwd, p.profile, p.title, claimed);
+      const res = effectiveLookup(agentId, p.cwd, p.profile, p.title, claimed);
       const resolvedSid = res.sessionId.trim();
       if (resolvedSid !== "") {
         resolution.sessionIds[p.key] = resolvedSid;
@@ -238,16 +217,18 @@ function appendResumeArgs(
   agentName: string,
   sessionId: string,
   skipResume: boolean,
+  policy?: HarnessResumePolicy,
 ): string[] {
   const out = cmd.slice();
   const sid = sessionId.trim();
   if (skipResume || sid === "") {
     return out;
   }
-  if (extractSessionIdFromArgs(agentName, out) !== "") {
+  const positional = policy?.positionalResume?.(agentName) ?? false;
+  if (extractSessionIdFromArgs(agentName, out, positional) !== "") {
     return out;
   }
-  const resumeArgs = agentResumeArgs(agentName, sid);
+  const resumeArgs = agentResumeArgs(agentName, sid, policy);
   if (resumeArgs.length === 0) {
     return out;
   }
@@ -297,12 +278,13 @@ export function buildPaneCommand(
   const fullCmd = pane.full_command ?? [];
   if (agent !== "") {
     const sid = (pane.session_id ?? "").trim();
-    const resumeArgs = !skipResume && sid !== "" ? agentResumeArgs(agent, sid) : [];
+    const resumeArgs =
+      !skipResume && sid !== "" ? agentResumeArgs(agent, sid, opts.resumePolicy) : [];
 
     // Case 1: Harness launcher (e.g. `spaces agy profile saucerf166`).
     const launch = harnessLaunchArgs(fullCmd);
     if (launch.ok) {
-      const cmdWithResume = appendResumeArgs(fullCmd, agent, sid, skipResume);
+      const cmdWithResume = appendResumeArgs(fullCmd, agent, sid, skipResume, opts.resumePolicy);
       const parsed = harnessLaunchArgs(cmdWithResume);
       const cmd = [self, "__shim"];
       if (profile !== "") {
@@ -321,12 +303,12 @@ export function buildPaneCommand(
 
     // Case 3: Direct agent invocation captured in full_command.
     if (fullCmd.length > 0 && canonicalAgent(fullCmd[0]!) === agent) {
-      const cmdWithResume = appendResumeArgs(fullCmd, agent, sid, skipResume);
+      const cmdWithResume = appendResumeArgs(fullCmd, agent, sid, skipResume, opts.resumePolicy);
       return [self, "__shim", agent, ...cmdWithResume];
     }
 
     // Case 4: Fallback to plugin binary name.
-    const bin = agentBinaryName(agent) || agent;
+    const bin = agentBinaryName(agent, opts.resumePolicy) || agent;
     return [self, "__shim", agent, bin, ...resumeArgs];
   }
 
@@ -391,6 +373,7 @@ function restoredPaneCommand(
   return buildPaneCommand(effectivePane, {
     selfPath: opts.selfPath,
     skipResume: Boolean(resolution.skipResume[key]),
+    resumePolicy: opts.resumePolicy,
   });
 }
 
@@ -476,7 +459,7 @@ export async function restoreSpace(
     return;
   }
 
-  const resolution = resolveAgentSessions(snap, opts.resolveSession);
+  const resolution = resolveAgentSessions(snap, opts.resolveSession, opts.resumePolicy);
   let activeWinTarget = "";
 
   for (let wi = 0; wi < snap.windows.length; wi += 1) {
