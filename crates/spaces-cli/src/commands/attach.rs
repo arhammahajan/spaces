@@ -19,7 +19,7 @@ use spaces_types::rpc_core::{
 use spaces_types::{
     Epoch, HandoffReason, LeaseOwner, LeaseOwnerKind, LeaseState, PtyId, Thread, ThreadId,
 };
-use tokio::io::{AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 
@@ -447,11 +447,12 @@ async fn send_pty_input(
 
 fn spawn_stdin_reader() -> mpsc::UnboundedReceiver<std::io::Result<Vec<u8>>> {
     let (tx, rx) = mpsc::unbounded_channel();
-    tokio::spawn(async move {
-        let mut stdin = tokio::io::stdin();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut stdin = std::io::stdin();
         let mut buf = [0u8; 4096];
         loop {
-            match stdin.read(&mut buf).await {
+            match stdin.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
                     if tx.send(Ok(buf[..n].to_vec())).is_err() {
@@ -793,14 +794,22 @@ mod tests {
             started_ms: TimestampMs(1),
         };
         let client = RpcClient::connect(&endpoint).await.expect("connect");
-        let err = run(
+        let (thread_id, pty_id) = resolve_target(&client, "thr_busy").await.expect("resolve");
+        let (_tx, stdin_rx) = mpsc::unbounded_channel();
+        let mut out = Vec::new();
+        let err = attach_with_io(
             client,
-            AttachArgs {
-                target: "thr_busy".to_owned(),
+            thread_id,
+            pty_id,
+            AttachOptions {
                 takeover: false,
                 read_only: false,
                 no_replay: false,
             },
+            -1,
+            false,
+            stdin_rx,
+            &mut out,
         )
         .await
         .expect_err("should fail without takeover/read-only");
