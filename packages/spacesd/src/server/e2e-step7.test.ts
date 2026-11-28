@@ -365,14 +365,18 @@ describe("Step 7 E2E: worktree, git/diff, shared assets, hook.emit, and status-b
       expect(detail.result?.detail?.session_id).toBe("sess_hook_e2e");
       expect(detail.result?.detail?.tool?.name).toBe("Bash");
 
-      // 6. Status bar RPC
+      // 6. Status bar RPC (semantic counts only; mux/TUI styling lives in clients)
       const sb = await client.request<BackendStatusBarResult>(RPC_METHODS.BACKEND_STATUS_BAR_GET, {
         skip_autosave: true,
       });
       expect(sb.error).toBeUndefined();
-      expect(sb.result?.counts.working).toBe(1);
-      expect(sb.result?.formatted_plain).toBe("◐1");
-      expect(sb.result?.formatted_tmux).toBe("#[fg=#F9E2AF]◐1#[default]");
+      expect(sb.result?.counts).toEqual({
+        needs: 0,
+        failed: 0,
+        working: 1,
+        done: 0,
+        idle: 0,
+      });
     } finally {
       client.close();
     }

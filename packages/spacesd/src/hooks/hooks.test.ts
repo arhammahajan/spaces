@@ -3,14 +3,7 @@ import type { EventEnvelope, Pane, Space } from "@spaces/types";
 import { EventBus, type EventStoreAdapter } from "../core/event-bus";
 import { SpacesStore } from "../store/db";
 import { HookIngestor, normalizeHookEvent } from "./ingest";
-import {
-  MOCHA_BLUE,
-  MOCHA_GREEN,
-  MOCHA_RED,
-  MOCHA_YELLOW,
-  bucketOf,
-  computeStatusBar,
-} from "./statusbar";
+import { bucketOf, computeStatusBar } from "./statusbar";
 
 function asEventStoreAdapter(store: SpacesStore): EventStoreAdapter {
   return {
@@ -354,23 +347,19 @@ describe("computeStatusBar", () => {
     expect(bucketOf("")).toBe("idle");
   });
 
-  test("returns empty strings when all panes are idle or no spaces", () => {
+  test("aggregates zero and idle-only counts", () => {
     const empty = computeStatusBar([]);
     expect(empty).toEqual({
       counts: { needs: 0, failed: 0, working: 0, done: 0, idle: 0 },
-      formatted_tmux: "",
-      formatted_plain: "",
     });
 
     const idleOnly = computeStatusBar([
       makeSpace("s1", [makePane("idle", "%1"), makePane("quiet", "%2"), makePane("new_output", "%3")]),
     ]);
     expect(idleOnly.counts).toEqual({ needs: 0, failed: 0, working: 0, done: 0, idle: 3 });
-    expect(idleOnly.formatted_tmux).toBe("");
-    expect(idleOnly.formatted_plain).toBe("");
   });
 
-  test("formats active buckets with exact Catppuccin Mocha colors and icons", () => {
+  test("aggregates active buckets across multiple spaces", () => {
     const result = computeStatusBar([
       makeSpace("s1", [
         makePane("needs_you", "%1"),
@@ -393,14 +382,5 @@ describe("computeStatusBar", () => {
       done: 3,
       idle: 1,
     });
-    expect(result.formatted_plain).toBe("●2 ✗1 ◐1 ✓3");
-    expect(result.formatted_tmux).toBe(
-      [
-        `#[fg=${MOCHA_BLUE}]●2#[default]`,
-        `#[fg=${MOCHA_RED}]✗1#[default]`,
-        `#[fg=${MOCHA_YELLOW}]◐1#[default]`,
-        `#[fg=${MOCHA_GREEN}]✓3#[default]`,
-      ].join(" "),
-    );
   });
 });

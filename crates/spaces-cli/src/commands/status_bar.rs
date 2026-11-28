@@ -1,13 +1,13 @@
 use anyhow::{Context, Result};
 use clap::Args;
 use spaces_types::rpc::rpc_methods;
-use spaces_types::{BackendStatusBarParams, BackendStatusBarResult};
+use spaces_types::{BackendStatusBarParams, BackendStatusBarResult, StatusBarCounts};
 
 use crate::rpc::RpcClient;
 
 #[derive(Debug, Clone, Default, Args)]
 pub struct StatusBarArgs {
-    /// Emit plain text badges without tmux color formatting
+    /// Emit plain text badges (default; mux-specific styling belongs in mux plugins / TUI)
     #[arg(long)]
     pub plain: bool,
 
@@ -34,12 +34,12 @@ pub async fn run(client: RpcClient, args: StatusBarArgs, json: bool) -> Result<(
     Ok(())
 }
 
-/// Formats a [`BackendStatusBarResult`] according to `--json` and `--plain`.
+/// Formats a [`BackendStatusBarResult`] as JSON or plain text.
 ///
-/// Returns `Ok(None)` when nothing should be printed (empty badge in tmux/plain mode).
+/// Returns `Ok(None)` when nothing should be printed (no active buckets in text mode).
 pub(crate) fn format_output(
     res: &BackendStatusBarResult,
-    plain: bool,
+    _plain: bool,
     json: bool,
 ) -> Result<Option<String>> {
     if json {
@@ -48,17 +48,33 @@ pub(crate) fn format_output(
         ));
     }
 
-    let formatted = if plain {
-        &res.formatted_plain
-    } else {
-        &res.formatted_tmux
-    };
-
+    let formatted = format_plain(&res.counts);
     if formatted.is_empty() {
         Ok(None)
     } else {
-        Ok(Some(formatted.clone()))
+        Ok(Some(formatted))
     }
+}
+
+fn format_plain(counts: &StatusBarCounts) -> String {
+    if counts.needs + counts.failed + counts.working + counts.done == 0 {
+        return String::new();
+    }
+
+    let mut parts = Vec::with_capacity(4);
+    if counts.needs > 0 {
+        parts.push(format!("●{}", counts.needs));
+    }
+    if counts.failed > 0 {
+        parts.push(format!("✗{}", counts.failed));
+    }
+    if counts.working > 0 {
+        parts.push(format!("◐{}", counts.working));
+    }
+    if counts.done > 0 {
+        parts.push(format!("✓{}", counts.done));
+    }
+    parts.join(" ")
 }
 
 #[cfg(test)]
@@ -76,8 +92,6 @@ mod tests {
     fn formats_json_even_when_all_zero() {
         let res = BackendStatusBarResult {
             counts: StatusBarCounts::default(),
-            formatted_tmux: String::new(),
-            formatted_plain: String::new(),
         };
 
         let out = format_output(&res, false, true)
@@ -91,7 +105,7 @@ mod tests {
     }
 
     #[test]
-    fn formats_plain_and_tmux_outputs() {
+    fn formats_plain_and_json_outputs() {
         let res = BackendStatusBarResult {
             counts: StatusBarCounts {
                 needs: 2,
@@ -100,19 +114,16 @@ mod tests {
                 done: 4,
                 idle: 5,
             },
-            formatted_tmux: "#[fg=#89B4FA]●2#[default] #[fg=#F38BA8]✗1#[default]".to_owned(),
-            formatted_plain: "●2 ✗1".to_owned(),
         };
 
         assert_eq!(
-            format_output(&res, false, false).expect("tmux"),
-            Some("#[fg=#89B4FA]●2#[default] #[fg=#F38BA8]✗1#[default]".to_owned())
+            format_output(&res, false, false).expect("default plain"),
+            Some("●2 ✗1 ◐3 ✓4".to_owned())
         );
         assert_eq!(
-            format_output(&res, true, false).expect("plain"),
-            Some("●2 ✗1".to_owned())
+            format_output(&res, true, false).expect("explicit plain"),
+            Some("●2 ✗1 ◐3 ✓4".to_owned())
         );
-        // --json takes precedence over --plain, matching internal/cli/statusbar.go.
         let json_out = format_output(&res, true, true)
             .expect("json")
             .expect("json present");
@@ -124,17 +135,15 @@ mod tests {
     }
 
     #[test]
-    fn omits_output_when_formatted_strings_are_empty() {
+    fn omits_output_when_only_idle() {
         let res = BackendStatusBarResult {
             counts: StatusBarCounts {
                 idle: 3,
                 ..Default::default()
             },
-            formatted_tmux: String::new(),
-            formatted_plain: String::new(),
         };
 
-        assert_eq!(format_output(&res, false, false).expect("tmux"), None);
+        assert_eq!(format_output(&res, false, false).expect("default"), None);
         assert_eq!(format_output(&res, true, false).expect("plain"), None);
     }
 
@@ -190,8 +199,6 @@ mod tests {
                         done: 0,
                         idle: 2,
                     },
-                    formatted_tmux: "#[fg=#89B4FA]●1#[default]".to_owned(),
-                    formatted_plain: "●1".to_owned(),
                 })
                 .unwrap(),
             );

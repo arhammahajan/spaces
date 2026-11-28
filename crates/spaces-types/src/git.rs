@@ -550,8 +550,6 @@ pub struct BackendStatusBarParams {
 #[ts(export)]
 pub struct BackendStatusBarResult {
     pub counts: StatusBarCounts,
-    pub formatted_tmux: String,
-    pub formatted_plain: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
