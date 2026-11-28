@@ -21,5 +21,4 @@ serde_json.workspace = true
 spaces-pty = { path = "../spaces-pty" }
 spaces-types = { path = "../spaces-types" }
 tokio.workspace = true
-tracing.workspace = true
 uuid.workspace = true
