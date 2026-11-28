@@ -38,6 +38,8 @@ import {
   type VendorSessionLookup,
 } from "../resurrect/restore";
 import type { SpacesStore } from "../store/db";
+import type { GitCollector } from "../git/collector";
+import type { WorktreeManager } from "../worktree/manager";
 
 export interface BackendServiceOptions {
   /** Path to the launcher binary (`tmux-spaces` / `spaces`) used by `__shim` and restore. */
@@ -54,6 +56,10 @@ export interface BackendServiceOptions {
   resumePolicy?: HarnessResumePolicy;
   /** Optional capture overrides (for deterministic tests). */
   captureOptions?: CaptureOptions;
+  /** Optional worktree manager for worktree backend verbs. */
+  worktrees?: WorktreeManager;
+  /** Optional git collector for attaching cached git info to spaces. */
+  gitCollector?: GitCollector;
   /** Injectable clock for deterministic tests. */
   now?: () => number;
 }
@@ -108,6 +114,8 @@ export class BackendService {
   private readonly vendorLookup?: VendorSessionLookup;
   private readonly resumePolicy?: HarnessResumePolicy;
   private readonly captureOptions?: CaptureOptions;
+  private readonly worktrees?: WorktreeManager;
+  private readonly gitCollector?: GitCollector;
   private readonly now: () => number;
   private lastAutosaveMs = 0;
 
@@ -126,6 +134,8 @@ export class BackendService {
     this.vendorLookup = options.vendorLookup;
     this.resumePolicy = options.resumePolicy;
     this.captureOptions = options.captureOptions;
+    this.worktrees = options.worktrees;
+    this.gitCollector = options.gitCollector;
     this.now = options.now ?? (() => Date.now());
   }
 
@@ -251,6 +261,47 @@ export class BackendService {
           }
         }
         return { kind: "previews", previews };
+      }
+
+      case "remove_worktree": {
+        if (!this.worktrees) {
+          throw new Error("worktree manager is not configured in BackendService");
+        }
+        await this.worktrees.remove(verb.path, {
+          force: verb.force,
+          delete_branch: verb.delete_branch,
+        });
+        return { kind: "ack" };
+      }
+
+      case "prune_worktrees": {
+        if (!this.worktrees) {
+          throw new Error("worktree manager is not configured in BackendService");
+        }
+        const res = await this.worktrees.prune({
+          remove_orphaned_merged: verb.remove_orphaned_merged,
+        });
+        return {
+          kind: "pruned",
+          summary: `pruned ${res.pruned_git} git, ${res.pruned_records} records, ${res.removed_paths.length} dirs`,
+        };
+      }
+
+      case "open_shared_file": {
+        const target = verb.path.trim();
+        if (!target) {
+          throw new Error("open_shared_file requires a non-empty path");
+        }
+        const session = await this.driver.currentSession();
+        if (!session) {
+          throw new Error("could not determine current space");
+        }
+        const editor = process.env.VISUAL?.trim() || process.env.EDITOR?.trim() || "vi";
+        await this.driver.newWindow(session, path.dirname(target), path.basename(target), [
+          editor,
+          target,
+        ]);
+        return { kind: "ack" };
       }
 
       default:

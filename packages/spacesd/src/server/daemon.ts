@@ -18,7 +18,14 @@ import {
   type BackendExecParams,
   type BackendExecResult,
   type BackendHarnessesListResult,
+  type BackendHookDetailParams,
+  type BackendHookDetailResult,
+  type BackendSharedListParams,
+  type BackendSharedListResult,
   type BackendSpacesListResult,
+  type BackendStatusBarParams,
+  type BackendStatusBarResult,
+  type BackendWorktreesListResult,
   type BootId,
   type DaemonPingResult,
   type DaemonStatusResult,
@@ -29,6 +36,20 @@ import {
   type EventTailParams,
   type EventTailResult,
   type EventUnsubscribeParams,
+  type ForgePrListParams,
+  type ForgePrListResult,
+  type ForgeStatusParams,
+  type ForgeStatusResult,
+  type GitBranchesParams,
+  type GitBranchesResult,
+  type GitDiffParams,
+  type GitDiffResult,
+  type GitStatusParams,
+  type GitStatusResult,
+  type HookEmitParams,
+  type HookEmitResult,
+  type HookRecordOutcomeParams,
+  type HookRemoveOutcomeParams,
   type Lease,
   type LeaseClaimParams,
   type LeaseHandoffParams,
@@ -76,6 +97,17 @@ import {
   type TurnCancelParams,
   type TurnSendParams,
   type TurnSendResult,
+  type WorktreeContextParams,
+  type WorktreeContextResult,
+  type WorktreeCreateParams,
+  type WorktreeInspectSafetyParams,
+  type WorktreeInspectSafetyResult,
+  type WorktreeListParams,
+  type WorktreePruneParams,
+  type WorktreeRemoveParams,
+  type WorktreeResolveParams,
+  type WorktreeResolveResult,
+  type WorktreeSuggestParams,
 } from "@spaces/types";
 import { BackendService } from "../backend/service";
 import { ThreadActorRegistry } from "../core/actor";
@@ -88,10 +120,20 @@ import {
 import { LeaseError, LeaseMachine, type LeaseHooks, type LeaseStoreAdapter } from "../core/lease-fsm";
 import { TmuxDriver } from "../drivers/tmux";
 import type { MultiplexerDriver } from "../drivers/types";
+import { createDefaultForgeRegistry, type ForgeRegistry } from "../forge/registry";
+import { aggregateCheckRuns } from "../forge/types";
+import { GitCollector } from "../git/collector";
+import { parseUnifiedDiff } from "../git/diff-parser";
+import { CliGitDriver, type LocalGitDriver } from "../git/driver";
+import { HookIngestor } from "../hooks/ingest";
+import { computeStatusBar } from "../hooks/statusbar";
+import { IssueTrackerRegistry } from "../issues/registry";
 import { ClaudePlugin } from "../plugins/claude";
 import { HarnessPluginRegistry } from "../plugins/registry";
 import type { DeltaCursor, HeadlessSession } from "../plugins/types";
+import { loadShared } from "../shared/index";
 import { SpacesStore, type VerifiedResumeHintRecord } from "../store/db";
+import { WorktreeManager } from "../worktree/manager";
 
 export const SPACESD_VERSION = "0.1.0" as const;
 export const MAX_RPC_FRAME_BYTES = 1024 * 1024; // 1 MiB
@@ -134,6 +176,14 @@ export interface SpacesDaemonOptions {
   driver?: MultiplexerDriver;
   /** Optional custom HarnessPluginRegistry (defaults to registry with `ClaudePlugin`). */
   plugins?: HarnessPluginRegistry;
+  /** Optional swappable local git driver (defaults to `CliGitDriver`). */
+  gitDriver?: LocalGitDriver;
+  /** Optional custom ForgeRegistry (defaults to GitHub + GitLab + Forgejo). */
+  forge?: ForgeRegistry;
+  /** Optional custom IssueTrackerRegistry. */
+  issues?: IssueTrackerRegistry;
+  /** Optional custom worktree root directory (useful for tests). */
+  worktreeRoot?: string;
   /** Optional custom BackendService instance. */
   backend?: BackendService;
   /** Injectable clock for deterministic tests. */
@@ -243,9 +293,15 @@ export class SpacesDaemon {
   private readonly now: () => number;
   private readonly store: SpacesStore;
   private readonly plugins: HarnessPluginRegistry;
+  private readonly gitDriver: LocalGitDriver;
+  private readonly gitCollector: GitCollector;
+  private readonly worktrees: WorktreeManager;
+  private readonly forge: ForgeRegistry;
+  private readonly issues: IssueTrackerRegistry;
   private readonly backend: BackendService;
   private readonly actors: ThreadActorRegistry;
   private readonly eventBus: EventBus;
+  private readonly hooks: HookIngestor;
   private readonly leaseMachine: LeaseMachine;
   private readonly connections = new Map<Socket<ConnectionState>, ConnectionState>();
   private readonly activePtys = new Map<PtyId, ActivePtyEntry>();
@@ -287,11 +343,58 @@ export class SpacesDaemon {
       this.plugins = new HarnessPluginRegistry();
       this.plugins.register(new ClaudePlugin({ spacesDir: this.spacesDir }));
     }
+    this.gitDriver = options.gitDriver ?? new CliGitDriver();
+    this.forge = options.forge ?? createDefaultForgeRegistry();
+    this.issues = options.issues ?? new IssueTrackerRegistry();
+    this.gitCollector = new GitCollector({
+      driver: this.gitDriver,
+      now: this.now,
+      forgeLookup: async (cwd, branch) => {
+        const remoteUrl = await this.gitDriver.getRemoteUrl(cwd);
+        if (!remoteUrl) {
+          return null;
+        }
+        const repo = await this.forge.resolveRepo(cwd, remoteUrl);
+        if (!repo) {
+          return null;
+        }
+        const provider = this.forge.get(repo.kind);
+        if (!provider) {
+          return null;
+        }
+        const cr = await provider.getChangeRequestForBranch({
+          cwd,
+          repo,
+          branch,
+        });
+        if (!cr) {
+          return null;
+        }
+        return {
+          pr: {
+            number: cr.number,
+            title: cr.title,
+            state: cr.state,
+            is_draft: cr.is_draft,
+            url: cr.url,
+          },
+          checks: aggregateCheckRuns(cr.checks) ?? null,
+        };
+      },
+    });
+    this.worktrees = new WorktreeManager({
+      store: this.store,
+      driver: this.gitDriver,
+      worktreeRoot: options.worktreeRoot,
+      now: this.now,
+    });
     this.backend =
       options.backend ??
       new BackendService(options.driver ?? new TmuxDriver(), this.store, {
         spacesDir: this.spacesDir,
         resumePolicy: this.plugins.asResumePolicy(),
+        worktrees: this.worktrees,
+        gitCollector: this.gitCollector,
         now: this.now,
       });
     this.actors = new ThreadActorRegistry();
@@ -318,6 +421,7 @@ export class SpacesDaemon {
       maxEvents: options.maxEvents,
       now: this.now,
     });
+    this.hooks = new HookIngestor(this.store, this.eventBus, { now: this.now });
 
     const leaseAdapter: LeaseStoreAdapter = {
       getLease: (threadId) => this.store.getLease(threadId),
@@ -368,6 +472,30 @@ export class SpacesDaemon {
 
   getPlugins(): HarnessPluginRegistry {
     return this.plugins;
+  }
+
+  getGitDriver(): LocalGitDriver {
+    return this.gitDriver;
+  }
+
+  getGitCollector(): GitCollector {
+    return this.gitCollector;
+  }
+
+  getWorktrees(): WorktreeManager {
+    return this.worktrees;
+  }
+
+  getForgeRegistry(): ForgeRegistry {
+    return this.forge;
+  }
+
+  getIssueTrackerRegistry(): IssueTrackerRegistry {
+    return this.issues;
+  }
+
+  getHookIngestor(): HookIngestor {
+    return this.hooks;
   }
 
   getBackend(): BackendService {
@@ -1189,6 +1317,245 @@ export class SpacesDaemon {
         const harnesses = this.backend.loadHarnesses();
         const res: BackendHarnessesListResult = { harnesses };
         return res;
+      }
+
+      case RPC_METHODS.BACKEND_SHARED_LIST: {
+        const p = (params ?? {}) as BackendSharedListParams;
+        const mcpTargets = this.plugins
+          .list()
+          .flatMap((plugin) => plugin.spec.mcpTargets);
+        const snapshot = loadShared({ dir: p.dir, mcpTargets });
+        const res: BackendSharedListResult = { snapshot };
+        return res;
+      }
+
+      case RPC_METHODS.BACKEND_WORKTREES_LIST: {
+        const p = (params ?? {}) as WorktreeListParams;
+        const { worktrees } = await this.worktrees.list(p.dir ?? process.cwd());
+        const res: BackendWorktreesListResult = { worktrees };
+        return res;
+      }
+
+      case RPC_METHODS.BACKEND_STATUS_BAR_GET: {
+        const p = (params ?? {}) as BackendStatusBarParams;
+        const spaces = await this.backend.loadSpaces();
+        if (!p.skip_autosave) {
+          void this.backend.autosaveSpaces(false).catch(() => {});
+        }
+        const res: BackendStatusBarResult = computeStatusBar(spaces);
+        return res;
+      }
+
+      case RPC_METHODS.BACKEND_HOOK_DETAIL_GET: {
+        const p = requireObject<BackendHookDetailParams>(
+          params,
+          "backend.hook_detail.get params required",
+        );
+        const detail = this.hooks.getDetail(p.session, p.pane_num);
+        const res: BackendHookDetailResult = detail ? { detail } : {};
+        return res;
+      }
+
+      case RPC_METHODS.WORKTREE_LIST: {
+        const p = (params ?? {}) as WorktreeListParams;
+        const { worktrees } = await this.worktrees.list(p.dir ?? process.cwd());
+        const res: BackendWorktreesListResult = { worktrees };
+        return res;
+      }
+
+      case RPC_METHODS.WORKTREE_CONTEXT: {
+        const p = requireObject<WorktreeContextParams>(params, "worktree.context params required");
+        const context = await this.worktrees.getContext(p.dir);
+        const res: WorktreeContextResult = context ? { context } : {};
+        return res;
+      }
+
+      case RPC_METHODS.WORKTREE_SUGGEST_NAME: {
+        const p = requireObject<WorktreeSuggestParams>(
+          params,
+          "worktree.suggest_name params required",
+        );
+        return this.worktrees.suggestForDir(p.dir, {
+          explicit_name: p.naming.explicit_name,
+          target_name: p.naming.target_name,
+          target_kind: p.naming.target_kind,
+          harness_app: p.naming.harness_app,
+          harness_title: p.naming.harness_title,
+          harness_prompt: p.naming.harness_prompt,
+          seed: p.naming.seed,
+        });
+      }
+
+      case RPC_METHODS.WORKTREE_CREATE: {
+        const p = requireObject<WorktreeCreateParams>(params, "worktree.create params required");
+        const req = p.request;
+        return this.worktrees.create({
+          repo_dir: req.folder,
+          branch: req.branch_name || undefined,
+          base_ref: req.base_branch || undefined,
+          naming: {
+            explicit_name: req.branch_name || undefined,
+            target_name: req.tab_name || req.space_name || undefined,
+            target_kind: req.tab_name ? "tab" : "space",
+            harness_app: req.harness_app || undefined,
+            harness_title: req.harness_title || undefined,
+            harness_prompt: req.harness_prompt || undefined,
+            seed: req.auto_seed || 0,
+          },
+          origin_space: req.session || req.space_name || undefined,
+        });
+      }
+
+      case RPC_METHODS.WORKTREE_INSPECT_SAFETY: {
+        const p = requireObject<WorktreeInspectSafetyParams>(
+          params,
+          "worktree.inspect_safety params required",
+        );
+        const safety = await this.worktrees.inspectSafety(p.path);
+        const res: WorktreeInspectSafetyResult = { safety };
+        return res;
+      }
+
+      case RPC_METHODS.WORKTREE_REMOVE: {
+        const p = requireObject<WorktreeRemoveParams>(params, "worktree.remove params required");
+        await this.worktrees.remove(p.path, {
+          force: p.force,
+          delete_branch: p.delete_branch,
+          force_branch: p.force_branch,
+        });
+        return { ok: true };
+      }
+
+      case RPC_METHODS.WORKTREE_PRUNE: {
+        const p = (params ?? {}) as WorktreePruneParams;
+        return this.worktrees.prune({
+          repo_dirs: p.repo_dirs,
+          remove_orphaned_merged: p.remove_orphaned_merged,
+          active_paths: p.active_paths,
+        });
+      }
+
+      case RPC_METHODS.WORKTREE_RESOLVE: {
+        const p = requireObject<WorktreeResolveParams>(params, "worktree.resolve params required");
+        const resolved = await this.worktrees.resolveWorktreePath(p.dir, p.name_or_path);
+        const res: WorktreeResolveResult = resolved ? { path: resolved } : {};
+        return res;
+      }
+
+      case RPC_METHODS.GIT_STATUS: {
+        const p = requireObject<GitStatusParams>(params, "git.status params required");
+        const map = await this.gitCollector.fetchGit([p.cwd], p.force);
+        const git = map.get(p.cwd) ?? this.gitCollector.getCached(p.cwd) ?? undefined;
+        const res: GitStatusResult = git ? { git } : {};
+        return res;
+      }
+
+      case RPC_METHODS.GIT_DIFF: {
+        const p = requireObject<GitDiffParams>(params, "git.diff params required");
+        const rawRes = await this.gitDriver.getDiffRaw(p.cwd, {
+          scope: p.scope,
+          baseRef: p.base_ref,
+          headRef: p.head_ref,
+          paths: p.paths,
+          contextLines: p.context_lines,
+        });
+        const diff = parseUnifiedDiff(rawRes.raw, {
+          scope: p.scope,
+          baseRef: rawRes.baseRef ?? p.base_ref,
+          headRef: rawRes.headRef ?? p.head_ref,
+          maxBytes: p.max_bytes,
+        });
+        const res: GitDiffResult = { diff };
+        return res;
+      }
+
+      case RPC_METHODS.GIT_BRANCHES: {
+        const p = requireObject<GitBranchesParams>(params, "git.branches params required");
+        const branches = await this.gitDriver.listBranches(p.cwd);
+        const res: GitBranchesResult = { branches };
+        return res;
+      }
+
+      case RPC_METHODS.FORGE_STATUS: {
+        const p = requireObject<ForgeStatusParams>(params, "forge.status params required");
+        const remoteUrl = await this.gitDriver.getRemoteUrl(p.cwd);
+        if (!remoteUrl) {
+          const res: ForgeStatusResult = {};
+          return res;
+        }
+        const repo = await this.forge.resolveRepo(p.cwd, remoteUrl);
+        if (!repo) {
+          const res: ForgeStatusResult = {};
+          return res;
+        }
+        const provider = this.forge.get(repo.kind);
+        let branch = p.branch;
+        if (!branch) {
+          const status = await this.gitDriver.getStatus(p.cwd);
+          branch = status?.branch;
+        }
+        const changeRequest =
+          provider && branch
+            ? await provider.getChangeRequestForBranch({
+                cwd: p.cwd,
+                repo,
+                branch,
+              })
+            : null;
+        const res: ForgeStatusResult = {
+          repo,
+          ...(changeRequest ? { change_request: changeRequest } : {}),
+        };
+        return res;
+      }
+
+      case RPC_METHODS.FORGE_PR_LIST: {
+        const p = requireObject<ForgePrListParams>(params, "forge.pr_list params required");
+        const remoteUrl = await this.gitDriver.getRemoteUrl(p.cwd);
+        if (!remoteUrl) {
+          const res: ForgePrListResult = { items: [] };
+          return res;
+        }
+        const repo = await this.forge.resolveRepo(p.cwd, remoteUrl);
+        if (!repo) {
+          const res: ForgePrListResult = { items: [] };
+          return res;
+        }
+        const provider = this.forge.get(repo.kind);
+        const stateFilter =
+          p.state === "open" || p.state === "closed" || p.state === "all" ? p.state : "open";
+        const items = provider
+          ? await provider.listChangeRequests({
+              cwd: p.cwd,
+              repo,
+              state: stateFilter,
+              limit: p.limit,
+            })
+          : [];
+        const res: ForgePrListResult = { repo, items };
+        return res;
+      }
+
+      case RPC_METHODS.HOOK_EMIT: {
+        const p = requireObject<HookEmitParams>(params, "hook.emit params required");
+        const res: HookEmitResult = this.hooks.emit(p);
+        return res;
+      }
+
+      case RPC_METHODS.HOOK_RECORD_OUTCOME: {
+        const p = requireObject<HookRecordOutcomeParams>(
+          params,
+          "hook.record_outcome params required",
+        );
+        return this.hooks.recordOutcome(p);
+      }
+
+      case RPC_METHODS.HOOK_REMOVE_OUTCOME: {
+        const p = requireObject<HookRemoveOutcomeParams>(
+          params,
+          "hook.remove_outcome params required",
+        );
+        return this.hooks.removeOutcome(p);
       }
 
       case "resurrect.autosave": {

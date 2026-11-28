@@ -80,6 +80,31 @@ export * from "./plugins/profiles";
 export * from "./plugins/registry";
 export * from "./plugins/claude";
 export * from "./executors/claude";
+export * from "./git/driver";
+export * from "./git/diff-parser";
+export * from "./git/collector";
+export * from "./worktree/naming";
+export * from "./worktree/manager";
+export * from "./forge/types";
+export * from "./forge/http";
+export * from "./forge/registry";
+export * from "./forge/github";
+export * from "./forge/gitlab";
+export * from "./forge/forgejo";
+export * from "./issues/types";
+export * from "./issues/registry";
+export * from "./shared/index";
+export {
+  HookIngestor,
+  canonicalAgent as canonicalHookAgent,
+  canonicalEvent,
+  displayApp,
+  eventState,
+  normalizeHookEvent,
+  type HookIngestorOptions,
+  type NormalizedHookEvent,
+} from "./hooks/ingest";
+export * from "./hooks/statusbar";
 
 import { SpacesDaemon } from "./server/daemon";
 
