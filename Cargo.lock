@@ -386,7 +386,6 @@ dependencies = [
  "spaces-pty",
  "spaces-types",
  "tokio",
- "tracing",
  "uuid",
 ]
 
