@@ -331,12 +331,18 @@ describe("ClaudePlugin launch & headless/stopAndFlush", () => {
     ).toThrow(/profile disabled/);
   });
 
-  test("startHeadless delegates to headlessFactory and throws descriptively when unconfigured", () => {
+  test("startHeadless defaults to ClaudeHeadlessExecutor and delegates when headlessFactory is provided", () => {
     const home = makeTempDir("claude-headless-");
     const barePlugin = new ClaudePlugin({ homeDir: home });
-    expect(() =>
-      barePlugin.startHeadless({ threadId: "t1", cwd: "/repo" }),
-    ).toThrow(/headlessFactory/);
+    const defaultSession = barePlugin.startHeadless({
+      threadId: "t1",
+      cwd: "/repo",
+      sessionId: "sess-default",
+    });
+    expect(defaultSession.agent).toBe("claude");
+    expect(defaultSession.threadId).toBe("t1");
+    expect(defaultSession.getSessionId()).toBe("sess-default");
+    expect(defaultSession.isRunning()).toBe(false);
 
     const captured: { launch?: InteractiveLaunchSpec } = {};
     const fakeSession: HeadlessSession = {

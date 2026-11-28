@@ -705,6 +705,13 @@ describe("SpacesDaemon UDS NDJSON-RPC 2.0", () => {
         expect(oscHintEvt.event.payload.pty_id).toBe(ptyId);
       }
 
+      const threadSessionEvt = (await cli2.nextNotification()).params as EventPushNotification;
+      expect(threadSessionEvt.event.thread_id).toBe(threadId);
+      expect(threadSessionEvt.event.payload.type).toBe("thread_updated");
+      if (threadSessionEvt.event.payload.type === "thread_updated") {
+        expect(threadSessionEvt.event.payload.thread.vendor_session_id).toBe("sess-broker-1");
+      }
+
       // pty.exit notification fans out to attached clients, updates thread & active_ptys, and emits events
       const exitTs = Date.now();
       const exitPayload: PtyExitNotification = {

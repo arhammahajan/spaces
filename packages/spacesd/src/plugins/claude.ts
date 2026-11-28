@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import * as path from "node:path";
 import { SPACES_CONFIG_DIR_NAME, type TurnUsage } from "@spaces/types";
+import { ClaudeHeadlessExecutor } from "../executors/claude";
 import type { VendorSessionLookup } from "../resurrect/capture";
 import {
   defaultSpacesDir,
@@ -674,12 +675,14 @@ export class ClaudePlugin implements HarnessPlugin {
 
   startHeadless(req: HeadlessStartRequest): HeadlessSession {
     const launch = this.buildInteractiveLaunch(req);
-    if (!this.headlessFactory) {
-      throw new Error(
-        "ClaudePlugin.startHeadless: no headlessFactory configured for Claude headless execution",
-      );
+    if (this.headlessFactory) {
+      return this.headlessFactory(req, launch);
     }
-    return this.headlessFactory(req, launch);
+    return new ClaudeHeadlessExecutor({
+      threadId: req.threadId,
+      launch,
+      sessionId: req.sessionId,
+    });
   }
 
   readDelta(

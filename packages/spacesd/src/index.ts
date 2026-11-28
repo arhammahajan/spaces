@@ -75,6 +75,11 @@ export * from "./resurrect/capture";
 export * from "./resurrect/restore";
 export * from "./backend/service";
 export * from "./client/rpc-client";
+export * from "./plugins/types";
+export * from "./plugins/profiles";
+export * from "./plugins/registry";
+export * from "./plugins/claude";
+export * from "./executors/claude";
 
 import { SpacesDaemon } from "./server/daemon";
 

@@ -88,6 +88,9 @@ import {
 import { LeaseError, LeaseMachine, type LeaseHooks, type LeaseStoreAdapter } from "../core/lease-fsm";
 import { TmuxDriver } from "../drivers/tmux";
 import type { MultiplexerDriver } from "../drivers/types";
+import { ClaudePlugin } from "../plugins/claude";
+import { HarnessPluginRegistry } from "../plugins/registry";
+import type { DeltaCursor, HeadlessSession } from "../plugins/types";
 import { SpacesStore, type VerifiedResumeHintRecord } from "../store/db";
 
 export const SPACESD_VERSION = "0.1.0" as const;
@@ -129,6 +132,8 @@ export interface SpacesDaemonOptions {
   leaseHooks?: LeaseHooks;
   /** Optional swappable multiplexer driver (defaults to `TmuxDriver`). */
   driver?: MultiplexerDriver;
+  /** Optional custom HarnessPluginRegistry (defaults to registry with `ClaudePlugin`). */
+  plugins?: HarnessPluginRegistry;
   /** Optional custom BackendService instance. */
   backend?: BackendService;
   /** Injectable clock for deterministic tests. */
@@ -237,12 +242,15 @@ export class SpacesDaemon {
 
   private readonly now: () => number;
   private readonly store: SpacesStore;
+  private readonly plugins: HarnessPluginRegistry;
   private readonly backend: BackendService;
   private readonly actors: ThreadActorRegistry;
   private readonly eventBus: EventBus;
   private readonly leaseMachine: LeaseMachine;
   private readonly connections = new Map<Socket<ConnectionState>, ConnectionState>();
   private readonly activePtys = new Map<PtyId, ActivePtyEntry>();
+  private readonly headlessSessions = new Map<ThreadId, HeadlessSession>();
+  private readonly deltaCursors = new Map<ThreadId, DeltaCursor>();
   private readonly pendingHostCalls = new Map<string, PendingHostCall>();
   private readonly hostRpcTimeoutMs: number;
   private ptyHostSocket: Socket<ConnectionState> | null = null;
@@ -273,10 +281,17 @@ export class SpacesDaemon {
     }
 
     this.store = new SpacesStore(this.dbPath, { now: this.now });
+    if (options.plugins) {
+      this.plugins = options.plugins;
+    } else {
+      this.plugins = new HarnessPluginRegistry();
+      this.plugins.register(new ClaudePlugin({ spacesDir: this.spacesDir }));
+    }
     this.backend =
       options.backend ??
       new BackendService(options.driver ?? new TmuxDriver(), this.store, {
         spacesDir: this.spacesDir,
+        resumePolicy: this.plugins.asResumePolicy(),
         now: this.now,
       });
     this.actors = new ThreadActorRegistry();
@@ -324,14 +339,35 @@ export class SpacesDaemon {
       },
     };
 
+    const combinedLeaseHooks: LeaseHooks = {
+      onDrain: async (lease, reason) => {
+        await options.leaseHooks?.onDrain?.(lease, reason);
+      },
+      onCancel: async (lease, reason) => {
+        const hs = this.headlessSessions.get(lease.thread_id);
+        if (hs && hs.isRunning()) {
+          await hs.cancel(reason).catch(() => {});
+        }
+        await options.leaseHooks?.onCancel?.(lease, reason);
+      },
+      onStopAndFlush: async (lease, reason) => {
+        await this.handleStopAndFlush(lease.thread_id);
+        await options.leaseHooks?.onStopAndFlush?.(lease, reason);
+      },
+    };
+
     this.leaseMachine = new LeaseMachine(leaseAdapter, {
-      hooks: options.leaseHooks,
+      hooks: combinedLeaseHooks,
       now: this.now,
     });
   }
 
   getStore(): SpacesStore {
     return this.store;
+  }
+
+  getPlugins(): HarnessPluginRegistry {
+    return this.plugins;
   }
 
   getBackend(): BackendService {
@@ -414,6 +450,25 @@ export class SpacesDaemon {
       },
     });
 
+    if (record.thread_id) {
+      const existingThread = this.store.getThread(record.thread_id);
+      if (existingThread) {
+        const updatedThread = this.store.updateThread(record.thread_id, {
+          ...(record.session_id ? { vendor_session_id: record.session_id } : {}),
+          ...(record.profile ? { profile: record.profile } : {}),
+          updated_at_ms: nowMs,
+        });
+        if (updatedThread) {
+          this.eventBus.publish({
+            threadId: updatedThread.id,
+            epoch: updatedThread.epoch,
+            tsMs: nowMs,
+            payload: { type: "thread_updated", thread: updatedThread },
+          });
+        }
+      }
+    }
+
     return { ok: true, record };
   }
 
@@ -481,6 +536,11 @@ export class SpacesDaemon {
     this.ptyHostSocket = null;
     this.rejectPendingHostCalls("spacesd stopping");
     this.activePtys.clear();
+
+    const activeHeadless = Array.from(this.headlessSessions.values());
+    this.headlessSessions.clear();
+    this.deltaCursors.clear();
+    await Promise.allSettled(activeHeadless.map((session) => session.stopAndFlush()));
 
     for (const [socket, state] of this.connections.entries()) {
       for (const subId of state.subscriptions) {
@@ -873,6 +933,14 @@ export class SpacesDaemon {
             tsMs: nowMs,
             payload: { type: "turn_updated", turn },
           });
+
+          if (thread.driver === "claude_sdk") {
+            const plugin = this.plugins.get(thread.agent);
+            if (plugin) {
+              this.dispatchHeadlessTurn(thread, turn, plugin);
+            }
+          }
+
           const res: TurnSendResult = { turn };
           return res;
         });
@@ -880,13 +948,17 @@ export class SpacesDaemon {
 
       case RPC_METHODS.TURN_CANCEL: {
         const p = requireObject<TurnCancelParams>(params, "turn.cancel params required");
-        return this.actors.enqueue(p.thread_id, () => {
+        return this.actors.enqueue(p.thread_id, async () => {
           const turn = this.store.getTurn(p.turn_id);
           if (!turn || turn.thread_id !== p.thread_id) {
             throw new RpcFailure(RPC_NOT_FOUND, `Turn not found: ${p.turn_id}`);
           }
           if (p.epoch !== undefined) {
             this.leaseMachine.assertFenced(p.thread_id, p.epoch);
+          }
+          const hs = this.headlessSessions.get(p.thread_id);
+          if (hs && hs.isRunning()) {
+            await hs.cancel("turn.cancel").catch(() => {});
           }
           const nowMs = this.now();
           const updated = this.store.updateTurn(p.turn_id, {
@@ -1390,6 +1462,168 @@ export class SpacesDaemon {
 
       default:
         throw new RpcFailure(RPC_METHOD_NOT_FOUND, `Method not found: ${method}`);
+    }
+  }
+
+  private dispatchHeadlessTurn(
+    thread: Thread,
+    turn: Turn,
+    plugin: NonNullable<ReturnType<HarnessPluginRegistry["get"]>>,
+  ): void {
+    let session = this.headlessSessions.get(thread.id);
+    if (!session || !session.isRunning()) {
+      session = plugin.startHeadless({
+        threadId: thread.id,
+        cwd: thread.cwd,
+        profile: thread.profile,
+        sessionId: thread.vendor_session_id,
+        model: turn.model ?? thread.model,
+        spacesDir: this.spacesDir,
+      });
+      this.headlessSessions.set(thread.id, session);
+    }
+
+    const activeSession = session;
+    void activeSession
+      .sendTurn(turn.prompt ?? "")
+      .then((result) => {
+        if (this.stopped) {
+          return;
+        }
+        const endedAt = this.now();
+        const updatedTurn = this.store.updateTurn(turn.id, {
+          state: "completed",
+          ...(result.replyPreview !== undefined ? { reply_preview: result.replyPreview } : {}),
+          ...(result.model !== undefined ? { model: result.model } : {}),
+          ...(result.usage !== undefined ? { usage: result.usage } : {}),
+          ended_at_ms: endedAt,
+        });
+        const resolvedSessionId = result.sessionId ?? activeSession.getSessionId();
+        const updatedThread = this.store.updateThread(thread.id, {
+          active_turn_id: null,
+          state: "idle",
+          ...(resolvedSessionId ? { vendor_session_id: resolvedSessionId } : {}),
+          ...(result.model ? { model: result.model } : {}),
+          updated_at_ms: endedAt,
+        });
+        if (updatedTurn) {
+          this.eventBus.publish({
+            threadId: thread.id,
+            epoch: updatedTurn.epoch,
+            tsMs: endedAt,
+            payload: { type: "turn_updated", turn: updatedTurn },
+          });
+        }
+        if (updatedThread) {
+          this.eventBus.publish({
+            threadId: thread.id,
+            epoch: updatedThread.epoch,
+            tsMs: endedAt,
+            payload: { type: "thread_updated", thread: updatedThread },
+          });
+        }
+      })
+      .catch((err: unknown) => {
+        if (this.stopped) {
+          return;
+        }
+        const endedAt = this.now();
+        const message = err instanceof Error ? err.message : String(err);
+        const updatedTurn = this.store.updateTurn(turn.id, {
+          state: "failed",
+          error: { code: "HEADLESS_ERROR", message, retryable: false },
+          ended_at_ms: endedAt,
+        });
+        const updatedThread = this.store.updateThread(thread.id, {
+          active_turn_id: null,
+          state: "idle",
+          updated_at_ms: endedAt,
+        });
+        if (updatedTurn) {
+          this.eventBus.publish({
+            threadId: thread.id,
+            epoch: updatedTurn.epoch,
+            tsMs: endedAt,
+            payload: { type: "turn_updated", turn: updatedTurn },
+          });
+        }
+        if (updatedThread) {
+          this.eventBus.publish({
+            threadId: thread.id,
+            epoch: updatedThread.epoch,
+            tsMs: endedAt,
+            payload: { type: "thread_updated", thread: updatedThread },
+          });
+        }
+      });
+  }
+
+  private async handleStopAndFlush(threadId: ThreadId): Promise<void> {
+    const thread = this.store.getThread(threadId);
+    const headlessSession = this.headlessSessions.get(threadId) ?? null;
+    if (headlessSession) {
+      this.headlessSessions.delete(threadId);
+    }
+
+    if (!thread) {
+      if (headlessSession) {
+        await headlessSession.stopAndFlush().catch(() => {});
+      }
+      return;
+    }
+
+    const stopInteractive =
+      thread.pty_id && this.activePtys.has(thread.pty_id) && this.ptyHostSocket
+        ? async () => {
+            await this.callPtyHost(RPC_METHODS.PTY_KILL, {
+              pty_id: thread.pty_id!,
+            } satisfies PtyKillParams).catch(() => {});
+          }
+        : undefined;
+
+    const plugin = this.plugins.get(thread.agent);
+    if (!plugin) {
+      if (headlessSession) {
+        await headlessSession.stopAndFlush().catch(() => {});
+      }
+      if (stopInteractive) {
+        await stopInteractive();
+      }
+      return;
+    }
+
+    const delta = await plugin.stopAndFlush({
+      sessionId: thread.vendor_session_id ?? headlessSession?.getSessionId(),
+      cwd: thread.cwd,
+      profile: thread.profile,
+      cursor: this.deltaCursors.get(threadId),
+      headlessSession,
+      stopInteractive,
+    });
+
+    const nowMs = this.now();
+    const resolvedSessionId = thread.vendor_session_id ?? headlessSession?.getSessionId();
+    if (delta) {
+      this.deltaCursors.set(threadId, delta.nextCursor);
+    }
+
+    const patch: Parameters<SpacesStore["updateThread"]>[1] = {
+      updated_at_ms: nowMs,
+      ...(resolvedSessionId && resolvedSessionId !== thread.vendor_session_id
+        ? { vendor_session_id: resolvedSessionId }
+        : {}),
+      ...(delta?.title ? { title: delta.title } : {}),
+      ...(delta?.model ? { model: delta.model } : {}),
+    };
+
+    const updated = this.store.updateThread(threadId, patch);
+    if (updated) {
+      this.eventBus.publish({
+        threadId: updated.id,
+        epoch: updated.epoch,
+        tsMs: nowMs,
+        payload: { type: "thread_updated", thread: updated },
+      });
     }
   }
 
