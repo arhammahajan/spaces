@@ -1,0 +1,20 @@
+[package]
+name = "spaces-pty"
+description = "Rust PTY host (__pty-host) with setsid/PGID, 1 MiB replay ring, and unified OSC 7501/7577 scanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+libc.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+spaces-types = { path = "../spaces-types" }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
