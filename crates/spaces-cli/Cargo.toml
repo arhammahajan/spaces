@@ -1,0 +1,24 @@
+[package]
+name = "spaces-cli"
+description = "Rust CLI for Spaces (spawn, attach, handoff, ls, __pty-host)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "spaces"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+clap.workspace = true
+libc.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+spaces-pty = { path = "../spaces-pty" }
+spaces-types = { path = "../spaces-types" }
+tokio.workspace = true
+uuid.workspace = true

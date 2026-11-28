@@ -1,4 +1,7 @@
 /tmux-spaces
+/target
+/crates/spaces-types/bindings
+node_modules
 *.test
 *.out
 .DS_Store

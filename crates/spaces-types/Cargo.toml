@@ -1,0 +1,12 @@
+[package]
+name = "spaces-types"
+description = "Shared Rust domain types and UDS NDJSON-RPC 2.0 wire contracts for Spaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ts-rs.workspace = true

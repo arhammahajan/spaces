@@ -190,6 +190,7 @@ func TestHookDegraded(t *testing.T) {
 func TestHookNormalizedTransport(t *testing.T) {
 	snap := saveSeams()
 	defer snap.restore()
+	t.Setenv("SPACES_DIR", t.TempDir())
 	tty, _ := os.CreateTemp("", "tty-*")
 	tty.Close()
 	defer os.Remove(tty.Name())
@@ -222,7 +223,7 @@ func TestHookNormalizedTransport(t *testing.T) {
 	if got := readFile(t, tty.Name()); got != "\x1b]7501;state=working:app=claude-code\x1b\\" {
 		t.Errorf("osc = %q", got)
 	}
-	// Publish failure -> spool + ensure server.
+	// When spacesd is offline and Publish fails, fail silently without spooling or spawning legacy hook-server.
 	var spooled map[string]any
 	var ensured string
 	Publish = func(map[string]any) bool { return false }
@@ -232,8 +233,8 @@ func TestHookNormalizedTransport(t *testing.T) {
 	if code := SessionHook("claude", "prompt"); code != 0 {
 		t.Fatalf("code = %d", code)
 	}
-	if spooled["session"] != "s1" || spooled["pane"] != "5" || ensured == "" {
-		t.Errorf("spool = %v ensured = %q", spooled, ensured)
+	if spooled != nil || ensured != "" {
+		t.Errorf("expected no legacy spool/spawn when spacesd offline: spool=%v ensured=%q", spooled, ensured)
 	}
 }
 

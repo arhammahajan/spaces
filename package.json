@@ -1,0 +1,15 @@
+{
+  "name": "spaces",
+  "private": true,
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "types:generate": "./scripts/generate-types.sh",
+    "types:check": "./scripts/generate-types.sh --check",
+    "typecheck": "bun --filter '*' typecheck",
+    "test": "bun --filter '*' test",
+    "test:types": "bun --filter @spaces/types test",
+    "test:spacesd": "bun --filter @spaces/spacesd test"
+  }
+}
