@@ -15,6 +15,10 @@ import {
   PROTOCOL_VERSION,
   RPC_METHODS,
   SPACES_CONFIG_DIR_NAME,
+  type BackendConversationsListParams,
+  type BackendConversationsListResult,
+  type BackendConversationsSearchParams,
+  type BackendConversationsSearchResult,
   type BackendExecParams,
   type BackendExecResult,
   type BackendHarnessesListResult,
@@ -110,6 +114,7 @@ import {
   type WorktreeSuggestParams,
 } from "@spaces/types";
 import { BackendService } from "../backend/service";
+import { ConversationService } from "../conversations/service";
 import { ThreadActorRegistry } from "../core/actor";
 import { EventBus, type EventStoreAdapter } from "../core/event-bus";
 import {
@@ -128,8 +133,8 @@ import { CliGitDriver, type LocalGitDriver } from "../git/driver";
 import { HookIngestor } from "../hooks/ingest";
 import { computeStatusBar } from "../hooks/statusbar";
 import { IssueTrackerRegistry } from "../issues/registry";
-import { ClaudePlugin } from "../plugins/claude";
-import { HarnessPluginRegistry } from "../plugins/registry";
+import { createDefaultPluginRegistry } from "../plugins/providers/index";
+import type { HarnessPluginRegistry } from "../plugins/registry";
 import type { DeltaCursor, HeadlessSession } from "../plugins/types";
 import { loadShared } from "../shared/index";
 import { SpacesStore, type VerifiedResumeHintRecord } from "../store/db";
@@ -174,8 +179,10 @@ export interface SpacesDaemonOptions {
   leaseHooks?: LeaseHooks;
   /** Optional swappable multiplexer driver (defaults to `TmuxDriver`). */
   driver?: MultiplexerDriver;
-  /** Optional custom HarnessPluginRegistry (defaults to registry with `ClaudePlugin`). */
+  /** Optional custom HarnessPluginRegistry (defaults to all 33 built-in provider plugins). */
   plugins?: HarnessPluginRegistry;
+  /** Optional custom ConversationService instance. */
+  conversations?: ConversationService;
   /** Optional swappable local git driver (defaults to `CliGitDriver`). */
   gitDriver?: LocalGitDriver;
   /** Optional custom ForgeRegistry (defaults to GitHub + GitLab + Forgejo). */
@@ -293,6 +300,7 @@ export class SpacesDaemon {
   private readonly now: () => number;
   private readonly store: SpacesStore;
   private readonly plugins: HarnessPluginRegistry;
+  private readonly conversations: ConversationService;
   private readonly gitDriver: LocalGitDriver;
   private readonly gitCollector: GitCollector;
   private readonly worktrees: WorktreeManager;
@@ -337,12 +345,16 @@ export class SpacesDaemon {
     }
 
     this.store = new SpacesStore(this.dbPath, { now: this.now });
-    if (options.plugins) {
-      this.plugins = options.plugins;
-    } else {
-      this.plugins = new HarnessPluginRegistry();
-      this.plugins.register(new ClaudePlugin({ spacesDir: this.spacesDir }));
-    }
+    this.plugins =
+      options.plugins ?? createDefaultPluginRegistry({ spacesDir: this.spacesDir });
+    this.conversations =
+      options.conversations ??
+      new ConversationService({
+        registry: this.plugins,
+        store: this.store,
+        spacesDir: this.spacesDir,
+        now: this.now,
+      });
     this.gitDriver = options.gitDriver ?? new CliGitDriver();
     this.forge = options.forge ?? createDefaultForgeRegistry();
     this.issues = options.issues ?? new IssueTrackerRegistry();
@@ -472,6 +484,10 @@ export class SpacesDaemon {
 
   getPlugins(): HarnessPluginRegistry {
     return this.plugins;
+  }
+
+  getConversations(): ConversationService {
+    return this.conversations;
   }
 
   getGitDriver(): LocalGitDriver {
@@ -1321,11 +1337,28 @@ export class SpacesDaemon {
 
       case RPC_METHODS.BACKEND_SHARED_LIST: {
         const p = (params ?? {}) as BackendSharedListParams;
-        const mcpTargets = this.plugins
-          .list()
-          .flatMap((plugin) => plugin.spec.mcpTargets);
-        const snapshot = loadShared({ dir: p.dir, mcpTargets });
+        const snapshot = loadShared({ dir: p.dir, mcpTargets: this.plugins.allMcpTargets() });
         const res: BackendSharedListResult = { snapshot };
+        return res;
+      }
+
+      case RPC_METHODS.BACKEND_CONVERSATIONS_LIST: {
+        const p = (params ?? {}) as BackendConversationsListParams;
+        const snapshot = await this.conversations.list({
+          refresh: Boolean(p.refresh),
+          includeArchived: Boolean(p.include_archived),
+        });
+        const res: BackendConversationsListResult = { snapshot };
+        return res;
+      }
+
+      case RPC_METHODS.BACKEND_CONVERSATIONS_SEARCH: {
+        const p = requireObject<BackendConversationsSearchParams>(
+          params,
+          "backend.conversations.search params required",
+        );
+        const hits = await this.conversations.search(p.request);
+        const res: BackendConversationsSearchResult = { hits };
         return res;
       }
 

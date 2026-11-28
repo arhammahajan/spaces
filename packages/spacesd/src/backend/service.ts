@@ -304,9 +304,124 @@ export class BackendService {
         return { kind: "ack" };
       }
 
+      case "open_conversation": {
+        const conv = verb.conversation;
+        const agent = (conv.agent || conv.app || "").trim();
+        const sessionId = (conv.resume_target || conv.id || "").trim();
+        const profile = (conv.profile || "").trim();
+        const cwd = conv.cwd?.trim() || process.cwd();
+
+        const targetSession = await this.resolveTargetSession(conv.space);
+        const cmd = this.buildResumeLaunchCommand(agent, sessionId, profile, conv.launch_cmd);
+        const label = conv.title?.trim() || profile || agent || "chat";
+
+        await this.driver.newWindow(targetSession, cwd, label, cmd);
+        try {
+          const current = await this.driver.currentSession();
+          if (current && current !== targetSession) {
+            await this.driver.switchToSpace(targetSession);
+          }
+        } catch {
+          // Best-effort switch.
+        }
+
+        if (agent && sessionId) {
+          const nowMs = this.now();
+          this.store.upsertConversationOverlay({
+            agent,
+            session_id: sessionId,
+            space: targetSession,
+            last_opened_ms: nowMs,
+            last_outcome: conv.last_outcome || "",
+            profile,
+            cwd,
+            title: conv.title || "",
+            updated_at_ms: nowMs,
+          });
+        }
+        return { kind: "ack" };
+      }
+
+      case "open_outcome": {
+        const out = verb.outcome;
+        const agent = (out.agent || out.app || "").trim();
+        const sessionId = (out.session_id || "").trim();
+        const profile = (out.profile || "").trim();
+        const cwd = out.cwd?.trim() || process.cwd();
+
+        const targetSession = await this.resolveTargetSession(out.session);
+        const storedCmd =
+          agent && sessionId ? this.store.getConversationLaunchCmd(agent, sessionId) : null;
+        const cmd = this.buildResumeLaunchCommand(
+          agent,
+          sessionId,
+          profile,
+          storedCmd ?? undefined,
+        );
+        const label = out.title?.trim() || profile || agent || "chat";
+
+        await this.driver.newWindow(targetSession, cwd, label, cmd);
+        this.store.removeOutcome({
+          agent: out.agent,
+          app: out.app,
+          session_id: out.session_id,
+          session: out.session,
+          pane: out.pane,
+          ts_ms: out.ts_ms,
+        });
+        try {
+          const current = await this.driver.currentSession();
+          if (current && current !== targetSession) {
+            await this.driver.switchToSpace(targetSession);
+          }
+        } catch {
+          // Best-effort switch.
+        }
+        return { kind: "ack" };
+      }
+
       default:
         throw new Error(`backend verb not yet implemented in spacesd: ${verb.verb}`);
     }
+  }
+
+  private async resolveTargetSession(preferred?: string): Promise<string> {
+    const pref = (preferred ?? "").trim();
+    const sessions = await this.driver.listSessions().catch(() => []);
+    if (pref && sessions.some((s) => s.name === pref)) {
+      return pref;
+    }
+    const current = await this.driver.currentSession().catch(() => "");
+    if (current) {
+      return current;
+    }
+    if (sessions.length > 0) {
+      return sessions[0]!.name;
+    }
+    throw new Error("could not determine target space");
+  }
+
+  private buildResumeLaunchCommand(
+    agent: string,
+    sessionId: string,
+    profile: string,
+    storedLaunchCmd?: string[],
+  ): string[] {
+    if (storedLaunchCmd && storedLaunchCmd.length > 0) {
+      return [...storedLaunchCmd];
+    }
+    const resumeArgs =
+      agent && sessionId && this.resumePolicy?.resumeArgs
+        ? this.resumePolicy.resumeArgs(agent, sessionId)
+        : [];
+    const bin = agentBinaryName(agent, this.resumePolicy);
+    if (profile) {
+      return [this.selfPath, "__shim", "--profile", profile, agent, ...resumeArgs];
+    }
+    if (resumeArgs.length > 0) {
+      return [this.selfPath, "__shim", agent, bin, ...resumeArgs];
+    }
+    return [this.selfPath, "__shim", agent, bin];
   }
 
   /**
