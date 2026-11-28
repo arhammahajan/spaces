@@ -45,17 +45,20 @@ func hookClientWithPayload(agentName, event string, payload map[string]any, tran
 		// Outside tmux/Zellij there is no pane to attribute the event to.
 		return 0
 	}
-	if HookDisabled == nil || HookDisabled() {
-		EmitAgentEvent(agent, event)
-		return 0
-	}
-	if NormalizeEvent == nil {
+	if HookDisabled != nil && HookDisabled() {
 		EmitAgentEvent(agent, event)
 		return 0
 	}
 	envMap := environMap()
 	if paneRef != "" && paneRef != os.Getenv("TMUX_PANE") {
 		delete(envMap, "HARNESS_PROFILE")
+	}
+	if NormalizeEvent == nil {
+		EmitAgentEvent(agent, event)
+		if transport {
+			_ = EmitHookToDaemon(buildHookEmitParams(agent, event, session, pane, paneRef, payload, nil, envMap))
+		}
+		return 0
 	}
 	normalized := NormalizeEvent(agent, event, payload, envMap)
 	if normalized == nil {
@@ -87,26 +90,14 @@ func hookClientWithPayload(agentName, event string, payload map[string]any, tran
 		EmitHookStatusToPane(paneRef, normalized)
 	}
 	if transport {
-		envelope := map[string]any{
-			"session": session, "pane": pane,
-			"agent": agent, "event": event,
-			"payload": payload, "normalized": normalized,
-		}
-		published := false
-		if Publish != nil {
-			published = Publish(envelope)
-		}
-		if !published {
-			if AppendSpool != nil {
-				entry := map[string]any{"session": session, "pane": pane}
-				for k, v := range normalized {
-					entry[k] = v
-				}
-				_ = AppendSpool(entry)
+		published := EmitHookToDaemon(buildHookEmitParams(agent, event, session, pane, paneRef, payload, normalized, envMap))
+		if !published && Publish != nil {
+			envelope := map[string]any{
+				"session": session, "pane": pane,
+				"agent": agent, "event": event,
+				"payload": payload, "normalized": normalized,
 			}
-			if EnsureServer != nil {
-				_ = EnsureServer(helperPath())
-			}
+			_ = Publish(envelope)
 		}
 	}
 	return 0

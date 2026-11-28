@@ -2,6 +2,7 @@ pub mod attach;
 pub mod handoff;
 pub mod ls;
 pub mod spawn;
+pub mod status_bar;
 
 use spaces_types::{LeaseOwner, LeaseOwnerKind, LeaseState};
 

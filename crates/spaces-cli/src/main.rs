@@ -14,6 +14,7 @@ use crate::commands::attach::AttachArgs;
 use crate::commands::handoff::HandoffArgs;
 use crate::commands::ls::LsArgs;
 use crate::commands::spawn::SpawnArgs;
+use crate::commands::status_bar::StatusBarArgs;
 use crate::endpoint::{load_endpoint, resolve_spaces_dir};
 use crate::rpc::RpcClient;
 
@@ -46,6 +47,9 @@ pub enum Command {
     Ping,
     /// Show spacesd daemon status and counters
     Status,
+    /// Print a compact status-bar badge segment for tmux
+    #[command(name = "status-bar")]
+    StatusBar(StatusBarArgs),
     /// Internal PTY host process spawned by spacesd
     #[command(name = "__pty-host", hide = true)]
     PtyHost,
@@ -73,6 +77,7 @@ async fn run_cli(cli: Cli) -> Result<()> {
         Command::Ls(args) => commands::ls::run(client, args, cli.json).await,
         Command::Ping => run_ping(client, cli.json).await,
         Command::Status => run_status(client, cli.json).await,
+        Command::StatusBar(args) => commands::status_bar::run(client, args, cli.json).await,
         Command::PtyHost => unreachable!("handled above"),
     }
 }
@@ -233,5 +238,35 @@ mod tests {
             .expect("parse __pty-host");
         assert_eq!(host.spaces_dir, Some(PathBuf::from("/var/sp")));
         assert!(matches!(host.command, Command::PtyHost));
+    }
+
+    #[test]
+    fn parses_status_bar_subcommand() {
+        let default_sb = Cli::try_parse_from(["spaces", "status-bar"]).expect("parse status-bar");
+        assert!(!default_sb.json);
+        assert!(matches!(
+            default_sb.command,
+            Command::StatusBar(StatusBarArgs {
+                plain: false,
+                skip_autosave: false
+            })
+        ));
+
+        let flags_sb = Cli::try_parse_from([
+            "spaces",
+            "status-bar",
+            "--plain",
+            "--json",
+            "--skip-autosave",
+        ])
+        .expect("parse status-bar flags");
+        assert!(flags_sb.json);
+        assert!(matches!(
+            flags_sb.command,
+            Command::StatusBar(StatusBarArgs {
+                plain: true,
+                skip_autosave: true
+            })
+        ));
     }
 }
