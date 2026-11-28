@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { SPACES_CONFIG_DIR_NAME, type TurnUsage } from "@spaces/types";
 import { ClaudeHeadlessExecutor } from "../executors/claude";
 import type { VendorSessionLookup } from "../resurrect/capture";
+import { parseJsonOrJsonlLog } from "./helpers/json-store";
 import {
   defaultSpacesDir,
   loadProfileConfig,
@@ -19,6 +20,8 @@ import {
 } from "./profiles";
 import type {
   AccessLevel,
+  ConversationListOptions,
+  ConversationRecord,
   DeltaCursor,
   DeltaReadResult,
   HarnessPlugin,
@@ -29,6 +32,7 @@ import type {
   InteractiveLaunchRequest,
   InteractiveLaunchSpec,
   ParsedDiskTurn,
+  ParsedLogMessage,
   StopAndFlushOptions,
 } from "./types";
 
@@ -1147,5 +1151,81 @@ export class ClaudePlugin implements HarnessPlugin {
     }
 
     return exactPath || cursorSessionPath || "";
+  }
+
+  storePaths(homeDir: string): string[] {
+    return [path.join(homeDir, ".claude", "projects")];
+  }
+
+  listConversations(opts: ConversationListOptions): ConversationRecord[] {
+    const projectsRoot = path.join(opts.homeDir, ".claude", "projects");
+    if (!isDirectory(projectsRoot)) {
+      return [];
+    }
+    const records: ConversationRecord[] = [];
+    for (const projEntry of readdirSync(projectsRoot, { withFileTypes: true })) {
+      if (projEntry.name.startsWith(".")) continue;
+      const projDir = path.join(projectsRoot, projEntry.name);
+      if (!isDirectory(projDir)) continue;
+      let files;
+      try {
+        files = readdirSync(projDir, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const f of files) {
+        if (!f.isFile() || !f.name.endsWith(".jsonl") || f.name.startsWith("agent-")) continue;
+        const fullPath = path.join(projDir, f.name);
+        let st;
+        try {
+          st = statSync(fullPath);
+        } catch {
+          continue;
+        }
+        const id = f.name.slice(0, -".jsonl".length);
+        const delta = this.readDelta(id, "", { sessionPath: fullPath, byteOffset: 0 });
+        const firstUser = delta.turns.find((t) => t.role === "user")?.text;
+        const lastTurn = delta.turns.length > 0 ? delta.turns[delta.turns.length - 1]!.text : undefined;
+        let cwd: string | undefined;
+        try {
+          const head = readFileSync(fullPath, "utf8").slice(0, 8192);
+          for (const line of head.split("\n")) {
+            if (!line.trim()) continue;
+            try {
+              const obj = JSON.parse(line) as Record<string, unknown>;
+              if (typeof obj.cwd === "string" && obj.cwd.trim()) {
+                cwd = obj.cwd.trim();
+                break;
+              }
+            } catch {
+              // ignore
+            }
+          }
+        } catch {
+          // ignore
+        }
+        records.push({
+          id,
+          agent: this.spec.id,
+          app: this.spec.cliDisplayApp,
+          ...(opts.profile ? { profile: opts.profile } : {}),
+          ...(cwd ? { cwd } : {}),
+          ...(delta.title ? { title: delta.title } : {}),
+          ...(firstUser ? { firstMessage: firstUser } : {}),
+          ...(lastTurn ? { lastMessage: lastTurn } : {}),
+          ...(delta.model ? { model: delta.model } : {}),
+          sourcePath: fullPath,
+          resumeTarget: id,
+          createdAtMs: Math.trunc(st.birthtimeMs || st.mtimeMs),
+          updatedAtMs: Math.trunc(st.mtimeMs),
+          messageCount: delta.turns.length,
+        });
+      }
+    }
+    return records;
+  }
+
+  parseLog(sourcePath: string): ParsedLogMessage[] {
+    return parseJsonOrJsonlLog(sourcePath);
   }
 }

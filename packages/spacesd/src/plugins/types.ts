@@ -123,6 +123,51 @@ export interface StopAndFlushOptions {
   stopInteractive?: () => Promise<void> | void;
 }
 
+export interface ConversationListOptions {
+  homeDir: string;
+  profile?: string;
+  includeArchived?: boolean;
+}
+
+export interface ConversationRecord {
+  id: string;
+  agent: string;
+  app?: string;
+  profile?: string;
+  cwd?: string;
+  title?: string;
+  firstMessage?: string;
+  lastMessage?: string;
+  model?: string;
+  sourcePath: string;
+  resumeTarget?: string;
+  createdAtMs: number;
+  updatedAtMs: number;
+  messageCount: number;
+  archived?: boolean;
+}
+
+export interface ParsedLogMessage {
+  role: "user" | "assistant" | "system" | "tool";
+  text: string;
+  timestampMs?: number;
+  model?: string;
+}
+
+export class HeadlessUnsupportedError extends Error {
+  readonly agent: string;
+
+  constructor(agent: string, detail?: string) {
+    super(
+      detail
+        ? `Headless execution is not supported for agent "${agent}": ${detail}`
+        : `Headless execution is not supported for agent "${agent}"`,
+    );
+    this.name = "HeadlessUnsupportedError";
+    this.agent = agent;
+  }
+}
+
 export interface HarnessPluginSpec {
   id: string;
   aliases: string[];
@@ -135,14 +180,15 @@ export interface HarnessPluginSpec {
   resumeSubcommand?: string;
   positionalResume: boolean;
   uniqueExplicitSessions: boolean;
+  worktreeOnly?: boolean;
   titlePrefixes: string[];
   mcpTargets: string[];
 }
 
 /**
- * Unified TypeScript HarnessPlugin contract merging `internal/agent` and
- * `internal/harness` plus the agent-specific resume/discovery seams removed
- * from shared `resurrect/`.
+ * Overarching TypeScript HarnessPlugin contract. Every provider implements
+ * this single interface and normalizes its launch, resume, discovery,
+ * conversation-store, and headless-execution quirks to these types.
  */
 export interface HarnessPlugin {
   readonly spec: HarnessPluginSpec;
@@ -150,6 +196,12 @@ export interface HarnessPlugin {
   resumeArgs(sessionId: string): string[];
   discoverLiveSessionId?(pid: number): string;
   resolveVendorSession?: VendorSessionLookup;
+
+  storePaths?(homeDir: string): string[];
+  listConversations?(
+    opts: ConversationListOptions,
+  ): Promise<ConversationRecord[]> | ConversationRecord[];
+  parseLog?(sourcePath: string): Promise<ParsedLogMessage[]> | ParsedLogMessage[];
 
   buildInteractiveLaunch(req: InteractiveLaunchRequest): InteractiveLaunchSpec;
   startHeadless(req: HeadlessStartRequest): HeadlessSession;

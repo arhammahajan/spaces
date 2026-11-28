@@ -85,6 +85,31 @@ export class HarnessPluginRegistry {
   }
 
   /**
+   * Returns all non-worktree-only runtime plugins in registration order.
+   */
+  runtimePlugins(): HarnessPlugin[] {
+    return this.ordered.filter((p) => !p.spec.worktreeOnly);
+  }
+
+  /**
+   * Returns the deduplicated union of all registered plugins' MCP config targets.
+   */
+  allMcpTargets(): string[] {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const plugin of this.ordered) {
+      for (const target of plugin.spec.mcpTargets) {
+        const trimmed = target.trim();
+        if (trimmed && !seen.has(trimmed)) {
+          seen.add(trimmed);
+          out.push(trimmed);
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
    * Bridges every registered plugin into `resurrect`'s agent-agnostic
    * `HarnessResumePolicy` seam.
    */
