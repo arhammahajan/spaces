@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import { dirname, resolve, sep } from "node:path";
 
-export const SCHEMA_VERSION = "v1" as const;
+export const SCHEMA_VERSION = "v2" as const;
 
 interface Migration {
   readonly version: string;
@@ -244,10 +244,35 @@ const V1_STATEMENTS: readonly string[] = [
   );`,
 ];
 
+const V2_STATEMENTS: readonly string[] = [
+  // 16. Managed git worktree records (replaces legacy worktrees.json + flock)
+  `CREATE TABLE IF NOT EXISTS worktrees (
+    path TEXT PRIMARY KEY,
+    repo_key TEXT NOT NULL,
+    main_repo_root TEXT NOT NULL,
+    repo_name TEXT NOT NULL,
+    name TEXT NOT NULL,
+    branch TEXT NOT NULL,
+    base_branch TEXT,
+    managed INTEGER NOT NULL DEFAULT 1,
+    name_source TEXT,
+    created_at_ms INTEGER NOT NULL,
+    last_used_at_ms INTEGER,
+    origin_space TEXT,
+    origin_window_id TEXT,
+    origin_pane_id TEXT
+  );`,
+  `CREATE INDEX IF NOT EXISTS idx_worktrees_repo_key ON worktrees(repo_key, created_at_ms DESC);`,
+];
+
 const MIGRATIONS: readonly Migration[] = [
   {
-    version: SCHEMA_VERSION,
+    version: "v1",
     statements: V1_STATEMENTS,
+  },
+  {
+    version: "v2",
+    statements: V2_STATEMENTS,
   },
 ];
 

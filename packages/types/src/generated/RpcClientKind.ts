@@ -3,4 +3,4 @@
 /**
  * Role of a client connecting over UDS to `spacesd`.
  */
-export type RpcClientKind = "cli" | "pty_host" | "tmux_frontend" | "mcp_bridge" | "browser_companion" | "tui";
+export type RpcClientKind = "cli" | "pty_host" | "tmux_frontend" | "mcp_bridge" | "browser_companion" | "tui" | "hook_client";

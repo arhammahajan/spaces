@@ -266,6 +266,7 @@ pub enum RpcClientKind {
     McpBridge,
     BrowserCompanion,
     Tui,
+    HookClient,
 }
 
 /// Params for `rpc.auth` client handshake.

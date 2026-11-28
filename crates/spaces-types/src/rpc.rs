@@ -49,6 +49,27 @@ pub mod rpc_methods {
     pub const BACKEND_CONVERSATIONS_SEARCH: &str = "backend.conversations.search";
     pub const BACKEND_SHARED_LIST: &str = "backend.shared.list";
     pub const BACKEND_WORKTREES_LIST: &str = "backend.worktrees.list";
+    pub const BACKEND_STATUS_BAR_GET: &str = "backend.status_bar.get";
+
+    pub const WORKTREE_LIST: &str = "worktree.list";
+    pub const WORKTREE_CONTEXT: &str = "worktree.context";
+    pub const WORKTREE_SUGGEST_NAME: &str = "worktree.suggest_name";
+    pub const WORKTREE_CREATE: &str = "worktree.create";
+    pub const WORKTREE_INSPECT_SAFETY: &str = "worktree.inspect_safety";
+    pub const WORKTREE_REMOVE: &str = "worktree.remove";
+    pub const WORKTREE_PRUNE: &str = "worktree.prune";
+    pub const WORKTREE_RESOLVE: &str = "worktree.resolve";
+
+    pub const GIT_STATUS: &str = "git.status";
+    pub const GIT_DIFF: &str = "git.diff";
+    pub const GIT_BRANCHES: &str = "git.branches";
+
+    pub const FORGE_STATUS: &str = "forge.status";
+    pub const FORGE_PR_LIST: &str = "forge.pr_list";
+
+    pub const HOOK_EMIT: &str = "hook.emit";
+    pub const HOOK_RECORD_OUTCOME: &str = "hook.record_outcome";
+    pub const HOOK_REMOVE_OUTCOME: &str = "hook.remove_outcome";
 
     pub const PTY_SPAWN: &str = "pty.spawn";
     pub const PTY_ATTACH: &str = "pty.attach";

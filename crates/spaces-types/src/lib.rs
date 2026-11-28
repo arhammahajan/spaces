@@ -1,6 +1,7 @@
 pub mod backend;
 pub mod conversations;
 pub mod event;
+pub mod git;
 pub mod ids;
 pub mod lease;
 pub mod mailbox;
@@ -21,6 +22,7 @@ pub const SPACES_CONFIG_DIR_NAME: &str = ".spaces";
 pub use backend::*;
 pub use conversations::*;
 pub use event::*;
+pub use git::*;
 pub use ids::*;
 pub use lease::*;
 pub use mailbox::*;

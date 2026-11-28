@@ -90,6 +90,15 @@ pub enum EventPayload {
     OutcomeRecorded {
         outcome: OutcomeEntry,
     },
+    HookPaneUpdated {
+        session: String,
+        pane: String,
+        agent: String,
+        state: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        kind: Option<String>,
+    },
     /// Sent when a client's `after_seq` cursor falls behind the bounded replay buffer
     /// or references an older `boot_id`, signaling the client to reload full state.
     GapReloadRequired {

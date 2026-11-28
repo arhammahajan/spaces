@@ -83,7 +83,7 @@ describe("schema & openSpacesDatabase", () => {
       const migrations = db
         .query<{ version: string }, []>("SELECT version FROM schema_migrations")
         .all();
-      expect(migrations.map((m) => m.version)).toEqual([SCHEMA_VERSION]);
+      expect(migrations.map((m) => m.version)).toEqual(["v1", SCHEMA_VERSION]);
 
       const tables = db
         .query<{ name: string }, []>(
@@ -109,6 +109,7 @@ describe("schema & openSpacesDatabase", () => {
         "resurrect_open_state",
         "pane_hmac_tokens",
         "verified_resume_hints",
+        "worktrees",
       ]) {
         expect(tables).toContain(expectedTable);
       }
@@ -128,7 +129,7 @@ describe("schema & openSpacesDatabase", () => {
     const migrations = store.db
       .query<{ version: string }, []>("SELECT version FROM schema_migrations")
       .all();
-    expect(migrations).toHaveLength(1);
+    expect(migrations).toHaveLength(2);
     store.close(true);
   });
 

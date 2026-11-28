@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import type {
   BootId,
@@ -40,6 +41,7 @@ import type {
   TurnOrigin,
   TurnState,
   TurnUsage,
+  WorktreeRecord,
 } from "@spaces/types";
 import { openSpacesDatabase } from "./schema";
 
@@ -2610,4 +2612,124 @@ export class SpacesStore {
       .get(paneId);
     return row ? rowToVerifiedHint(row) : null;
   }
+
+  upsertWorktree(rec: WorktreeRecord): WorktreeRecord {
+    this.execSql(
+      `INSERT INTO worktrees (
+        path, repo_key, main_repo_root, repo_name, name, branch, base_branch,
+        managed, name_source, created_at_ms, last_used_at_ms,
+        origin_space, origin_window_id, origin_pane_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(path) DO UPDATE SET
+        repo_key = excluded.repo_key,
+        main_repo_root = excluded.main_repo_root,
+        repo_name = excluded.repo_name,
+        name = excluded.name,
+        branch = excluded.branch,
+        base_branch = excluded.base_branch,
+        managed = excluded.managed,
+        name_source = excluded.name_source,
+        created_at_ms = excluded.created_at_ms,
+        last_used_at_ms = excluded.last_used_at_ms,
+        origin_space = excluded.origin_space,
+        origin_window_id = excluded.origin_window_id,
+        origin_pane_id = excluded.origin_pane_id`,
+      rec.path,
+      rec.repo_key,
+      rec.main_repo_root,
+      rec.repo_name,
+      rec.name,
+      rec.branch,
+      rec.base_branch ?? null,
+      rec.managed ? 1 : 0,
+      rec.name_source ?? null,
+      rec.created_at_ms,
+      rec.last_used_at_ms ?? null,
+      rec.origin_space ?? null,
+      rec.origin_window_id ?? null,
+      rec.origin_pane_id ?? null,
+    );
+    return this.getWorktreeByPath(rec.path)!;
+  }
+
+  getWorktreeByPath(wtPath: string): WorktreeRecord | null {
+    const row = this.db
+      .query<WorktreeRow, [string]>("SELECT * FROM worktrees WHERE path = ?")
+      .get(wtPath);
+    return row ? rowToWorktree(row) : null;
+  }
+
+  deleteWorktreeByPath(wtPath: string): boolean {
+    const res = this.execSql("DELETE FROM worktrees WHERE path = ?", wtPath);
+    return res.changes > 0;
+  }
+
+  listWorktrees(): WorktreeRecord[] {
+    const rows = this.db
+      .query<WorktreeRow, []>(
+        "SELECT * FROM worktrees ORDER BY created_at_ms DESC, path ASC",
+      )
+      .all();
+    return rows.map(rowToWorktree);
+  }
+
+  listWorktreesByRepo(repoKey: string): WorktreeRecord[] {
+    const rows = this.db
+      .query<WorktreeRow, [string]>(
+        "SELECT * FROM worktrees WHERE repo_key = ? ORDER BY created_at_ms DESC, path ASC",
+      )
+      .all(repoKey);
+    return rows.map(rowToWorktree);
+  }
+
+  pruneMissingWorktrees(): string[] {
+    return this.transaction(() => {
+      const all = this.listWorktrees();
+      const removed: string[] = [];
+      for (const rec of all) {
+        if (!existsSync(rec.path)) {
+          this.execSql("DELETE FROM worktrees WHERE path = ?", rec.path);
+          removed.push(rec.path);
+        }
+      }
+      return removed;
+    });
+  }
+}
+
+interface WorktreeRow {
+  path: string;
+  repo_key: string;
+  main_repo_root: string;
+  repo_name: string;
+  name: string;
+  branch: string;
+  base_branch: string | null;
+  managed: number;
+  name_source: string | null;
+  created_at_ms: number;
+  last_used_at_ms: number | null;
+  origin_space: string | null;
+  origin_window_id: string | null;
+  origin_pane_id: string | null;
+}
+
+function rowToWorktree(row: WorktreeRow): WorktreeRecord {
+  const out: WorktreeRecord = {
+    path: row.path,
+    repo_key: row.repo_key,
+    main_repo_root: row.main_repo_root,
+    repo_name: row.repo_name,
+    name: row.name,
+    branch: row.branch,
+    managed: row.managed !== 0,
+    created_at_ms: row.created_at_ms,
+  };
+  assignOptional(out, "base_branch", row.base_branch);
+  assignOptional(out, "name_source", row.name_source);
+  assignOptional(out, "last_used_at_ms", row.last_used_at_ms);
+  assignOptional(out, "origin_space", row.origin_space);
+  assignOptional(out, "origin_window_id", row.origin_window_id);
+  assignOptional(out, "origin_pane_id", row.origin_pane_id);
+  return out;
 }
