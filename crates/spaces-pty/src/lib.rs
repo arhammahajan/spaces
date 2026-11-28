@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+pub mod host;
+pub mod osc;
+pub mod pty;
+pub mod ring;
+pub mod session;
 
-/// Entry point for `spaces __pty-host`.
-pub async fn run_host(_spaces_dir: Option<PathBuf>) -> anyhow::Result<()> {
-    Ok(())
-}
+pub use host::run_host;
